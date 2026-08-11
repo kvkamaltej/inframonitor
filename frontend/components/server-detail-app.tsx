@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, Boxes, Check, Coffee, Copy, Database, FileText, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MoreVertical, RefreshCw, ServerCog, Trash2, Upload, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, Clock, Coffee, Copy, Cpu, Database, FileText, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, RefreshCw, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import {
   ContainerInfo,
   deleteServer,
   discoverServer,
+  refreshVitals,
   getContainerLogs,
   getContainers,
   getMe,
@@ -179,6 +180,19 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     }
     setLogsCopied(true);
     window.setTimeout(() => setLogsCopied(false), 2000);
+  }
+
+  async function refreshServerVitals() {
+    setBusy("vitals");
+    try {
+      const updated = await refreshVitals(token, serverId);
+      setServer(updated);
+      notify("Vitals refreshed.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to refresh vitals", "error");
+    } finally {
+      setBusy("");
+    }
   }
 
   async function runDiscovery() {
@@ -513,13 +527,73 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
           </div>
 
           {tab === "overview" ? (
-            <div className="grid gap-4 md:grid-cols-2">
-              <Info title="Distribution" value={osFlavour(server)} />
-              <Info title="Package Manager" value={packageManagerLabel(server)} />
-              <Info title="OS" value={server?.operating_system || "Unknown"} />
-              <Info title="Kernel" value={server?.kernel || "Unknown"} />
-              <Info title="Docker" value={server?.docker_version || "Not detected"} />
-              <Info title="Podman" value={server?.podman_version || "Not detected"} />
+            <div className="space-y-6">
+              {/* Live vitals, refreshable in place. cpu_percent === -1 and ram_used === 0 mean
+                  "never sampled", rendered as "—" rather than a misleading 0. */}
+              <div>
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                    <LayoutGrid size={16} className="text-accent" /> System vitals
+                    <span className="text-xs font-medium text-slate-400 dark:text-slate-500">
+                      {server?.vitals_checked_at ? `as of ${agoText(server.vitals_checked_at)}` : "not sampled yet"}
+                    </span>
+                  </div>
+                  <button
+                    disabled={loading || !server?.has_credentials}
+                    onClick={() => void refreshServerVitals()}
+                    title={server?.has_credentials ? "Re-probe this host over SSH" : "No stored credentials"}
+                    className="inline-flex h-9 items-center gap-2 rounded-full bg-accent/10 px-4 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:hover:bg-accent/30"
+                  >
+                    {busy === "vitals" ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />} Refresh vitals
+                  </button>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  <Info
+                    icon={<Activity size={16} />}
+                    title="Health"
+                    value={server ? (server.status === "unknown" ? "Not measured" : `${server.health_score}/100`) : "-"}
+                    hint={server ? server.status : ""}
+                    tone={server ? usageTone(server.status === "unknown" ? -1 : 100 - server.health_score) : ""}
+                  />
+                  <Info
+                    icon={<Cpu size={16} />}
+                    title="CPU"
+                    value={(server?.cpu_percent ?? -1) < 0 ? "—" : `${server?.cpu_percent}%`}
+                    hint={server?.cpu ? `${server.cpu} cores` : ""}
+                    tone={usageTone(server?.cpu_percent ?? -1)}
+                  />
+                  <Info
+                    icon={<MemoryStick size={16} />}
+                    title="Memory"
+                    value={server?.ram_used_mb ? `${gbText(server.ram_used_mb)} / ${gbText(server.ram_mb)}` : gbText(server?.ram_mb ?? 0)}
+                    hint={server && server.ram_mb > 0 && server.ram_used_mb > 0 ? `${Math.round((server.ram_used_mb / server.ram_mb) * 100)}% used` : "total installed"}
+                    tone={usageTone(server && server.ram_mb > 0 && server.ram_used_mb > 0 ? Math.round((server.ram_used_mb / server.ram_mb) * 100) : -1)}
+                  />
+                  <Info icon={<Gauge size={16} />} title="Load average" value={server?.load_average || "—"} hint="1 / 5 / 15 min" />
+                  <Info icon={<Clock size={16} />} title="Uptime" value={uptimeText(server?.uptime_seconds ?? 0)} />
+                  <Info icon={<ListChecks size={16} />} title="Processes" value={server?.process_count ? String(server.process_count) : "—"} />
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                  <InfoIcon size={16} className="text-accent" /> System information
+                  <span className="text-xs font-medium text-slate-400 dark:text-slate-500">
+                    {server?.last_discovery ? `discovered ${agoText(server.last_discovery)}` : "not discovered yet"}
+                  </span>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  <Info icon={<MonitorCog size={16} />} title="Distribution" value={osFlavour(server)} />
+                  <Info icon={<MonitorCog size={16} />} title="OS" value={server?.operating_system || "Unknown"} />
+                  <Info icon={<Terminal size={16} />} title="Kernel" value={server?.kernel || "Unknown"} />
+                  <Info icon={<Cpu size={16} />} title="Architecture" value={server?.architecture || "Unknown"} />
+                  <Info icon={<Package size={16} />} title="Package Manager" value={packageManagerLabel(server)} />
+                  <Info icon={<HardDrive size={16} />} title="Root disk" value={server?.disk_gb ? `${server.disk_gb} GB` : "Unknown"} />
+                  <Info icon={<Boxes size={16} />} title="Docker" value={server?.docker_version || "Not detected"} />
+                  <Info icon={<Boxes size={16} />} title="Podman" value={server?.podman_version || "Not detected"} />
+                  <Info icon={<Network size={16} />} title="Environment" value={server?.environment || "-"} />
+                </div>
+              </div>
             </div>
           ) : null}
 
@@ -905,8 +979,52 @@ function WebappTable({ rows }: { rows: TomcatWebapp[] }) {
   );
 }
 
-function Info({ title, value }: { title: string; value: string }) {
-  return <div className="border border-line bg-panel p-4 dark:border-slate-700 dark:bg-slate-900"><div className="text-xs uppercase text-slate-500">{title}</div><div className="mt-2 break-words font-medium">{value}</div></div>;
+function Info({ title, value, hint, tone, icon }: { title: string; value: string; hint?: string; tone?: string; icon?: React.ReactNode }) {
+  return (
+    <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200 transition-shadow hover:shadow-md dark:bg-slate-900 dark:ring-slate-800">
+      <div className="flex items-start justify-between gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">{title}</span>
+        {icon ? <span className="shrink-0 text-slate-300 dark:text-slate-600">{icon}</span> : null}
+      </div>
+      <div className={`mt-2 break-words text-lg font-semibold ${tone || "text-slate-900 dark:text-white"}`}>{value}</div>
+      {hint ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{hint}</div> : null}
+    </div>
+  );
+}
+
+// --- overview formatting -------------------------------------------------------------------
+function uptimeText(seconds: number): string {
+  if (!seconds || seconds < 0) return "Unknown";
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+function gbText(mb: number): string {
+  if (!mb) return "-";
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
+}
+
+// -1 = never sampled, which must never read as a healthy 0%.
+function usageTone(percent: number): string {
+  if (percent < 0) return "text-slate-400 dark:text-slate-500";
+  if (percent >= 90) return "text-danger dark:text-red-400";
+  if (percent >= 75) return "text-warn dark:text-amber-400";
+  return "";
+}
+
+function agoText(iso: string | null): string {
+  if (!iso) return "never";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "unknown";
+  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (secs < 60) return "just now";
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
 }
 
 // Modal for entering/replacing the stored SSH credentials. Self-contained local state, and
