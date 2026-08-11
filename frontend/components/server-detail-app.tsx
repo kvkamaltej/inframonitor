@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowLeft, Boxes, Check, Coffee, Copy, Database, FileText, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Lock, MoreVertical, RefreshCw, ServerCog, Trash2, Upload, X } from "lucide-react";
-import { Fragment, FormEvent, useEffect, useState } from "react";
+import { AlertTriangle, ArrowLeft, Boxes, Check, Coffee, Copy, Database, FileText, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MoreVertical, RefreshCw, ServerCog, Trash2, Upload, X } from "lucide-react";
+import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import {
   ContainerInfo,
   deleteServer,
@@ -27,6 +27,7 @@ import {
   TomcatWebapp
 } from "@/lib/api";
 import { DefaultPasswordBanner } from "@/components/app-shell";
+import { useConfirm } from "@/components/confirm-dialog";
 import { LoginPanel } from "@/components/login-panel";
 import { StatusPill } from "@/components/status-pill";
 import { StorageChart } from "@/components/storage-chart";
@@ -56,7 +57,11 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   const [logs, setLogs] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [tone, setTone] = useState<Tone>("info");
-  const [loading, setLoading] = useState(false);
+  // Which action is in flight ("" = idle). `loading` stays derived so every existing
+  // `disabled={loading}` still serialises SSH ops, while a spinner can show on the one
+  // button the operator actually clicked.
+  const [busy, setBusy] = useState("");
+  const loading = busy !== "";
   const [initializing, setInitializing] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [logsCopied, setLogsCopied] = useState(false);
@@ -65,6 +70,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   const [actionsOpen, setActionsOpen] = useState(false);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
 
+  const { confirm, confirmDialog } = useConfirm();
   const isAdmin = me?.role === "admin";
   const canRestartContainer = me?.role === "admin" || me?.role === "developer";
   const tomcatRows = tomcat ?? server?.tomcat ?? [];
@@ -97,10 +103,27 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     }
   }, [tab, containersAutoLoaded, server?.has_credentials]);
 
+  // Toast auto-dismiss. Info messages fade on their own after a few seconds so a routine
+  // "restart requested" does not sit on screen forever; errors stay until the next action or
+  // a manual close, because an operator must not miss a failure that scrolled away.
+  const toastTimer = useRef<number | null>(null);
   function notify(text: string, nextTone: Tone = "info") {
+    if (toastTimer.current !== null) {
+      window.clearTimeout(toastTimer.current);
+      toastTimer.current = null;
+    }
     setMessage(text);
     setTone(nextTone);
+    if (text && nextTone === "info") {
+      toastTimer.current = window.setTimeout(() => {
+        setMessage("");
+        toastTimer.current = null;
+      }, 4000);
+    }
   }
+  useEffect(() => () => {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
+  }, []);
 
   function report(result: { ok: boolean; message: string }, fallback: string) {
     notify(result.message || fallback, result.ok ? "info" : "error");
@@ -159,7 +182,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   }
 
   async function runDiscovery() {
-    setLoading(true);
+    setBusy("discovery");
     try {
       const result = await discoverServer(token, serverId, credentials);
       report(result, "Discovery finished");
@@ -168,12 +191,12 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : "Discovery failed", "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
   async function loadContainers() {
-    setLoading(true);
+    setBusy("busy");
     notify("");
     try {
       const next = await getContainers(token, serverId, effectiveRuntime, { tail });
@@ -183,13 +206,13 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load containers", "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
   async function loadContainerLogs(containerName = selected) {
     if (!containerName) return;
-    setLoading(true);
+    setBusy("busy");
     try {
       setSelected(containerName);
       setLogs(await getContainerLogs(token, serverId, effectiveRuntime, containerName, { tail }));
@@ -197,17 +220,20 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load logs", "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
   async function restartSelectedContainer(containerName: string) {
     // A restart drops every connection the container is serving, so confirm first — naming the
     // container and host so a mis-click on the wrong row is obvious before it happens.
-    if (!window.confirm(`Restart the ${effectiveRuntime} container "${containerName}" on ${server?.hostname ?? "this server"}?\n\nThis stops and starts it, dropping any active connections.`)) {
-      return;
-    }
-    setLoading(true);
+    if (!(await confirm({
+      title: `Restart container "${containerName}"?`,
+      message: `On ${server?.hostname ?? "this server"} (${effectiveRuntime}). This stops and starts it, dropping any active connections.`,
+      confirmLabel: "Restart",
+      danger: true
+    }))) return;
+    setBusy(`container:${containerName}`);
     try {
       const result = await restartContainer(token, serverId, { runtime: effectiveRuntime, name: containerName });
       report(result, `Restart requested for ${containerName}`);
@@ -215,17 +241,20 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to restart container", "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
   async function restartSelectedService(name: string, password = "") {
     // Confirm only on the first click; the sudo-password retry passes a password and must not
     // ask again.
-    if (!password && !window.confirm(`Restart the systemd service "${name}" on ${server?.hostname ?? "this server"}?`)) {
-      return;
-    }
-    setLoading(true);
+    if (!password && !(await confirm({
+      title: `Restart service "${name}"?`,
+      message: `On ${server?.hostname ?? "this server"}.`,
+      confirmLabel: "Restart",
+      danger: true
+    }))) return;
+    setBusy(`service:${name}`);
     try {
       const result = await restartService(token, serverId, name, password);
       if (result.needs_sudo_password) {
@@ -239,12 +268,12 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to restart service", "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
   async function loadTomcat(quiet = false) {
-    setLoading(true);
+    setBusy("busy");
     if (!quiet) notify("");
     try {
       const next = await getTomcatInstances(token, serverId, credentials);
@@ -255,17 +284,20 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load Tomcat instances", "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
   async function runTomcatAction(instance: string, action: string, password = "") {
     // Confirm the disruptive actions on first click only (start is harmless; the sudo retry
     // passes a password and skips this).
-    if (!password && (action === "restart" || action === "stop") && !window.confirm(`${action === "stop" ? "Stop" : "Restart"} Tomcat instance "${instance}" on ${server?.hostname ?? "this server"}?`)) {
-      return;
-    }
-    setLoading(true);
+    if (!password && (action === "restart" || action === "stop") && !(await confirm({
+      title: `${action === "stop" ? "Stop" : "Restart"} Tomcat "${instance}"?`,
+      message: `On ${server?.hostname ?? "this server"}.`,
+      confirmLabel: action === "stop" ? "Stop" : "Restart",
+      danger: true
+    }))) return;
+    setBusy(`tomcat:${instance}:${action}`);
     try {
       const payload = { instance, action, sudo_password: password };
       const result = await tomcatAction(token, serverId, payload);
@@ -280,7 +312,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : `Unable to ${action} ${instance}`, "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
@@ -303,7 +335,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   }
 
   async function loadTomcatLog(instance: TomcatInstance, file: TomcatLogFile) {
-    setLoading(true);
+    setBusy("busy");
     try {
       const payload = { instance: instance.name, log_file: file.path, tail };
       const lines = await getTomcatLogs(token, serverId, payload);
@@ -313,14 +345,14 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load Tomcat logs", "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
   async function loadServiceUnitLogs(row: Record<string, string>) {
     const unit = row.name ?? "";
     if (!unit) return;
-    setLoading(true);
+    setBusy("busy");
     try {
       const payload = { source: "journal", name_or_path: unit, tail };
       const lines = await getServiceLogs(token, serverId, payload);
@@ -330,12 +362,12 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load service logs", "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
   async function loadDbLogs(item: Record<string, string>) {
-    setLoading(true);
+    setBusy("busy");
     try {
       setSelected(item.path ?? item.database ?? "database");
       setLogs(await getServiceLogs(token, serverId, { source: item.source ?? "file", name_or_path: item.path, tail }));
@@ -343,12 +375,17 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load database logs", "error");
     } finally {
-      setLoading(false);
+      setBusy("");
     }
   }
 
   async function removeServer() {
-    if (!window.confirm("Delete this server from Infra Monitor?")) return;
+    if (!(await confirm({
+      title: `Delete ${server?.hostname ?? "this server"}?`,
+      message: "It is removed from Infra Monitor along with its stored credentials and access grants. This cannot be undone.",
+      confirmLabel: "Delete server",
+      danger: true
+    }))) return;
     await deleteServer(token, serverId);
     window.location.href = "/";
   }
@@ -368,6 +405,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
 
   return (
     <main className="flex min-h-screen">
+      {confirmDialog}
       <Sidebar role={me?.role} />
       <div className="min-w-0 flex-1">
       <header className="border-b border-line bg-white dark:border-slate-700 dark:bg-slate-950">
@@ -433,7 +471,15 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
 
       <section className="px-6 py-6">
         <section className="space-y-6">
-          {message ? <div className={tone === "error" ? "border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-100" : "border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100"}>{message}</div> : null}
+          {message ? (
+            // Floating toast rather than an inline banner: it no longer pushes the tab content
+            // down when a message appears, and errors carry a close button since they persist.
+            <div className={`fixed bottom-5 right-5 z-[70] flex max-w-sm items-start gap-3 rounded-2xl border px-4 py-3 text-sm shadow-lg ${tone === "error" ? "border-danger/30 bg-red-50 text-red-800 dark:border-red-500/40 dark:bg-red-950 dark:text-red-100" : "border-accent/30 bg-white text-slate-700 dark:border-accent/40 dark:bg-slate-900 dark:text-slate-100"}`}>
+              {tone === "error" ? <AlertTriangle size={16} className="mt-0.5 shrink-0 text-danger dark:text-red-400" /> : <InfoIcon size={16} className="mt-0.5 shrink-0 text-accent" />}
+              <span className="min-w-0 flex-1 break-words font-medium">{message}</span>
+              <button type="button" onClick={() => notify("")} aria-label="Dismiss" className="-mr-1 -mt-0.5 shrink-0 rounded-full p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"><X size={14} /></button>
+            </div>
+          ) : null}
 
           {pendingSudo ? (
             <form onSubmit={(event) => void submitSudoPassword(event)} className="border border-line bg-panel p-4 dark:border-slate-700 dark:bg-slate-900">
@@ -494,7 +540,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                 action={(row) => row.source === "systemd" && row.name ? (
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => void loadServiceUnitLogs(row)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
-                    {isAdmin ? <button onClick={() => void restartSelectedService(row.name)} className="rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">Restart</button> : null}
+                    {isAdmin ? <button disabled={loading} onClick={() => void restartSelectedService(row.name)} className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">{busy === `service:${row.name}` ? <Loader2 size={12} className="animate-spin" /> : null}Restart</button> : null}
                   </div>
                 ) : null}
               />
@@ -529,9 +575,9 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                             <button onClick={() => setLogPicker(logPicker === instance.name ? "" : instance.name)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
                             {isAdmin ? (
                               <>
-                                <button disabled={loading} onClick={() => void runTomcatAction(instance.name, "restart")} className="rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">Restart</button>
-                                <button disabled={loading} onClick={() => void runTomcatAction(instance.name, "start")} className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800 transition-colors hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-200 dark:hover:bg-emerald-900/60">Start</button>
-                                <button disabled={loading} onClick={() => void runTomcatAction(instance.name, "stop")} className="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-800 transition-colors hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-200 dark:hover:bg-red-900/60">Stop</button>
+                                <button disabled={loading} onClick={() => void runTomcatAction(instance.name, "restart")} className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">{busy === `tomcat:${instance.name}:restart` ? <Loader2 size={12} className="animate-spin" /> : null}Restart</button>
+                                <button disabled={loading} onClick={() => void runTomcatAction(instance.name, "start")} className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800 transition-colors hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-200 dark:hover:bg-emerald-900/60">{busy === `tomcat:${instance.name}:start` ? <Loader2 size={12} className="animate-spin" /> : null}Start</button>
+                                <button disabled={loading} onClick={() => void runTomcatAction(instance.name, "stop")} className="inline-flex items-center gap-1 rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-800 transition-colors hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-200 dark:hover:bg-red-900/60">{busy === `tomcat:${instance.name}:stop` ? <Loader2 size={12} className="animate-spin" /> : null}Stop</button>
                               </>
                             ) : null}
                           </div>
@@ -643,7 +689,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                       <td className="px-4 py-3">
                         <div className="flex gap-3">
                           <button onClick={() => void loadContainerLogs(container.name)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
-                          {canRestartContainer ? <button onClick={() => void restartSelectedContainer(container.name)} className="rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">Restart</button> : null}
+                          {canRestartContainer ? <button disabled={loading} onClick={() => void restartSelectedContainer(container.name)} className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">{busy === `container:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : null}Restart</button> : null}
                         </div>
                       </td>
                     </tr>

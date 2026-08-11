@@ -3,8 +3,10 @@
 import { FormEvent, useEffect, useState } from "react";
 import { Plus, Users, X } from "lucide-react";
 import { createUser, deleteUser, getUsers, UserAccount } from "@/lib/api";
+import { useConfirm } from "@/components/confirm-dialog";
 
 export function UserManagement({ token }: { token: string }) {
+  const { confirm, confirmDialog } = useConfirm();
   const [users, setUsers] = useState<UserAccount[]>([]);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
@@ -47,13 +49,14 @@ export function UserManagement({ token }: { token: string }) {
   }
 
   async function remove(user: UserAccount) {
-    if (!window.confirm(`Delete ${user.email}?`)) return;
+    if (!(await confirm({ title: `Delete ${user.email}?`, message: "The user loses access immediately. This cannot be undone.", confirmLabel: "Delete user", danger: true }))) return;
     await deleteUser(token, user.id);
     await load();
   }
 
   return (
     <div className="space-y-6 px-6 py-6">
+      {confirmDialog}
       <div className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-200 dark:bg-[#1e1e1e] dark:ring-slate-800">
         <div className="flex items-center justify-between border-b border-slate-100 bg-white px-6 py-5 font-semibold text-slate-900 dark:border-slate-800 dark:bg-[#1e1e1e] dark:text-slate-100">
           <div className="flex items-center gap-3">
