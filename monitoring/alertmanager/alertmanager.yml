@@ -1,0 +1,61 @@
+# Alertmanager configuration for the Infra Monitor full profile.
+#
+# The only receiver is the Infra Monitor backend's own webhook. There is no email or chat
+# integration here, because configuring one requires credentials this repo has no
+# business defaulting -- add a receiver of your own and point a route at it.
+#
+# Be aware of what the webhook does with what it receives: the backend keeps the
+# most recent 100 alerts in an in-process ring buffer and serves them from
+# GET /api/alerts/recent. That buffer is in memory and is lost when the container
+# restarts. It is a visibility feature, not durable alert storage; Alertmanager's
+# own UI on http://127.0.0.1:19093 is the authoritative view.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  # Group by the alert plus the target it is about, so one noisy target cannot
+  # bury a different alert in the same notification.
+  group_by: ["alertname", "job", "instance"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: inframonitor-webhook
+  routes:
+    # Critical alerts repeat hourly instead of every four hours. Same receiver;
+    # only the reminder cadence differs.
+    - matchers:
+        - severity = "critical"
+      receiver: inframonitor-webhook
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  - name: inframonitor-webhook
+    webhook_configs:
+      # In-network URL: Alertmanager posts from inside the Compose network, so
+      # the app's published host port is irrelevant here.
+      - url: http://app:8000/api/alerts/webhook
+        send_resolved: true
+        max_alerts: 0
+
+inhibit_rules:
+  # THE FIX for the duplicate-alert defect.
+  #
+  # PrometheusTargetDown is `up == 0` and InfraMonitorBackendDown is
+  # `up{job="inframonitor-backend"} == 0`, so the first is a strict superset of the
+  # second and a backend outage previously delivered both, with no inhibit rule
+  # anywhere in the old config.
+  #
+  # While InfraMonitorBackendDown is firing, suppress PrometheusTargetDown for the same
+  # (job, instance). Targets in other jobs are unaffected, so a node_exporter
+  # going down during a backend outage still alerts.
+  #
+  # `equal` is what makes this safe, and it is only correct because both rules
+  # derive from `up` and therefore both carry job and instance. An alert that
+  # dropped those labels would be inhibited stack-wide by any backend outage.
+  - source_matchers:
+      - alertname = "InfraMonitorBackendDown"
+    target_matchers:
+      - alertname = "PrometheusTargetDown"
+    equal: ["job", "instance"]

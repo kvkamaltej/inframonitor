@@ -1,0 +1,100 @@
+name: inframonitor
+
+# ---------------------------------------------------------------------------
+# LITE profile -- the default. One container, SQLite, no monitoring.
+#
+#     docker compose up -d                    # lite  (this file alone)
+#     scripts/stack.sh lite up                # same thing, with checks
+#
+# FULL profile is this file PLUS an overlay:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.full.yml up -d
+#     scripts/stack.sh full up                # same thing, with checks
+#
+# Why an overlay file and not Compose `profiles:` --  `profiles:` can gate
+# whether a service runs, but it cannot change *another* service's
+# environment. Full mode has to give `app` a different DATABASE_URL (Postgres
+# instead of SQLite), fill in the four monitoring URLs and turn METRICS_ENABLED
+# on. Only a merged override file expresses that, so that is the mechanism.
+# Consequence worth knowing: the env values below are the lite values, and
+# docker-compose.full.yml replaces them key by key.
+# ---------------------------------------------------------------------------
+
+services:
+  app:
+    build: .
+    image: inframonitor:latest
+    container_name: inframonitor
+    environment:
+      # Required, with no default -- Compose refuses to start without it.
+      #
+      # The previous stack defaulted this to a constant committed to the repo.
+      # That constant was simultaneously the JWT signing key and the key
+      # encrypting every stored SSH credential, so a default install shipped
+      # with a publicly known credential-encryption key. Do not add a fallback.
+      # Single-quoted because the error message would otherwise put a bare
+      # ": " inside a plain YAML scalar, which is a parse error.
+      JWT_SECRET: '${JWT_SECRET:?JWT_SECRET is required and has no default. Copy .env.example to .env and set it, using the generate command in the comment there.}'
+      # Relative path: the container's WORKDIR is /app and the volume is at
+      # /app/data, so the same URL works here and in a local checkout.
+      #
+      # Full mode does NOT read this variable. The overlay builds its own
+      # Postgres DSN from the POSTGRES_* variables, deliberately, so that a
+      # DATABASE_URL left over in .env from a lite install cannot silently send
+      # a full install back to SQLite.
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///./data/inframonitor.db}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+      # Empty by default: the UI is same-origin, so no CORS headers are needed.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # First-boot admin seed. While the password is still this value the app
+      # prints it in a startup banner on every boot, so an operator who did not
+      # read the docs can still log in -- and is reminded to change it.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@inframonitor.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-ChangeMe123!}
+      # Largest WAR the deploy endpoint will accept, in MB. Also caps SFTP uploads.
+      MAX_WAR_MB: ${MAX_WAR_MB:-512}
+      # Largest file the SFTP pane will download, in MB.
+      MAX_DOWNLOAD_MB: ${MAX_DOWNLOAD_MB:-200}
+      # Interactive shell limits. These must be forwarded explicitly: Compose only
+      # passes the keys listed here, so a SHELL_* value set in .env would silently
+      # do nothing in Docker mode without these lines.
+      #
+      # For the two *time* limits, 0 means "no limit". For the two *count* limits,
+      # 0 means zero sessions permitted, i.e. the shell is disabled -- the
+      # asymmetry is deliberate but easy to trip over.
+      SHELL_MAX_MINUTES: ${SHELL_MAX_MINUTES:-480}
+      SHELL_IDLE_MINUTES: ${SHELL_IDLE_MINUTES:-30}
+      SHELL_MAX_SESSIONS: ${SHELL_MAX_SESSIONS:-24}
+      SHELL_MAX_SESSIONS_PER_USER: ${SHELL_MAX_SESSIONS_PER_USER:-8}
+      # Lite has nothing to scrape it and nothing to link to, so /metrics is not
+      # registered at all and the UI shows no monitoring links. These keys are
+      # spelled out rather than omitted so that a diff of
+      #   docker compose config
+      # against the full combination shows exactly what changes between modes.
+      METRICS_ENABLED: ${METRICS_ENABLED:-false}
+      PROMETHEUS_URL: ""
+      GRAFANA_URL: ""
+      LOKI_URL: ""
+      ALERTMANAGER_URL: ""
+    ports:
+      - "${APP_PORT:-8088}:8000"
+    volumes:
+      - inframonitor_data:/app/data
+    healthcheck:
+      # The image has no curl, so probe with the stdlib. /health returns 503
+      # when the database is unreachable; urlopen raises on that, which fails
+      # the probe -- that is the point, the old static /health reported healthy
+      # with a dead database.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  inframonitor_data:

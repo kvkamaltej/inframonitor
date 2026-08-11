@@ -1,0 +1,56 @@
+# Promtail configuration for the Infra Monitor full profile.
+#
+# Logs are discovered through the Docker API (docker_sd_configs) using the
+# read-only socket mounted by docker-compose.full.yml, not by bind-mounting
+# /var/lib/docker/containers. The API route works on Docker Desktop as well,
+# where that host directory does not exist.
+
+server:
+  http_listen_port: 9080
+  # No gRPC listener is needed; 0 disables it rather than binding a spare port.
+  grpc_listen_port: 0
+  log_level: info
+
+positions:
+  # On the promtail_data volume, so a restart resumes where it left off instead
+  # of re-shipping every log line it can still see.
+  filename: /promtail/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    # Buffer on disk so a Loki restart does not drop the lines in flight.
+    backoff_config:
+      min_period: 500ms
+      max_period: 5m
+      max_retries: 10
+
+scrape_configs:
+  - job_name: inframonitor-containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+        filters:
+          # Only this project's containers. The host also runs ELK and whatever
+          # else; collecting all of it into Loki would blow through the retention
+          # window for the logs actually wanted here.
+          #
+          # "inframonitor" is the project name set by `name: inframonitor` in docker-compose.yml.
+          # If you override it with COMPOSE_PROJECT_NAME, change it here too --
+          # this filter is a literal string, and a mismatch shows up as promtail
+          # running happily with zero targets and no logs in Grafana.
+          - name: label
+            values: ["com.docker.compose.project=inframonitor"]
+    relabel_configs:
+      # Compose service name ("app", "postgres", ...) is the label to query on:
+      #   {service="app"}
+      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+        target_label: service
+      # Container names come back with a leading slash from the API.
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/?(.*)"
+        target_label: container
+      # stdout vs stderr, kept as a label so error output can be isolated.
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: stream
+      - target_label: job
+        replacement: inframonitor-containers

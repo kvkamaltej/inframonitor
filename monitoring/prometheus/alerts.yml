@@ -1,0 +1,142 @@
+# Alert rules for the Infra Monitor full profile.
+#
+# Every rule below is expressed in terms of a metric that something in this
+# stack actually produces:
+#
+#   up                                        -- Prometheus, for every target
+#   inframonitor_http_requests_total                  -- app middleware (method, route, status)
+#   inframonitor_http_request_duration_seconds_bucket -- app middleware histogram
+#   prometheus_notifications_errors_total     -- Prometheus itself
+#   prometheus_rule_evaluation_failures_total -- Prometheus itself
+#
+# The inframonitor_* series come from the ASGI middleware in the backend and only exist
+# when METRICS_ENABLED=true, which full mode sets. If those metric names change
+# in backend/app/main.py, these rules and monitoring/grafana/dashboards/
+# inframonitor-overview.json are the two places that have to change with them.
+#
+# Rules referencing metrics that nothing exports were left out rather than kept:
+# there is no postgres_exporter and no node_exporter container here, so there are
+# no Postgres or host-level rules. An alert that can never fire is worse than no
+# alert, because it reads like coverage.
+
+groups:
+  - name: inframonitor-availability
+    rules:
+      # The specific, actionable one: the product is down.
+      #
+      # `for: 1m` is shorter than PrometheusTargetDown's `for: 3m` on purpose.
+      # Both rules match a backend outage (see the comment on that rule), and
+      # Alertmanager's inhibit_rule can only suppress the general alert if the
+      # specific one is already firing when the general one arrives. Shrinking
+      # this window, or growing that one's, would let the duplicate through.
+      - alert: InfraMonitorBackendDown
+        expr: up{job="inframonitor-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: backend
+        annotations:
+          summary: Infra Monitor backend is not responding to scrapes
+          description: >-
+            Prometheus cannot scrape {{ $labels.instance }} (job {{ $labels.job }}).
+            The API and the UI are served by the same process, so the product is
+            almost certainly unavailable. Check `docker compose ps` and
+            `docker compose logs app`.
+
+      # The general one: any scrape target down, including node_exporters added
+      # via file_sd and the monitoring components themselves.
+      #
+      # This is a strict superset of InfraMonitorBackendDown -- `up == 0` matches the
+      # backend too. The previous version shipped exactly this pair with no
+      # inhibit_rules, so one backend outage delivered two alerts that had to be
+      # silenced separately. The rule stays broad, because "any target down" is
+      # genuinely worth knowing, and the duplicate is suppressed in
+      # monitoring/alertmanager/alertmanager.yml by an inhibit_rule matching on
+      # (job, instance).
+      - alert: PrometheusTargetDown
+        expr: up == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: Prometheus target {{ $labels.job }}/{{ $labels.instance }} is down
+          description: >-
+            {{ $labels.instance }} in job {{ $labels.job }} has failed scrapes for
+            3 minutes. If the backend is the target that is down, InfraMonitorBackendDown
+            is the alert to act on -- this one is inhibited in that case.
+
+  - name: inframonitor-request-health
+    rules:
+      # Ratio, not a raw count: a fixed "more than N errors" threshold fires on
+      # any busy install and never fires on a quiet one. The denominator is
+      # guarded by the > 0 filter on the same expression through the `and`, so a
+      # window with no traffic at all yields no series rather than 0/0 = NaN.
+      - alert: InfraMonitorHighServerErrorRate
+        expr: |
+          (
+            sum(rate(inframonitor_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(inframonitor_http_requests_total[5m]))
+          ) > 0.05
+          and sum(rate(inframonitor_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: backend
+        annotations:
+          summary: Over 5% of Infra Monitor requests are returning 5xx
+          description: >-
+            {{ $value | humanizePercentage }} of requests over the last 5 minutes
+            failed with a 5xx. Check `docker compose logs app`; SSH timeouts to
+            managed servers are a common cause.
+
+      # p95 over all routes. Labelled by route in the dashboard, aggregate here,
+      # because a per-route alert on a UI that has slow-by-nature endpoints (SSH
+      # discovery) would be noise.
+      - alert: InfraMonitorSlowRequests
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(inframonitor_http_request_duration_seconds_bucket[10m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+          component: backend
+        annotations:
+          summary: Infra Monitor p95 request latency is above 2s
+          description: >-
+            p95 latency over the last 10 minutes is {{ $value | humanizeDuration }}.
+            Break it down by route in the Infra Monitor Overview dashboard.
+
+  - name: monitoring-self-checks
+    rules:
+      # If this fires, treat every other alert here as unreliable: Prometheus is
+      # evaluating rules but cannot hand the results to Alertmanager, so nothing
+      # is reaching the webhook.
+      - alert: AlertmanagerNotificationsFailing
+        expr: increase(prometheus_notifications_errors_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: monitoring
+        annotations:
+          summary: Prometheus cannot deliver alerts to Alertmanager
+          description: >-
+            {{ $value }} notification errors in the last 10 minutes. Alerts are
+            being evaluated but not delivered. Check that the alertmanager
+            container is running and that alertmanager:9093 resolves.
+
+      - alert: PrometheusRuleEvaluationFailures
+        expr: increase(prometheus_rule_evaluation_failures_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: Prometheus rule evaluation is failing
+          description: >-
+            A rule in /etc/prometheus/alerts.yml failed to evaluate
+            {{ $value }} times in 10 minutes. Usually a metric name that no
+            longer exists -- most likely the inframonitor_* series, if the backend
+            middleware was renamed.

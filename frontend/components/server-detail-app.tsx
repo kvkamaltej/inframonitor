@@ -1,0 +1,944 @@
+"use client";
+
+import Link from "next/link";
+import { ArrowLeft, Boxes, Check, Coffee, Copy, Database, FileText, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Lock, MoreVertical, RefreshCw, ServerCog, Trash2, Upload, X } from "lucide-react";
+import { Fragment, FormEvent, useEffect, useState } from "react";
+import {
+  ContainerInfo,
+  deleteServer,
+  discoverServer,
+  getContainerLogs,
+  getContainers,
+  getMe,
+  getServer,
+  getServiceLogs,
+  getTomcatInstances,
+  getTomcatLogs,
+  Me,
+  PrivilegedResult,
+  restartContainer,
+  restartService,
+  saveCredentials,
+  Server,
+  tomcatAction,
+  TomcatInstance,
+  TomcatLogFile,
+  TomcatPrerequisite,
+  TomcatWebapp
+} from "@/lib/api";
+import { DefaultPasswordBanner } from "@/components/app-shell";
+import { LoginPanel } from "@/components/login-panel";
+import { StatusPill } from "@/components/status-pill";
+import { StorageChart } from "@/components/storage-chart";
+import { Sidebar } from "@/components/sidebar";
+import { WarDeployPanel } from "@/components/war-deploy-panel";
+
+type Tab = "overview" | "storage" | "services" | "tomcat" | "containers" | "databaseLogs" | "logs";
+type Credentials = { password: string; private_key: string; tail?: number };
+type Tone = "info" | "error";
+type PendingSudo = { kind: "tomcat"; instance: string; action: string } | { kind: "service"; name: string };
+
+export function ServerDetailApp({ serverId }: { serverId: string }) {
+  const [token, setToken] = useState("");
+  const [me, setMe] = useState<Me | null>(null);
+  const [server, setServer] = useState<Server | null>(null);
+  const [tab, setTab] = useState<Tab>("overview");
+  const [credentials, setCredentials] = useState<Credentials>({ password: "", private_key: "" });
+  const [runtime, setRuntime] = useState("docker");
+  const [tail, setTail] = useState(200);
+  const [containers, setContainers] = useState<ContainerInfo[]>([]);
+  const [tomcat, setTomcat] = useState<TomcatInstance[] | null>(null);
+  const [logPicker, setLogPicker] = useState("");
+  const [detailPicker, setDetailPicker] = useState("");
+  const [pendingSudo, setPendingSudo] = useState<PendingSudo | null>(null);
+  const [sudoPassword, setSudoPassword] = useState("");
+  const [selected, setSelected] = useState("");
+  const [logs, setLogs] = useState<string[]>([]);
+  const [message, setMessage] = useState("");
+  const [tone, setTone] = useState<Tone>("info");
+  const [loading, setLoading] = useState(false);
+  const [initializing, setInitializing] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [logsCopied, setLogsCopied] = useState(false);
+  // Admin actions moved from a persistent sidebar into a "…" menu in the header, so the tab
+  // content gets the full width and the occasional admin action is one click away.
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [credentialsOpen, setCredentialsOpen] = useState(false);
+
+  const isAdmin = me?.role === "admin";
+  const canRestartContainer = me?.role === "admin" || me?.role === "developer";
+  const tomcatRows = tomcat ?? server?.tomcat ?? [];
+
+  // Capability detection drives which tabs exist. Each falls back to the discovered
+  // service list, so a host with the software installed but no log file / no live probe
+  // yet still gets its tab.
+  const discovered = server?.discovered_services ?? [];
+  const hasTomcat = tomcatRows.length > 0 || discovered.some((s) => (s.name ?? "").toLowerCase().startsWith("tomcat"));
+  const hasContainerRuntime = Boolean(server?.docker_version || server?.podman_version) || discovered.some((s) => s.type === "container");
+  const hasDatabase = (server?.database_logs?.length ?? 0) > 0 || discovered.some((s) => s.type === "database");
+
+  // A tab that disappears (e.g. discovery finds no database) must not stay selected,
+  // or the panel area renders empty with no way back.
+  useEffect(() => {
+    if (tab === "tomcat" && !hasTomcat) setTab("overview");
+    if (tab === "containers" && !hasContainerRuntime) setTab("overview");
+    if (tab === "databaseLogs" && !hasDatabase) setTab("overview");
+  }, [tab, hasTomcat, hasContainerRuntime, hasDatabase]);
+
+  // Load containers the moment the tab is opened rather than making the operator press Load —
+  // opening the tab is the request. Guarded so it fires once per server: a load returning zero
+  // containers must not re-fire, and switching away and back should not re-probe over SSH.
+  const [containersAutoLoaded, setContainersAutoLoaded] = useState(false);
+  useEffect(() => setContainersAutoLoaded(false), [serverId]);
+  useEffect(() => {
+    if (tab === "containers" && !containersAutoLoaded && server?.has_credentials) {
+      setContainersAutoLoaded(true);
+      void loadContainers();
+    }
+  }, [tab, containersAutoLoaded, server?.has_credentials]);
+
+  function notify(text: string, nextTone: Tone = "info") {
+    setMessage(text);
+    setTone(nextTone);
+  }
+
+  function report(result: { ok: boolean; message: string }, fallback: string) {
+    notify(result.message || fallback, result.ok ? "info" : "error");
+  }
+
+  function reportPrivileged(result: PrivilegedResult, fallback: string) {
+    notify(result.message || result.output || fallback, result.ok ? "info" : "error");
+  }
+
+  async function load(activeToken = token) {
+    if (!activeToken) return;
+    try {
+      const [nextServer, nextMe] = await Promise.all([getServer(activeToken, serverId), getMe(activeToken)]);
+      setServer(nextServer);
+      setMe(nextMe);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load server", "error");
+    }
+  }
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("inframonitor-token") ?? "";
+    setToken(saved);
+    if (saved) {
+      void load(saved).finally(() => setInitializing(false));
+    } else {
+      setInitializing(false);
+    }
+  }, [serverId]);
+
+  if (initializing) return <div className="flex min-h-screen items-center justify-center bg-[#f8f9fa] dark:bg-[#121212]"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
+  if (!token) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); void load(nextToken); }} />;
+
+  async function copyLogs() {
+    if (logs.length === 0) return;
+    const text = logs.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // clipboard API can be blocked (insecure origin, permissions); fall back to a hidden
+      // textarea + execCommand so the button still works over plain http on a LAN
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      try {
+        document.execCommand("copy");
+      } finally {
+        document.body.removeChild(area);
+      }
+    }
+    setLogsCopied(true);
+    window.setTimeout(() => setLogsCopied(false), 2000);
+  }
+
+  async function runDiscovery() {
+    setLoading(true);
+    try {
+      const result = await discoverServer(token, serverId, credentials);
+      report(result, "Discovery finished");
+      setTomcat(null);
+      await load();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Discovery failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadContainers() {
+    setLoading(true);
+    notify("");
+    try {
+      const next = await getContainers(token, serverId, effectiveRuntime, { tail });
+      setContainers(next);
+      setSelected(next[0]?.name ?? "");
+      setLogs([]);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load containers", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadContainerLogs(containerName = selected) {
+    if (!containerName) return;
+    setLoading(true);
+    try {
+      setSelected(containerName);
+      setLogs(await getContainerLogs(token, serverId, effectiveRuntime, containerName, { tail }));
+      setTab("logs");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load logs", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function restartSelectedContainer(containerName: string) {
+    // A restart drops every connection the container is serving, so confirm first — naming the
+    // container and host so a mis-click on the wrong row is obvious before it happens.
+    if (!window.confirm(`Restart the ${effectiveRuntime} container "${containerName}" on ${server?.hostname ?? "this server"}?\n\nThis stops and starts it, dropping any active connections.`)) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await restartContainer(token, serverId, { runtime: effectiveRuntime, name: containerName });
+      report(result, `Restart requested for ${containerName}`);
+      await loadContainers();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to restart container", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function restartSelectedService(name: string, password = "") {
+    // Confirm only on the first click; the sudo-password retry passes a password and must not
+    // ask again.
+    if (!password && !window.confirm(`Restart the systemd service "${name}" on ${server?.hostname ?? "this server"}?`)) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await restartService(token, serverId, name, password);
+      if (result.needs_sudo_password) {
+        setPendingSudo({ kind: "service", name });
+        notify(result.message || `Sudo password required to restart ${name}`, "error");
+        return;
+      }
+      setPendingSudo(null);
+      reportPrivileged(result, `Restart requested for ${name}`);
+      if (result.ok) await load();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to restart service", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadTomcat(quiet = false) {
+    setLoading(true);
+    if (!quiet) notify("");
+    try {
+      const next = await getTomcatInstances(token, serverId, credentials);
+      setTomcat(next);
+      setLogPicker("");
+      setDetailPicker("");
+      if (!quiet && next.length === 0) notify("No Tomcat instances detected on this host.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load Tomcat instances", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runTomcatAction(instance: string, action: string, password = "") {
+    // Confirm the disruptive actions on first click only (start is harmless; the sudo retry
+    // passes a password and skips this).
+    if (!password && (action === "restart" || action === "stop") && !window.confirm(`${action === "stop" ? "Stop" : "Restart"} Tomcat instance "${instance}" on ${server?.hostname ?? "this server"}?`)) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const payload = { instance, action, sudo_password: password };
+      const result = await tomcatAction(token, serverId, payload);
+      if (result.needs_sudo_password) {
+        setPendingSudo({ kind: "tomcat", instance, action });
+        notify(result.message || `Sudo password required to ${action} ${instance}`, "error");
+        return;
+      }
+      setPendingSudo(null);
+      reportPrivileged(result, `${action} requested for ${instance}`);
+      if (result.ok) await loadTomcat(true);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : `Unable to ${action} ${instance}`, "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function submitSudoPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const pending = pendingSudo;
+    const password = sudoPassword;
+    if (!pending || !password) return;
+    try {
+      if (pending.kind === "tomcat") await runTomcatAction(pending.instance, pending.action, password);
+      else await restartSelectedService(pending.name, password);
+    } finally {
+      setSudoPassword("");
+    }
+  }
+
+  function cancelSudo() {
+    setPendingSudo(null);
+    setSudoPassword("");
+  }
+
+  async function loadTomcatLog(instance: TomcatInstance, file: TomcatLogFile) {
+    setLoading(true);
+    try {
+      const payload = { instance: instance.name, log_file: file.path, tail };
+      const lines = await getTomcatLogs(token, serverId, payload);
+      setSelected(`${instance.name} - ${file.name}`);
+      setLogs(lines);
+      setTab("logs");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load Tomcat logs", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadServiceUnitLogs(row: Record<string, string>) {
+    const unit = row.name ?? "";
+    if (!unit) return;
+    setLoading(true);
+    try {
+      const payload = { source: "journal", name_or_path: unit, tail };
+      const lines = await getServiceLogs(token, serverId, payload);
+      setSelected(`journal: ${unit}`);
+      setLogs(lines);
+      setTab("logs");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load service logs", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadDbLogs(item: Record<string, string>) {
+    setLoading(true);
+    try {
+      setSelected(item.path ?? item.database ?? "database");
+      setLogs(await getServiceLogs(token, serverId, { source: item.source ?? "file", name_or_path: item.path, tail }));
+      setTab("logs");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load database logs", "error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function removeServer() {
+    if (!window.confirm("Delete this server from Infra Monitor?")) return;
+    await deleteServer(token, serverId);
+    window.location.href = "/";
+  }
+
+  const runtimeOptions = [
+    server?.docker_version ? "docker" : "",
+    server?.podman_version ? "podman" : ""
+  ].filter(Boolean);
+
+  // Pick the runtime for the host instead of asking: almost every server runs one or the
+  // other, so a two-item dropdown was a choice with only one valid answer. The selector is
+  // kept only when a host genuinely has both, otherwise its podman containers would become
+  // unreachable from the UI.
+  const detectedRuntime = runtimeOptions[0] ?? "docker";
+  const bothRuntimes = runtimeOptions.length > 1;
+  const effectiveRuntime = bothRuntimes ? runtime : detectedRuntime;
+
+  return (
+    <main className="flex min-h-screen">
+      <Sidebar role={me?.role} />
+      <div className="min-w-0 flex-1">
+      <header className="border-b border-line bg-white dark:border-slate-700 dark:bg-slate-950">
+        <div className="flex items-center justify-between px-6 pl-16 py-5">
+          <div>
+            <Link href="/servers" className="mb-2 inline-flex items-center gap-2 text-sm text-accent"><ArrowLeft size={16} /> Server List</Link>
+            <h1 className="text-2xl font-semibold tracking-normal">{server?.hostname ?? "Server"}</h1>
+            <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">{server?.ip_address}:{server?.ssh_port} as {server?.username}</p>
+          </div>
+          <div className="flex items-center gap-3 text-sm font-medium text-slate-700 dark:text-slate-200">
+            {server ? <StatusPill status={server.status} /> : null}
+            {isAdmin ? (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setActionsOpen((open) => !open)}
+                  aria-haspopup="menu"
+                  aria-expanded={actionsOpen}
+                  title="Server actions"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                >
+                  <MoreVertical size={18} />
+                </button>
+                {actionsOpen ? (
+                  <>
+                    <button aria-label="Dismiss actions" onClick={() => setActionsOpen(false)} className="fixed inset-0 z-40 cursor-default" />
+                    <div role="menu" className="absolute right-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-2xl border border-line bg-panel py-1 text-left shadow-lg dark:border-slate-700 dark:bg-slate-900">
+                      <button role="menuitem" disabled={loading} onClick={() => { setActionsOpen(false); void runDiscovery(); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800">
+                        <RefreshCw size={15} className="text-accent" /> Discover services &amp; storage
+                      </button>
+                      <button role="menuitem" onClick={() => { setActionsOpen(false); setCredentialsOpen(true); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800">
+                        <KeyRound size={15} className="text-accent" /> Manage SSH credentials
+                      </button>
+                      <div className="my-1 border-t border-line dark:border-slate-700" />
+                      <button role="menuitem" onClick={() => { setActionsOpen(false); void removeServer(); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-danger transition-colors hover:bg-danger/10 dark:text-red-400 dark:hover:bg-red-500/10">
+                        <Trash2 size={15} /> Delete server
+                      </button>
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </header>
+
+      <DefaultPasswordBanner me={me} />
+
+      {credentialsOpen ? (
+        <CredentialsDialog
+          hasCredentials={Boolean(server?.has_credentials)}
+          busy={loading}
+          onClose={() => setCredentialsOpen(false)}
+          onSave={async (password, privateKey) => {
+            setCredentials({ password, private_key: privateKey });
+            const result = await saveCredentials(token, serverId, { password, private_key: privateKey });
+            report(result, "Credentials saved");
+            await load();
+            setCredentialsOpen(false);
+          }}
+        />
+      ) : null}
+
+      <section className="px-6 py-6">
+        <section className="space-y-6">
+          {message ? <div className={tone === "error" ? "border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-800 dark:bg-red-950 dark:text-red-100" : "border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-100"}>{message}</div> : null}
+
+          {pendingSudo ? (
+            <form onSubmit={(event) => void submitSudoPassword(event)} className="border border-line bg-panel p-4 dark:border-slate-700 dark:bg-slate-900">
+              <div className="flex items-center gap-2 font-semibold text-accent"><Lock size={18} /><span className="text-slate-900 dark:text-slate-100">Sudo password required</span></div>
+              <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                {pendingSudo.kind === "tomcat" ? `Confirm to ${pendingSudo.action} Tomcat instance ${pendingSudo.instance}.` : `Confirm to restart service ${pendingSudo.name}.`}
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <input value={sudoPassword} onChange={(event) => setSudoPassword(event.target.value)} type="password" autoComplete="off" placeholder="Sudo password" className="h-10 min-w-[14rem] flex-1 border border-line px-3 text-sm dark:border-slate-700 dark:bg-slate-950" />
+                <button type="submit" disabled={loading || !sudoPassword} className="h-10 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">Authenticate and retry</button>
+                <button type="button" onClick={cancelSudo} className="h-10 rounded-full border border-line px-5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</button>
+              </div>
+              <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">Sent once with this request over SSH stdin, then discarded. Never stored in the browser.</p>
+            </form>
+          ) : null}
+
+          <div className="flex flex-wrap items-center gap-2">
+            {([
+              ["overview", "Overview", true],
+              ["storage", "Storage", true],
+              ["services", "Services", true],
+              // only offer these when the host actually has them, so the tab strip
+              // reflects the server rather than the product's full feature list
+              ["tomcat", "Tomcat", hasTomcat],
+              ["containers", "Containers", hasContainerRuntime],
+              ["databaseLogs", "Database Logs", hasDatabase],
+              ["logs", "Log Window", true]
+            ] as Array<[Tab, string, boolean]>).filter(([, , visible]) => visible).map(([key, label]) => (
+              <button key={key} onClick={() => setTab(key as Tab)} className={`h-9 rounded-full border px-4 text-sm font-medium transition-colors ${tab === key ? "border-accent bg-accent text-white" : "border-line text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"}`}>{label}</button>
+            ))}
+          </div>
+
+          {tab === "overview" ? (
+            <div className="grid gap-4 md:grid-cols-2">
+              <Info title="Distribution" value={osFlavour(server)} />
+              <Info title="Package Manager" value={packageManagerLabel(server)} />
+              <Info title="OS" value={server?.operating_system || "Unknown"} />
+              <Info title="Kernel" value={server?.kernel || "Unknown"} />
+              <Info title="Docker" value={server?.docker_version || "Not detected"} />
+              <Info title="Podman" value={server?.podman_version || "Not detected"} />
+            </div>
+          ) : null}
+
+          {tab === "storage" ? (
+            <Panel title="Storage Perspective" icon={<HardDrive size={18} />}>
+              <StorageChart rows={server?.storage ?? []} />
+              <div className="mt-6 border-t border-line pt-4 dark:border-slate-700">
+                <DataTable rows={storageTableRows(server?.storage ?? [])} columns={["mount", "type", "size", "used", "available", "used_percent", "status"]} />
+              </div>
+            </Panel>
+          ) : null}
+
+          {tab === "services" ? (
+            <Panel title="Detected Services" icon={<ServerCog size={18} />}>
+              <DataTable
+                rows={server?.discovered_services ?? []}
+                columns={["name", "type", "source", "status", "detail"]}
+                action={(row) => row.source === "systemd" && row.name ? (
+                  <div className="flex flex-wrap gap-2">
+                    <button onClick={() => void loadServiceUnitLogs(row)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
+                    {isAdmin ? <button onClick={() => void restartSelectedService(row.name)} className="rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">Restart</button> : null}
+                  </div>
+                ) : null}
+              />
+            </Panel>
+          ) : null}
+
+          {tab === "tomcat" ? (
+            <Panel title="Tomcat Instances" icon={<Coffee size={18} />}>
+              <div className="mb-4 flex flex-wrap items-center gap-3">
+                <select value={tail} onChange={(event) => setTail(Number(event.target.value))} className="h-10 cursor-pointer rounded-xl border-none bg-slate-100 px-4 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100">
+                  {[100, 200, 500, 1000].map((value) => <option key={value} value={value}>tail {value}</option>)}
+                </select>
+                <button disabled={loading} onClick={() => void loadTomcat()} className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"><RefreshCw size={16} /> Load / Refresh</button>
+                <span className="text-xs text-slate-500 dark:text-slate-400">{tomcat ? "Live probe" : server?.last_discovery ? `From discovery on ${new Date(server.last_discovery).toLocaleString()}` : "Never discovered"}</span>
+              </div>
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-950 dark:text-slate-400"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Version</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Enabled</th><th className="px-4 py-3">PID</th><th className="px-4 py-3">Ports</th><th className="px-4 py-3">CATALINA_BASE</th><th className="px-4 py-3">Actions</th></tr></thead>
+                <tbody>
+                  {tomcatRows.map((instance) => (
+                    <Fragment key={instance.name}>
+                      <tr className="border-t border-line dark:border-slate-700">
+                        <td className="px-4 py-3 font-medium">{instance.name}</td>
+                        <td className="max-w-xs break-words px-4 py-3">{instance.version || "-"}</td>
+                        <td className="px-4 py-3"><TomcatStatus status={instance.status} /></td>
+                        <td className="px-4 py-3">{instance.enabled || "-"}</td>
+                        <td className="px-4 py-3">{instance.pid || "-"}</td>
+                        <td className="max-w-xs break-words px-4 py-3">{instance.ports || "-"}</td>
+                        <td className="max-w-xs break-all px-4 py-3">{instance.catalina_base || "-"}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap gap-2">
+                            <button onClick={() => setDetailPicker(detailPicker === instance.name ? "" : instance.name)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">{detailPicker === instance.name ? "Hide details" : "Details"}</button>
+                            <button onClick={() => setLogPicker(logPicker === instance.name ? "" : instance.name)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
+                            {isAdmin ? (
+                              <>
+                                <button disabled={loading} onClick={() => void runTomcatAction(instance.name, "restart")} className="rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">Restart</button>
+                                <button disabled={loading} onClick={() => void runTomcatAction(instance.name, "start")} className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800 transition-colors hover:bg-emerald-200 disabled:opacity-50 dark:bg-emerald-900/40 dark:text-emerald-200 dark:hover:bg-emerald-900/60">Start</button>
+                                <button disabled={loading} onClick={() => void runTomcatAction(instance.name, "stop")} className="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-800 transition-colors hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-200 dark:hover:bg-red-900/60">Stop</button>
+                              </>
+                            ) : null}
+                          </div>
+                        </td>
+                      </tr>
+                      {detailPicker === instance.name ? (
+                        <tr className="border-t border-line bg-slate-50 dark:border-slate-700 dark:bg-slate-950">
+                          <td colSpan={8} className="space-y-5 px-4 py-4">
+                            <div>
+                              <div className="flex items-center gap-2 text-xs font-semibold uppercase text-slate-500 dark:text-slate-400"><InfoIcon size={14} /> Runtime detail for {instance.name}</div>
+                              <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                                <Detail label="Server number" value={instance.server_number} />
+                                <Detail label="Version banner" value={instance.version} />
+                                <Detail label="JVM version" value={instance.jvm_version} />
+                                <Detail label="JVM vendor" value={instance.jvm_vendor} />
+                                <Detail label="JAVA_HOME" value={instance.java_home} mono />
+                                <Detail label="java binary" value={instance.java} mono />
+                                <Detail label="OS" value={instance.os_name} />
+                                <Detail label="CATALINA_HOME" value={instance.catalina_home} mono />
+                                <Detail label="CATALINA_BASE" value={instance.catalina_base} mono />
+                                <Detail label="Configured log dir" value={instance.configured_log_dir} mono />
+                                <Detail label="Configured log prefix" value={instance.configured_log_prefix} mono />
+                                <Detail label="Primary log file" value={instance.primary_log_file} mono />
+                                <Detail label="Discovered log dir" value={instance.log_dir} mono />
+                                <Detail label="Unit" value={instance.unit} mono />
+                                <Detail label="Source" value={instance.source} />
+                              </div>
+                            </div>
+
+                            <div>
+                              <div className="flex items-center gap-2 text-xs font-semibold uppercase text-slate-500 dark:text-slate-400"><ListChecks size={14} /> Prerequisites</div>
+                              <PrerequisiteTable rows={instance.prerequisites ?? []} />
+                            </div>
+
+                            <div>
+                              <div className="flex items-center gap-2 text-xs font-semibold uppercase text-slate-500 dark:text-slate-400"><LayoutGrid size={14} /> Webapps</div>
+                              <WebappTable rows={instance.webapps ?? []} />
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
+                      {logPicker === instance.name ? (
+                        <tr className="border-t border-line bg-slate-50 dark:border-slate-700 dark:bg-slate-950">
+                          <td colSpan={8} className="px-4 py-3">
+                            <div className="flex items-center gap-2 text-xs font-semibold uppercase text-slate-500 dark:text-slate-400"><FileText size={14} /> Log files for {instance.name}</div>
+                            {(instance.log_files ?? []).length ? (
+                              <div className="mt-3 grid gap-2">
+                                {(instance.log_files ?? []).map((file) => (
+                                  <div key={file.path} className="flex flex-wrap items-center justify-between gap-3 border border-line bg-panel px-3 py-2 dark:border-slate-700 dark:bg-slate-900">
+                                    <div className="min-w-0">
+                                      <div className="font-medium">{file.name}</div>
+                                      <div className="break-all text-xs text-slate-500 dark:text-slate-400">{[file.path, humanBytes(file.size_bytes), file.modified].filter(Boolean).join(" · ")}</div>
+                                    </div>
+                                    <button disabled={loading} onClick={() => void loadTomcatLog(instance, file)} className="rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">View</button>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">No log files discovered for this instance. Press Load / Refresh to probe the host again.</p>}
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  ))}
+                  {tomcatRows.length === 0 ? <tr><td className="px-4 py-6 text-slate-500" colSpan={8}>No Tomcat instances recorded. Run discovery or press Load / Refresh.</td></tr> : null}
+                </tbody>
+              </table>
+
+              {isAdmin ? (
+                <div className="mt-6 border-t border-line pt-5 dark:border-slate-700">
+                  <div className="mb-4 flex items-center gap-2 font-semibold text-accent">
+                    <Upload size={18} />
+                    <span className="text-slate-900 dark:text-slate-100">Deploy WAR</span>
+                  </div>
+                  {tomcatRows.length === 0 ? (
+                    <p className="text-xs text-slate-500 dark:text-slate-400">Load the Tomcat instances first — the target directory comes from the discovered instance, never from this form.</p>
+                  ) : (
+                    <WarDeployPanel token={token} serverId={serverId} instances={tomcatRows} onDeployed={() => loadTomcat(true)} />
+                  )}
+                </div>
+              ) : null}
+            </Panel>
+          ) : null}
+
+          {tab === "containers" ? (
+            <Panel
+              title={`Containers${bothRuntimes ? "" : ` (${detectedRuntime})`}`}
+              icon={<Boxes size={18} />}
+              action={
+                <>
+                  {/* only shown when the host really runs both, so podman stays reachable */}
+                  {bothRuntimes ? (
+                    <select value={runtime} onChange={(event) => setRuntime(event.target.value)} className="h-9 cursor-pointer rounded-full border-none bg-slate-100 px-3 text-xs font-semibold text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100">
+                      {runtimeOptions.map((option) => <option key={option} value={option}>{option}</option>)}
+                    </select>
+                  ) : null}
+                  <button disabled={loading} onClick={() => void loadContainers()} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-accent px-4 text-xs font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"><RefreshCw size={14} /> {loading ? "Loading..." : "Load"}</button>
+                </>
+              }
+            >
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-950 dark:text-slate-400"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Image</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Ports</th><th className="px-4 py-3">Actions</th></tr></thead>
+                <tbody>
+                  {containers.map((container) => (
+                    <tr key={container.id} className="border-t border-line dark:border-slate-700">
+                      <td className="px-4 py-3 font-medium">{container.name}</td>
+                      <td className="px-4 py-3">{container.image}</td>
+                      <td className="px-4 py-3">{container.status}</td>
+                      <td className="max-w-xs break-words px-4 py-3">{shortPorts(container.ports) || "-"}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex gap-3">
+                          <button onClick={() => void loadContainerLogs(container.name)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
+                          {canRestartContainer ? <button onClick={() => void restartSelectedContainer(container.name)} className="rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">Restart</button> : null}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {containers.length === 0 ? <tr><td className="px-4 py-6 text-slate-500" colSpan={5}>Load Docker or Podman containers.</td></tr> : null}
+                </tbody>
+              </table>
+            </Panel>
+          ) : null}
+
+          {tab === "databaseLogs" ? (
+            <Panel title="Database Logs" icon={<Database size={18} />}>
+              <DataTable rows={server?.database_logs ?? []} columns={["database", "source", "path"]} action={(row) => <button onClick={() => void loadDbLogs(row)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">View logs</button>} />
+            </Panel>
+          ) : null}
+
+          {tab === "logs" ? (
+            <div className={`bg-panel dark:bg-slate-900 ${isFullscreen ? "fixed inset-0 z-[100] flex flex-col" : "border border-line dark:border-slate-700"}`}>
+              <div className="flex items-center justify-between border-b border-line px-4 py-3 font-semibold dark:border-slate-700">
+                <span>Logs {selected ? `: ${selected}` : ""}</span>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => void copyLogs()}
+                    disabled={logs.length === 0}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-40 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                  >
+                    {logsCopied ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
+                  </button>
+                  <button onClick={() => setIsFullscreen(!isFullscreen)} className="text-accent hover:underline text-sm font-medium">
+                    {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                  </button>
+                </div>
+              </div>
+              <pre className={`${isFullscreen ? "flex-1 max-h-none" : "max-h-[560px]"} whitespace-pre-wrap break-words overflow-auto bg-slate-950 p-4 text-xs leading-relaxed text-slate-100`}>{logs.length ? logs.join("\n") : "Select a container, service, Tomcat or database log source."}</pre>
+            </div>
+          ) : null}
+        </section>
+      </section>
+      </div>
+    </main>
+  );
+}
+
+function shortPorts(value: string) {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item && !item.startsWith("[::]:"))
+    .map((item) => {
+      if (!item.includes("->")) return item.split("/")[0];
+      const [left, right] = item.split("->");
+      return `${left.split(":").pop()}->${right.split("/")[0]}`;
+    })
+    .filter((item, index, items) => item && items.indexOf(item) === index)
+    .join(", ");
+}
+
+const DISTRO_LABELS: Record<string, string> = {
+  almalinux: "AlmaLinux",
+  alpine: "Alpine",
+  amzn: "Amazon Linux",
+  centos: "CentOS",
+  debian: "Debian",
+  fedora: "Fedora",
+  ol: "Oracle Linux",
+  opensuse: "openSUSE",
+  rhel: "RHEL",
+  rocky: "Rocky Linux",
+  sles: "SLES",
+  ubuntu: "Ubuntu"
+};
+
+function titleCase(value: string) {
+  return value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : "";
+}
+
+function osFlavour(server: Server | null) {
+  const distro = server?.os_distro ?? "";
+  const family = server?.os_family ?? "";
+  const version = server?.os_version ?? "";
+  const name = distro ? DISTRO_LABELS[distro.toLowerCase()] ?? titleCase(distro) : titleCase(family);
+  return [name, version].filter(Boolean).join(" ") || "Unknown";
+}
+
+function packageManagerLabel(server: Server | null) {
+  const manager = server?.package_manager ?? "";
+  const family = server?.os_family ?? "";
+  if (!manager) return family ? `Unknown (${family} family)` : "Unknown";
+  return family ? `${manager} · ${family} family` : manager;
+}
+
+// Accepts either shape: log/webapp sizes arrive as shell-parsed strings today, but a
+// Pydantic int field would serialise as a JSON number.
+function humanBytes(value?: string | number) {
+  const bytes = Number(value);
+  if (value === undefined || value === "" || !Number.isFinite(bytes) || bytes <= 0) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let index = 0;
+  let size = bytes;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size >= 10 || index === 0 ? Math.round(size) : size.toFixed(1)} ${units[index]}`;
+}
+
+// df reports 1K blocks; storage rows discovered before the byte fields existed only carry *_1k
+function bytesFrom(row: Record<string, string>, byteKey: string, blockKey: string) {
+  const direct = Number(row[byteKey]);
+  if (Number.isFinite(direct) && direct > 0) return String(direct);
+  const blocks = Number(row[blockKey]);
+  if (Number.isFinite(blocks) && blocks > 0) return String(blocks * 1024);
+  return "";
+}
+
+function gb(value: string) {
+  const bytes = Number(value);
+  if (!value || !Number.isFinite(bytes) || bytes <= 0) return "-";
+  const size = bytes / 1024 / 1024 / 1024;
+  return `${size >= 10 ? Math.round(size) : size.toFixed(1)} GB`;
+}
+
+function storageTableRows(rows: Array<Record<string, string>>) {
+  return rows.map((row) => ({
+    mount: row.mount ?? "",
+    type: row.type ?? "",
+    size: gb(bytesFrom(row, "size_bytes", "blocks_1k")),
+    used: gb(bytesFrom(row, "used_bytes", "used_1k")),
+    available: gb(bytesFrom(row, "available_bytes", "available_1k")),
+    used_percent: row.used_percent ?? "",
+    status: row.status ?? ""
+  }));
+}
+
+function TomcatStatus({ status }: { status?: string }) {
+  const value = status || "unknown";
+  const tone = value === "active" || value === "running"
+    ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200"
+    : value === "failed"
+      ? "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200"
+      : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300";
+  return <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold capitalize ${tone}`}>{value}</span>;
+}
+
+function Detail({ label, value, mono }: { label: string; value?: string; mono?: boolean }) {
+  const shown = (value ?? "").trim();
+  return (
+    <div className="min-w-0 border border-line bg-panel px-3 py-2 dark:border-slate-700 dark:bg-slate-900">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</div>
+      <div className={`mt-1 break-all text-xs ${shown ? "font-medium text-slate-900 dark:text-slate-100" : "text-slate-400 dark:text-slate-500"} ${mono && shown ? "font-mono" : ""}`}>
+        {shown || "Not detected"}
+      </div>
+    </div>
+  );
+}
+
+// ok reads as the accent tone; unsupported and missing are both blocking, so both are red;
+// unknown stays slate because it means "we could not tell", not "it is fine".
+function PrerequisiteStatus({ status }: { status?: string }) {
+  const value = (status || "unknown").toLowerCase();
+  const tone = value === "ok"
+    ? "bg-accent/10 text-accent dark:bg-accent/20"
+    : value === "unsupported" || value === "missing"
+      ? "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-200"
+      : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300";
+  return <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold capitalize ${tone}`}>{value}</span>;
+}
+
+function PrerequisiteTable({ rows }: { rows: TomcatPrerequisite[] }) {
+  if (rows.length === 0) {
+    return <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">No prerequisites reported for this instance. Press Load / Refresh to probe the host again.</p>;
+  }
+  return (
+    <table className="mt-3 w-full text-left text-sm">
+      <thead className="bg-slate-100 text-xs uppercase text-slate-500 dark:bg-slate-900 dark:text-slate-400">
+        <tr><th className="px-4 py-2">Requirement</th><th className="px-4 py-2">Required</th><th className="px-4 py-2">Detected</th><th className="px-4 py-2">Status</th></tr>
+      </thead>
+      <tbody>
+        {rows.map((row, index) => (
+          <tr key={`${row.name}-${index}`} className="border-t border-line dark:border-slate-700">
+            <td className="px-4 py-2 font-medium">{row.name || "-"}</td>
+            <td className="max-w-xs break-words px-4 py-2">{row.required || "-"}</td>
+            <td className="max-w-xs break-words px-4 py-2">{row.detected || "Not detected"}</td>
+            <td className="px-4 py-2"><PrerequisiteStatus status={row.status} /></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function WebappTable({ rows }: { rows: TomcatWebapp[] }) {
+  if (rows.length === 0) {
+    return <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">No webapps found under this instance&apos;s webapps directory.</p>;
+  }
+  return (
+    <table className="mt-3 w-full text-left text-sm">
+      <thead className="bg-slate-100 text-xs uppercase text-slate-500 dark:bg-slate-900 dark:text-slate-400">
+        <tr><th className="px-4 py-2">Name</th><th className="px-4 py-2">Type</th><th className="px-4 py-2">Size</th><th className="px-4 py-2">Modified</th><th className="px-4 py-2">Path</th></tr>
+      </thead>
+      <tbody>
+        {rows.map((row, index) => (
+          <tr key={`${row.path || row.name}-${index}`} className="border-t border-line dark:border-slate-700">
+            <td className="px-4 py-2 font-medium">{row.name || "-"}</td>
+            <td className="px-4 py-2 uppercase text-xs font-semibold text-slate-500 dark:text-slate-400">{row.type || "-"}</td>
+            <td className="px-4 py-2">{row.type === "dir" ? "-" : humanBytes(row.size_bytes) || "-"}</td>
+            <td className="px-4 py-2">{row.modified || "-"}</td>
+            <td className="max-w-xs break-all px-4 py-2 font-mono text-xs text-slate-500 dark:text-slate-400">{row.path || "-"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function Info({ title, value }: { title: string; value: string }) {
+  return <div className="border border-line bg-panel p-4 dark:border-slate-700 dark:bg-slate-900"><div className="text-xs uppercase text-slate-500">{title}</div><div className="mt-2 break-words font-medium">{value}</div></div>;
+}
+
+// Modal for entering/replacing the stored SSH credentials. Self-contained local state, and
+// values are snapshotted before the await so no `event.currentTarget`-after-await hazard.
+function CredentialsDialog({ hasCredentials, busy, onClose, onSave }: { hasCredentials: boolean; busy: boolean; onClose: () => void; onSave: (password: string, privateKey: string) => Promise<void> }) {
+  const [password, setPassword] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [localError, setLocalError] = useState("");
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const pw = password;
+    const key = privateKey;
+    if (!pw && !key) {
+      setLocalError("Enter an SSH password or a private key.");
+      return;
+    }
+    setSaving(true);
+    setLocalError("");
+    try {
+      await onSave(pw, key);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : "Unable to save credentials");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+      <button aria-label="Cancel" onClick={onClose} className="absolute inset-0 cursor-default" />
+      <div className="relative z-10 w-full max-w-lg overflow-hidden rounded-2xl border border-line bg-panel shadow-xl dark:border-slate-700 dark:bg-slate-900">
+        <div className="flex items-center justify-between border-b border-line px-5 py-4 dark:border-slate-700">
+          <h2 className="flex items-center gap-2 font-semibold text-slate-900 dark:text-slate-100"><KeyRound size={18} className="text-accent" /> SSH credentials</h2>
+          <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"><X size={16} /></button>
+        </div>
+        <form onSubmit={submit} className="space-y-3 p-5">
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+            {hasCredentials ? "Credentials are already stored. Enter new ones to replace them." : "No credentials stored yet. Enter an SSH password or private key."}
+          </p>
+          <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="off" placeholder="SSH password" className="h-11 w-full rounded-xl border border-line bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+          <div className="text-center text-xs font-medium uppercase text-slate-400">or</div>
+          <textarea value={privateKey} onChange={(event) => setPrivateKey(event.target.value)} spellCheck={false} placeholder="SSH private key (PEM)" className="min-h-32 w-full rounded-xl border border-line bg-white px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+          {localError ? <p className="text-xs font-medium text-danger dark:text-red-400">{localError}</p> : null}
+          <p className="text-xs text-slate-500 dark:text-slate-400">Stored Fernet-encrypted on the server and never sent back to the browser.</p>
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button type="button" onClick={onClose} className="h-10 rounded-full border border-line px-5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</button>
+            <button type="submit" disabled={saving || busy} className="h-10 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{saving ? "Saving…" : "Save encrypted"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// `action` renders on the header line, so a panel's primary control does not need a whole
+// toolbar row of its own below the title.
+function Panel({ title, icon, children, action }: { title: string; icon: React.ReactNode; children: React.ReactNode; action?: React.ReactNode }) {
+  return (
+    <div className="border border-line bg-panel dark:border-slate-700 dark:bg-slate-900">
+      <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3 font-semibold dark:border-slate-700 text-accent">
+        <div className="flex items-center gap-2">{icon}<span className="text-slate-900 dark:text-slate-100">{title}</span></div>
+        {action ? <div className="flex items-center gap-2">{action}</div> : null}
+      </div>
+      <div className="overflow-x-auto p-4">{children}</div>
+    </div>
+  );
+}
+
+function DataTable({ rows, columns, action }: { rows: Array<Record<string, string>>; columns: string[]; action?: (row: Record<string, string>) => React.ReactNode }) {
+  return (
+    <table className="w-full text-left text-sm">
+      <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-950 dark:text-slate-400"><tr>{columns.map((column) => <th key={column} className="px-4 py-3">{column}</th>)}{action ? <th className="px-4 py-3">Action</th> : null}</tr></thead>
+      <tbody>
+        {rows.map((row, index) => <tr key={index} className="border-t border-line dark:border-slate-700">{columns.map((column) => <td key={column} className="max-w-md break-words px-4 py-3">{row[column] ?? ""}</td>)}{action ? <td className="px-4 py-3">{action(row)}</td> : null}</tr>)}
+        {rows.length === 0 ? <tr><td className="px-4 py-6 text-slate-500" colSpan={columns.length + (action ? 1 : 0)}>No data discovered yet.</td></tr> : null}
+      </tbody>
+    </table>
+  );
+}

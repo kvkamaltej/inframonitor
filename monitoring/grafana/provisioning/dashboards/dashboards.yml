@@ -1,0 +1,36 @@
+# Grafana dashboard provisioning for the Infra Monitor full profile.
+#
+# These settings are chosen to be *consistent with the read-only mount*, which
+# was the previous defect: the dashboards directory was bind-mounted :ro while
+# this file said `disableDeletion: false` and did not set `allowUiUpdates`. The
+# result was a UI that presented the dashboard as editable -- a save appeared to
+# succeed, the provisioner then failed to write the file, and the change silently
+# reverted at the next 30s reload. Deleting a panel behaved the same way.
+#
+# So: the dashboards in this repo are read-only, and Grafana is told so.
+#
+#   allowUiUpdates: false  -- the UI shows the dashboard as provisioned and
+#                             offers "Save JSON to file" instead of Save, which
+#                             is honest about where the source of truth is.
+#   disableDeletion: true  -- the Delete button is gone rather than failing.
+#
+# To change a dashboard: edit it in the UI, use "Export -> Save JSON to file",
+# and commit the result over monitoring/grafana/dashboards/inframonitor-overview.json.
+# Dashboards you create yourself in the UI are unaffected by any of this; they
+# live in the grafana_data volume and are fully editable.
+
+apiVersion: 1
+
+providers:
+  - name: inframonitor
+    orgId: 1
+    folder: Infra Monitor
+    folderUid: inframonitor
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      # Flat directory, so no folder structure to mirror.
+      foldersFromFilesStructure: false

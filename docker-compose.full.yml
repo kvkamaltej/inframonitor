@@ -1,0 +1,212 @@
+# ---------------------------------------------------------------------------
+# FULL profile -- OVERLAY. This file is never used on its own.
+#
+#     docker compose -f docker-compose.yml -f docker-compose.full.yml up -d
+#     scripts/stack.sh full up          # resolves the -f list for you
+#
+# It adds postgres + prometheus + grafana + loki + promtail + alertmanager and
+# overrides the `app` service's environment: a Postgres DSN instead of SQLite,
+# the four monitoring URLs, and METRICS_ENABLED=true.
+#
+# `name:`, `volumes: inframonitor_data` and everything else about `app` come from
+# docker-compose.yml. Compose merges the two `environment:` mappings key by
+# key, which is precisely why this is an overlay and not a `profiles:` switch --
+# see the long comment at the top of docker-compose.yml.
+#
+# Deliberately NOT here, and not to be re-added:
+#   * redis  -- no module under backend/app has ever imported it. It was a
+#     container, a volume and a service_healthy gate that did nothing.
+#   * nginx  -- the app serves its own UI, so nginx could only proxy to it, and
+#     its old /grafana/ sub-path route was broken anyway (it needed
+#     GF_SERVER_SERVE_FROM_SUB_PATH, which was never set). Grafana is reached on
+#     its own port here. TLS, if wanted later, is a clean separate addition.
+#   * database/init.sql -- it created one decoy schema_migrations table and no
+#     real tables. The app creates and migrates its own schema on startup.
+#
+# Host ports are prefixed with 1 (15432, 19090, 13000, 13100, 19093) because
+# this host also runs ELK on 9200/5601/5044.
+# ---------------------------------------------------------------------------
+
+services:
+  app:
+    environment:
+      # Full mode is Postgres, always. This is built from the POSTGRES_*
+      # variables rather than reading ${DATABASE_URL} with a Postgres default,
+      # so that a `DATABASE_URL=sqlite:///./data/inframonitor.db` line left in .env from
+      # a lite install cannot silently point a full install back at SQLite --
+      # which would have been a data-loss-shaped surprise, not a config nit.
+      #
+      # NOTE: the password is interpolated into a URL. Keep it URL-safe
+      # (letters, digits, - _ . ~). A password containing @ : / ? # would need
+      # percent-encoding here and would otherwise produce a DSN that parses
+      # into the wrong host.
+      DATABASE_URL: 'postgresql+psycopg://${POSTGRES_USER:-inframonitor}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required for full mode and has no default. Set it in .env -- the previous stack shipped a committed default password.}@postgres:5432/${POSTGRES_DB:-inframonitor}'
+      METRICS_ENABLED: "true"
+      # In-container service URLs, not host URLs. These are probed server-side
+      # by backend/app/services/integrations.py from inside the app container,
+      # where "localhost" is the app itself and the published host ports are not
+      # reachable. That is also why binding the host side of those ports to
+      # 127.0.0.1 below does not break the integrations panel.
+      PROMETHEUS_URL: http://prometheus:9090
+      GRAFANA_URL: http://grafana:3000
+      LOKI_URL: http://loki:3100
+      ALERTMANAGER_URL: http://alertmanager:9093
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: inframonitor-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-inframonitor}
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required for full mode and has no default. Set it in .env.}'
+      POSTGRES_DB: ${POSTGRES_DB:-inframonitor}
+      # Only read by initdb, i.e. only on the very first start with an empty
+      # volume. Cheap insurance against silent on-disk corruption.
+      POSTGRES_INITDB_ARGS: --data-checksums
+    ports:
+      # 127.0.0.1 only. The previous stack published Postgres on 0.0.0.0 with a
+      # password committed to the repo. Nothing outside this Compose network
+      # needs it; psql from the host still works, and `docker compose exec` does
+      # not need a published port at all.
+      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # The only healthcheck in this file. It gates app startup, so it has to be
+      # right, and pg_isready ships in the image. The monitoring containers
+      # below deliberately have no healthcheck -- see the note on prometheus.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: inframonitor-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      # Lets `curl -X POST http://127.0.0.1:19090/-/reload` re-read the config
+      # and the rules without a restart. It does NOT enable the admin API
+      # (delete series, snapshot) -- that needs --web.enable-admin-api, which is
+      # left off on purpose.
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      # Real directory, really mounted. The previous config had a
+      # file_sd_configs job reading /etc/prometheus/targets/*.json from a path
+      # that was never mounted, so the job had zero targets forever and looked
+      # like working node-exporter monitoring. See monitoring/prometheus/targets/.
+      - ./monitoring/prometheus/targets:/etc/prometheus/targets:ro
+      - prometheus_data:/prometheus
+    ports:
+      # Prometheus has no authentication of any kind, so localhost by default.
+      # Set MONITORING_BIND=0.0.0.0 in .env to expose it, knowing that.
+      - "${MONITORING_BIND:-127.0.0.1}:${PROMETHEUS_PORT:-19090}:9090"
+    # No healthcheck here, or on grafana/loki/promtail/alertmanager. Probing
+    # them needs a shell plus wget/curl inside images whose base varies between
+    # releases; a probe that is wrong reports a perfectly healthy Prometheus as
+    # unhealthy forever, which is worse than no probe. The real signal is
+    # Prometheus's own PrometheusTargetDown alert, which watches every scrape
+    # target including itself.
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: inframonitor-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Required, no default. admin/admin was the old behaviour.
+      GF_SECURITY_ADMIN_PASSWORD: '${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required for full mode and has no default. Set it in .env.}'
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # No GF_SERVER_ROOT_URL / GF_SERVER_SERVE_FROM_SUB_PATH: Grafana is served
+      # from the root of its own port, not from /grafana/ behind a proxy.
+    volumes:
+      # Both mounts are :ro, and dashboards.yml now says allowUiUpdates: false
+      # and disableDeletion: true to match. Previously the dashboards directory
+      # was :ro while provisioning declared disableDeletion: false, which told
+      # the UI that dashboards were editable -- so an edit appeared to save, the
+      # provisioner failed to write it to the read-only file, and the change
+      # silently reverted within 30s.
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      # Grafana is the one component an operator browses to, and it does have a
+      # password, so it is published on all interfaces by default.
+      - "${GRAFANA_BIND:-0.0.0.0}:${GRAFANA_PORT:-13000}:3000"
+    depends_on:
+      - prometheus
+      - loki
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.3.2
+    container_name: inframonitor-loki
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+    ports:
+      - "${MONITORING_BIND:-127.0.0.1}:${LOKI_PORT:-13100}:3100"
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    container_name: inframonitor-promtail
+    command: -config.file=/etc/promtail/promtail.yml
+    volumes:
+      - ./monitoring/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      # Read-only Docker socket: promtail uses docker_sd_configs to discover the
+      # containers in this project and read their logs through the API. That
+      # works on Docker Desktop too, unlike bind-mounting
+      # /var/lib/docker/containers, which does not exist on a Desktop host.
+      #
+      # A read-only socket is still a privileged mount -- the Docker API grants
+      # far more than log reading. It is here because container log collection
+      # has no unprivileged equivalent; if that trade is unacceptable, drop this
+      # service and Loki keeps working for anything else that writes to it.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Volume name kept as promtail_positions, which is what the previous stack
+      # called it, so an existing inframonitor_promtail_positions volume is reused rather
+      # than orphaned beside a new one.
+      - promtail_positions:/promtail
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: inframonitor-alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      # Unauthenticated, and its UI can create silences, so localhost by default.
+      - "${MONITORING_BIND:-127.0.0.1}:${ALERTMANAGER_PORT:-19093}:9093"
+    restart: unless-stopped
+
+# These names are the ones the previous stack used, so a host that still has
+# inframonitor_postgres_data, inframonitor_prometheus_data, inframonitor_grafana_data, inframonitor_loki_data,
+# inframonitor_promtail_positions or inframonitor_alertmanager_data lying around reuses them
+# instead of accumulating a second set beside them. There is deliberately no
+# redis_data here: an existing inframonitor_redis_data volume is a leftover and can be
+# removed with `docker volume rm inframonitor_redis_data`.
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  promtail_positions:
+  alertmanager_data:

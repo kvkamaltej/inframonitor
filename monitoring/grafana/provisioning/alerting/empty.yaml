@@ -1,0 +1,29 @@
+# Intentionally provisions nothing.
+#
+# Two reasons this file exists rather than the directory being absent or holding
+# a .gitkeep:
+#
+# 1. The grafana image ships /etc/grafana/provisioning with empty alerting/ and
+#    plugins/ subdirectories. docker-compose.full.yml bind-mounts the whole
+#    provisioning tree over that path, which hides them, and Grafana then logs on
+#    every single boot:
+#      level=error msg="can't read alerting provisioning files from directory"
+#        path=/etc/grafana/provisioning/alerting error="no such file or directory"
+#    Nothing is broken when that appears, which is exactly why it is worth
+#    removing: a stack that logs an error on every start teaches operators to
+#    ignore its log.
+#
+# 2. The alerting provisioner accepts only .yaml/.yml/.json and warns about
+#    anything else, so a .gitkeep placeholder here traded the error for a
+#    warning. An `apiVersion: 1` file with no rule groups, contact points or
+#    notification policies is valid and provisions nothing, so the directory is
+#    non-empty and the log is clean.
+#
+# Grafana's own unified alerting is deliberately unused by this stack: alert rules
+# live in Prometheus (monitoring/prometheus/alerts.yml) and routing lives in
+# Alertmanager (monitoring/alertmanager/alertmanager.yml), which is also why the
+# Prometheus datasource sets manageAlerts: false. Provisioning Grafana-managed
+# rules here as well would mean two independent alerting systems watching the same
+# metrics and notifying separately.
+
+apiVersion: 1

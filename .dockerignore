@@ -1,0 +1,61 @@
+# There was no .dockerignore before, so node_modules, .next, out, __pycache__
+# and .env were all uploaded to the daemon and could end up in image layers.
+
+# --- Node build output and dependencies -----------------------------------
+# node_modules must be excluded or `COPY frontend/ ./` would overwrite the
+# node_modules that `npm ci` just installed in the ui stage.
+node_modules
+**/node_modules
+.next
+**/.next
+out
+**/out
+*.tsbuildinfo
+npm-debug.log*
+
+# --- Python artefacts -----------------------------------------------------
+__pycache__
+**/__pycache__
+*.py[cod]
+.venv
+venv
+.pytest_cache
+**/.pytest_cache
+.mypy_cache
+
+# --- Secrets --------------------------------------------------------------
+# .env holds JWT_SECRET, which is both the JWT signing key and the key that
+# encrypts stored SSH credentials. It must never be baked into a layer -- it is
+# supplied at run time by Compose. .env.example is not needed at build time
+# either, so both patterns stay excluded.
+.env
+.env.*
+
+# --- Local runtime data ---------------------------------------------------
+data
+backups
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Not needed in the build context --------------------------------------
+.git
+.gitignore
+.claude
+docs
+*.md
+Dockerfile
+.dockerignore
+docker-compose*.yml
+scripts
+
+# --- Not needed inside the app image ---------------------------------------
+# monitoring/ is bind-mounted into the Prometheus/Grafana/Loki containers in the
+# full profile, so it never belongs in the app image. nginx/, database/ and
+# docker/ are leftovers from the removed multi-container stack.
+monitoring
+nginx
+database
+docker

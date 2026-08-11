@@ -1,0 +1,90 @@
+# Prometheus configuration for the Infra Monitor full profile.
+#
+# Only reachable in full mode: docker-compose.full.yml mounts this file and the
+# app is started with METRICS_ENABLED=true so that /metrics exists at all.
+#
+# Every job below scrapes something that is actually in the Compose network. The
+# previous version also carried a `node-exporters` job using file_sd_configs
+# against /etc/prometheus/targets/*.json -- a path that was never mounted, so it
+# resolved to nothing and had zero targets forever while looking like working
+# node monitoring. That directory is now a real, mounted, documented opt-in;
+# see ./targets/README.md.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: inframonitor
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+scrape_configs:
+  # ---------------------------------------------------------------------------
+  # The Infra Monitor backend. This is the job the alert rules and the Grafana dashboard
+  # care about; the job name "inframonitor-backend" is referenced by both, so renaming it
+  # here means renaming it there.
+  # ---------------------------------------------------------------------------
+  - job_name: inframonitor-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - app:8000
+        labels:
+          component: backend
+
+  # ---------------------------------------------------------------------------
+  # The monitoring stack watching itself. Each of these exposes /metrics with no
+  # extra exporter needed.
+  # ---------------------------------------------------------------------------
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  - job_name: alertmanager
+    static_configs:
+      - targets:
+          - alertmanager:9093
+
+  - job_name: loki
+    static_configs:
+      - targets:
+          - loki:3100
+
+  - job_name: promtail
+    static_configs:
+      - targets:
+          - promtail:9080
+
+  - job_name: grafana
+    static_configs:
+      - targets:
+          - grafana:3000
+
+  # ---------------------------------------------------------------------------
+  # Optional node_exporter targets, opt-in by file.
+  #
+  # ./monitoring/prometheus/targets is bind-mounted at /etc/prometheus/targets,
+  # so this glob resolves to a directory that exists. It ships holding a single
+  # empty target list, which means the job starts with zero targets *on purpose*
+  # and Prometheus picks up additions to the file within 30s with no restart --
+  # as opposed to the old config, where the path did not exist and could never
+  # have any targets at all.
+  #
+  # There is no node_exporter container in this stack. This job exists so that
+  # node_exporters you run on the machines in your inventory can be scraped by
+  # editing one JSON file.
+  # ---------------------------------------------------------------------------
+  - job_name: node-exporters
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/*.json
+        refresh_interval: 30s

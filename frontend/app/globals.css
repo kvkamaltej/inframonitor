@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --inframonitor-accent: #0f766e;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: #f8f9fa; /* M3 Light Surface */
+  color: #1f1f1f; /* M3 Light On-Surface */
+  min-height: 100vh;
+}
+
+.dark body {
+  background: #121212; /* M3 Dark Surface */
+  color: #e3e3e3; /* M3 Dark On-Surface */
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.text-accent {
+  color: var(--inframonitor-accent) !important;
+}
+
+.bg-accent {
+  background-color: var(--inframonitor-accent) !important;
+}
+
+.border-accent {
+  border-color: var(--inframonitor-accent) !important;
+}
+
+
+
+
+
+

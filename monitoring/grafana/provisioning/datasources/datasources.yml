@@ -1,0 +1,60 @@
+# Grafana datasource provisioning for the Infra Monitor full profile.
+#
+# Every datasource declares an explicit, lowercase `uid`. That is not cosmetic:
+# a provisioned datasource with no uid gets a random one at first start, and any
+# dashboard JSON that hardcodes a uid then points at a datasource that does not
+# exist -- which is exactly the bug the old dashboard had. It referenced
+# "uid": "Prometheus" (the datasource *name*, which is not a uid) against a
+# datasource that declared no uid at all, so every panel opened with "Datasource
+# not found" until someone re-picked it by hand.
+#
+# The uids below are what monitoring/grafana/dashboards/inframonitor-overview.json
+# references. Change one and you must change the other.
+
+apiVersion: 1
+
+# Named here as well so that a rename in this file removes the old datasource
+# instead of leaving an orphan alongside the new one.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+  - name: Loki
+    orgId: 1
+  - name: Alertmanager
+    orgId: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Matches global.scrape_interval in monitoring/prometheus/prometheus.yml.
+      # Grafana uses it as the minimum step, so a mismatch produces either gappy
+      # graphs or needless over-sampling.
+      timeInterval: 15s
+      httpMethod: POST
+      manageAlerts: false
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+
+  - name: Alertmanager
+    uid: alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    editable: false
+    jsonData:
+      # Alertmanager's own API, not Grafana's unified alerting backend.
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false
