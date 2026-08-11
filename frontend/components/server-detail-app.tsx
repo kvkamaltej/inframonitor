@@ -631,7 +631,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                 <span className="text-xs text-slate-500 dark:text-slate-400">{tomcat ? "Live probe" : server?.last_discovery ? `From discovery on ${new Date(server.last_discovery).toLocaleString()}` : "Never discovered"}</span>
               </div>
               <table className="w-full text-left text-sm">
-                <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-950 dark:text-slate-400"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Version</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Enabled</th><th className="px-4 py-3">PID</th><th className="px-4 py-3">Ports</th><th className="px-4 py-3">CATALINA_BASE</th><th className="px-4 py-3">Actions</th></tr></thead>
+                <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:bg-slate-800/40 dark:text-slate-400"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Version</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Enabled</th><th className="px-4 py-3">PID</th><th className="px-4 py-3">Ports</th><th className="px-4 py-3">CATALINA_BASE</th><th className="px-4 py-3">Actions</th></tr></thead>
                 <tbody>
                   {tomcatRows.map((instance) => (
                     <Fragment key={instance.name}>
@@ -752,7 +752,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
               }
             >
               <table className="w-full text-left text-sm">
-                <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-950 dark:text-slate-400"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Image</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Ports</th><th className="px-4 py-3">Actions</th></tr></thead>
+                <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:bg-slate-800/40 dark:text-slate-400"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Image</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Ports</th><th className="px-4 py-3">Actions</th></tr></thead>
                 <tbody>
                   {containers.map((container) => (
                     <tr key={container.id} className="border-t border-line dark:border-slate-700">
@@ -781,9 +781,9 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
           ) : null}
 
           {tab === "logs" ? (
-            <div className={`bg-panel dark:bg-slate-900 ${isFullscreen ? "fixed inset-0 z-[100] flex flex-col" : "border border-line dark:border-slate-700"}`}>
-              <div className="flex items-center justify-between border-b border-line px-4 py-3 font-semibold dark:border-slate-700">
-                <span>Logs {selected ? `: ${selected}` : ""}</span>
+            <div className={`bg-white dark:bg-slate-900 ${isFullscreen ? "fixed inset-0 z-[100] flex flex-col" : "overflow-hidden rounded-2xl shadow-sm ring-1 ring-slate-200 dark:ring-slate-800"}`}>
+              <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5 font-semibold text-slate-900 dark:border-slate-800 dark:text-slate-100">
+                <span className="flex items-center gap-2"><FileText size={18} className="text-accent" />Logs {selected ? <span className="font-mono text-xs font-medium text-slate-500 dark:text-slate-400">{selected}</span> : ""}</span>
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => void copyLogs()}
@@ -1085,24 +1085,76 @@ function CredentialsDialog({ hasCredentials, busy, onClose, onSave }: { hasCrede
 // toolbar row of its own below the title.
 function Panel({ title, icon, children, action }: { title: string; icon: React.ReactNode; children: React.ReactNode; action?: React.ReactNode }) {
   return (
-    <div className="border border-line bg-panel dark:border-slate-700 dark:bg-slate-900">
-      <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3 font-semibold dark:border-slate-700 text-accent">
-        <div className="flex items-center gap-2">{icon}<span className="text-slate-900 dark:text-slate-100">{title}</span></div>
+    <div className="overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-800">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3.5 dark:border-slate-800">
+        <div className="flex items-center gap-2 font-semibold text-slate-900 dark:text-slate-100"><span className="text-accent">{icon}</span><span>{title}</span></div>
         {action ? <div className="flex items-center gap-2">{action}</div> : null}
       </div>
-      <div className="overflow-x-auto p-4">{children}</div>
+      <div className="overflow-x-auto p-5">{children}</div>
     </div>
+  );
+}
+
+// Prettifies a raw record key ("used_percent" -> "Used percent") for a column header.
+function columnLabel(key: string): string {
+  const words = key.replace(/_/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+const STATUS_CHIP: Record<string, string> = {
+  active: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  running: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  healthy: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  present: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  enabled: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  ok: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+  warning: "bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
+  failed: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  critical: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  dead: "bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  inactive: "bg-slate-100 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300",
+  stopped: "bg-slate-100 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300",
+  disabled: "bg-slate-100 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300",
+  unknown: "bg-slate-100 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300"
+};
+
+function StatusChip({ value }: { value: string }) {
+  const key = value.trim().toLowerCase();
+  if (!key) return <span className="text-slate-400">-</span>;
+  const style = STATUS_CHIP[key] ?? "bg-slate-100 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300";
+  const dot = /emerald/.test(style) ? "bg-emerald-500" : /amber/.test(style) ? "bg-amber-500" : /red/.test(style) ? "bg-red-500" : "bg-slate-400";
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold capitalize ${style}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+      {value}
+    </span>
   );
 }
 
 function DataTable({ rows, columns, action }: { rows: Array<Record<string, string>>; columns: string[]; action?: (row: Record<string, string>) => React.ReactNode }) {
   return (
-    <table className="w-full text-left text-sm">
-      <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-950 dark:text-slate-400"><tr>{columns.map((column) => <th key={column} className="px-4 py-3">{column}</th>)}{action ? <th className="px-4 py-3">Action</th> : null}</tr></thead>
-      <tbody>
-        {rows.map((row, index) => <tr key={index} className="border-t border-line dark:border-slate-700">{columns.map((column) => <td key={column} className="max-w-md break-words px-4 py-3">{row[column] ?? ""}</td>)}{action ? <td className="px-4 py-3">{action(row)}</td> : null}</tr>)}
-        {rows.length === 0 ? <tr><td className="px-4 py-6 text-slate-500" colSpan={columns.length + (action ? 1 : 0)}>No data discovered yet.</td></tr> : null}
-      </tbody>
-    </table>
+    <div className="overflow-hidden rounded-xl ring-1 ring-slate-200 dark:ring-slate-800">
+      <table className="w-full text-left text-sm">
+        <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:bg-slate-800/40 dark:text-slate-400">
+          <tr>
+            {columns.map((column) => <th key={column} className="px-4 py-3">{columnLabel(column)}</th>)}
+            {action ? <th className="px-4 py-3 text-right">Action</th> : null}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+          {rows.map((row, index) => (
+            <tr key={index} className="transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/40">
+              {columns.map((column) => (
+                <td key={column} className="max-w-md break-words px-4 py-3 text-slate-700 dark:text-slate-200">
+                  {column === "status" ? <StatusChip value={row[column] ?? ""} /> : (row[column] ?? "")}
+                </td>
+              ))}
+              {action ? <td className="px-4 py-3 text-right">{action(row)}</td> : null}
+            </tr>
+          ))}
+          {rows.length === 0 ? <tr><td className="px-4 py-6 text-slate-500 dark:text-slate-400" colSpan={columns.length + (action ? 1 : 0)}>No data discovered yet.</td></tr> : null}
+        </tbody>
+      </table>
+    </div>
   );
 }
