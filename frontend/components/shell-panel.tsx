@@ -19,6 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ShellFavorites } from "@/components/shell-favorites";
 import { SftpPanel } from "@/components/sftp-panel";
 import { shellHandshake, shellSocketUrl } from "@/lib/api";
+import { currentTheme, termPalette, THEME_EVENT, type ThemeName } from "@/lib/theme";
 // xterm's stylesheet must be bundled; the CSP forbids fetching it from a CDN
 import "@xterm/xterm/css/xterm.css";
 
@@ -179,6 +180,10 @@ function ShellSessionView({
     let observer: ResizeObserver | null = null;
     let frame = 0;
     let timer = 0;
+    // Live re-theme handler, registered once the terminal exists and removed on dispose.
+    // Declared in the effect scope so the cleanup below can detach it even though it is
+    // assigned inside the async start().
+    let onThemeChange: ((event: Event) => void) | null = null;
 
     async function start() {
       const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]);
@@ -189,9 +194,20 @@ function ShellSessionView({
         cursorBlink: true,
         fontSize: 13,
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
-        theme: { background: "#0b1020", foreground: "#e2e8f0", cursor: "#5eead4" },
+        // The palette is no longer hardcoded: it is derived from the active named theme so
+        // the terminal matches the rest of the UI. A new session reads whatever theme is
+        // live at creation time; the listener below live-re-themes an already-open session
+        // when the operator switches themes.
+        theme: termPalette(currentTheme()),
         scrollback: 5000
       });
+      // Nice-to-have: repaint an open terminal on a theme switch. `terminal.options.theme`
+      // is xterm's supported way to swap the palette after construction.
+      onThemeChange = (event: Event) => {
+        const name = (event as CustomEvent<{ name: ThemeName }>).detail?.name;
+        if (name) terminal.options.theme = termPalette(name);
+      };
+      document.documentElement.addEventListener(THEME_EVENT, onThemeChange);
       const fitAddon = new FitAddon();
       terminal.loadAddon(fitAddon);
       terminal.open(mountRef.current);
@@ -313,6 +329,7 @@ function ShellSessionView({
       disposed = true;
       if (frame) window.cancelAnimationFrame(frame);
       if (timer) window.clearTimeout(timer);
+      if (onThemeChange) document.documentElement.removeEventListener(THEME_EVENT, onThemeChange);
       observer?.disconnect();
       registerRef.current(sessionKey, null);
       try {

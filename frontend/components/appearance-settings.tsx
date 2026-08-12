@@ -2,6 +2,7 @@
 
 import { Palette } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ThemePicker } from "@/components/theme-picker";
 
 const colors = [
   ["Teal", "#0f766e"],
@@ -31,10 +32,14 @@ export function AppearanceSettings() {
   }
 
   return (
-    <div className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-200 dark:bg-[#1e1e1e] dark:ring-slate-800">
-      <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50 px-6 py-4 font-semibold text-slate-900 dark:border-slate-800/50 dark:bg-slate-800/20 dark:text-slate-100"><Palette size={18} className="text-accent" /> Appearance</div>
-      <div className="grid gap-4 p-6">
-        <p className="text-sm font-medium text-slate-600 dark:text-slate-300">Accent colour</p>
+    <div className="overflow-hidden rounded-3xl bg-surface shadow-sm ring-1 ring-edge">
+      <div className="flex items-center gap-3 border-b border-edge bg-elevated px-6 py-4 font-semibold text-fg"><Palette size={18} className="text-accent" /> Appearance</div>
+      <div className="grid gap-6 p-6">
+        {/* EXPERIMENTAL theme selector — the primary fix for the "everything is white" /
+            "harsh carbon" complaint. Picks the whole named palette (UI + terminal). */}
+        <ThemePicker variant="full" />
+        <div className="h-px bg-edge" />
+        <p className="text-sm font-medium text-muted">Accent colour</p>
         <div className="flex flex-wrap items-center gap-3">
           {colors.map(([name, value]) => (
             <button key={value} title={name} onClick={() => apply(value)} className={`h-10 w-10 rounded-full shadow-sm ring-offset-2 transition-all hover:scale-110 dark:ring-offset-[#1e1e1e] ${color === value ? "ring-2 ring-slate-900 dark:ring-slate-100" : ""}`} style={{ backgroundColor: value }} />

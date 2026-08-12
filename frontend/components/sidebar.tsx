@@ -5,6 +5,8 @@ import { ChevronDown, ChevronRight, Folder as FolderIcon, Layers, Loader2, Menu,
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getFolders, getServers, Folder as FolderType, Server as ServerRow } from "@/lib/api";
+import { ThemePicker } from "@/components/theme-picker";
+import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT, resolveInitialTheme, themeMeta, THEME_EVENT, type ThemeName } from "@/lib/theme";
 
 export function Sidebar({ role }: { role?: string }) {
   const [open, setOpen] = useState(true);
@@ -88,23 +90,31 @@ export function Sidebar({ role }: { role?: string }) {
   useEffect(() => {
     const saved = localStorage.getItem("inframonitor-sidebar");
     if (saved) setOpen(saved === "open");
-    // Apply the persisted theme and accent on mount. This used to live in ThemeToggle, which
-    // was removed from the header; the sidebar renders on every authenticated page, so it is
-    // now the one place that initialises the look.
-    const savedTheme = localStorage.getItem("inframonitor-theme");
-    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const enabled = savedTheme ? savedTheme === "dark" : prefersDark;
-    document.documentElement.classList.toggle("dark", enabled);
+    // Apply the persisted theme and accent on mount. The inline script in layout.tsx has
+    // already stamped `data-theme` + `dark` pre-paint; re-applying here is idempotent and
+    // keeps this component's `dark` state in step with whatever was resolved. The sidebar
+    // renders on every authenticated page, so it remains the one place that initialises the
+    // look, but the resolution/persistence logic now lives in lib/theme.ts.
+    const initial = resolveInitialTheme();
+    applyTheme(initial);
+    setDark(themeMeta(initial).isDark);
     const accent = localStorage.getItem("inframonitor-accent");
     if (accent) document.documentElement.style.setProperty("--inframonitor-accent", accent);
-    setDark(enabled);
+    // The theme can also change from the picker below (or the one on the appearance page);
+    // keep the light/dark icon honest by following the shared theme-change event.
+    function onThemeChange(event: Event) {
+      const name = (event as CustomEvent<{ name: ThemeName }>).detail?.name;
+      if (name) setDark(themeMeta(name).isDark);
+    }
+    document.documentElement.addEventListener(THEME_EVENT, onThemeChange);
+    return () => document.documentElement.removeEventListener(THEME_EVENT, onThemeChange);
   }, []);
 
+  // The plain toggle stays as a one-click shortcut between the two comfortable defaults
+  // (Soft Light / Comfortable Dark); the picker underneath it offers the full set. Both
+  // funnel through applyTheme, so they can never disagree.
   function toggleTheme() {
-    const next = !document.documentElement.classList.contains("dark");
-    document.documentElement.classList.toggle("dark", next);
-    localStorage.setItem("inframonitor-theme", next ? "dark" : "light");
-    setDark(next);
+    applyTheme(dark ? DEFAULT_LIGHT : DEFAULT_DARK);
   }
 
   function toggle() {
@@ -132,9 +142,12 @@ export function Sidebar({ role }: { role?: string }) {
       >
         {open ? <X size={20} /> : <Menu size={20} />}
       </button>
-      <aside className={`${open ? "w-72" : "w-[72px]"} sticky top-0 flex h-screen shrink-0 flex-col overflow-y-auto overflow-x-hidden border-r border-slate-200 bg-[#f8f9fa] transition-all duration-300 dark:border-slate-800 dark:bg-[#121212]`}>
+      {/* Surface + border + brand now flow from the active theme's variables (bg-page /
+          border-edge / text-fg) instead of the old hardcoded light/dark pair, so switching
+          themes visibly re-skins the whole rail. */}
+      <aside className={`${open ? "w-72" : "w-[72px]"} sticky top-0 flex h-screen shrink-0 flex-col overflow-y-auto overflow-x-hidden border-r border-edge bg-page transition-all duration-300`}>
         <div className="flex h-16 shrink-0 items-center px-4 pl-16">
-          <span className={`text-xl font-semibold tracking-tight text-slate-900 transition-opacity duration-200 dark:text-white ${open ? "opacity-100" : "opacity-0 hidden"}`}>Infra Monitor Console</span>
+          <span className={`text-xl font-semibold tracking-tight text-fg transition-opacity duration-200 ${open ? "opacity-100" : "opacity-0 hidden"}`}>Infra Monitor Console</span>
         </div>
       <nav className="flex flex-1 flex-col px-2 py-4">
         <div className="grid gap-1">
@@ -192,6 +205,9 @@ export function Sidebar({ role }: { role?: string }) {
             {dark ? <Sun size={20} className="shrink-0" /> : <Moon size={20} className="shrink-0" />}
             <span className={`transition-opacity duration-200 ${open ? "opacity-100 w-auto" : "opacity-0 w-0 hidden"}`}>{dark ? "Light mode" : "Dark mode"}</span>
           </button>
+          {/* Full theme selection lives right under the quick toggle. Only worth showing
+              when the rail is expanded — the <select> needs the width to be usable. */}
+          {open ? <ThemePicker variant="compact" /> : null}
         </div>
       </nav>
     </aside>

@@ -151,18 +151,20 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
     }
   }, []);
 
-  if (loading) return <div className="flex min-h-screen items-center justify-center bg-[#f8f9fa] dark:bg-[#121212]"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
+  if (loading) return <div className="flex min-h-screen items-center justify-center bg-page"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
   if (!token || !me) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); setLoading(true); void load(nextToken); }} />;
 
   return (
     <main className="flex min-h-screen">
       <Sidebar role={me.role} />
       <div className="min-w-0 flex-1">
-        <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-[#1e1e1e]">
+        {/* Top header re-themed via variables (bg-elevated / border-edge / text-fg) so it
+            tracks the active theme across all six palettes instead of a fixed white/#1e1e1e. */}
+        <header className="border-b border-edge bg-elevated">
           <div className="flex h-16 items-center justify-between px-6 pl-16">
             <div>
-              <h1 className="text-xl font-medium tracking-tight text-slate-900 dark:text-slate-100">{title}</h1>
-              {subtitle ? <p className="text-xs font-medium text-slate-500 dark:text-slate-400">{subtitle}</p> : null}
+              <h1 className="text-xl font-medium tracking-tight text-fg">{title}</h1>
+              {subtitle ? <p className="text-xs font-medium text-muted">{subtitle}</p> : null}
             </div>
             <div className="flex items-center gap-4 text-sm font-medium text-slate-700 dark:text-slate-200">
               <div className="flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 dark:bg-slate-800">

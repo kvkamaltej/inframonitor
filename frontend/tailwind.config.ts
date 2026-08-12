@@ -11,7 +11,19 @@ const config: Config = {
         line: "#d8dee8",
         accent: "var(--inframonitor-accent, #0f766e)",
         warn: "#b45309",
-        danger: "#b91c1c"
+        danger: "#b91c1c",
+        // EXPERIMENTAL theme tokens. These map onto the per-theme CSS variables in
+        // globals.css, so `bg-page`, `bg-surface`, `text-fg`, `border-edge` … re-theme
+        // automatically across every named theme WITHOUT needing a `dark:` counterpart.
+        // They intentionally sit alongside the legacy tokens above (ink/panel/line),
+        // which are left in place — a full migration of every hardcoded utility colour
+        // is out of scope, so both vocabularies coexist for now.
+        page: "var(--im-page)",
+        surface: "var(--im-surface)",
+        elevated: "var(--im-elevated)",
+        fg: "var(--im-fg)",
+        muted: "var(--im-muted)",
+        edge: "var(--im-edge)"
       }
     }
   },

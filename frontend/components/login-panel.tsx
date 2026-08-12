@@ -25,8 +25,8 @@ export function LoginPanel({ onLogin }: { onLogin: (token: string) => void }) {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#f8f9fa] px-6 dark:bg-[#121212]">
-      <form onSubmit={submit} className="w-full max-w-sm rounded-3xl bg-white p-8 shadow-sm ring-1 ring-slate-200 dark:bg-[#1e1e1e] dark:ring-slate-800">
+    <main className="flex min-h-screen items-center justify-center bg-page px-6">
+      <form onSubmit={submit} className="w-full max-w-sm rounded-3xl bg-surface p-8 shadow-sm ring-1 ring-edge">
         <div className="mb-8 flex flex-col items-center gap-4 text-center">
           <div className="flex h-14 w-14 items-center justify-center rounded-full bg-accent/10 text-accent dark:bg-accent/20">
             <LockKeyhole size={28} />
