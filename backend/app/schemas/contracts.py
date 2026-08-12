@@ -82,6 +82,31 @@ class ServerRead(BaseModel):
     last_backup: datetime | None
     last_discovery: datetime | None = None
     created_at: datetime
+    # EXPERIMENTAL (feature/server-folders): the public_id of the folder this server is in, or ""
+    # when unassigned. A string, not an int, because the whole API speaks in public_ids -- the UI
+    # matches this against FolderRead.id to bucket rows under folder headers.
+    folder_id: str = ""
+
+
+class FolderCreate(BaseModel):
+    # only the name is client-supplied; public_id is minted server-side at creation
+    name: str
+
+
+class FolderRead(BaseModel):
+    # id is the folder's public_id (a uuid string), matching how ServerRead.id works -- never the
+    # autoincrement primary key. server_count is computed per request so the UI can label each
+    # folder header with its membership without a second round-trip.
+    id: str
+    name: str
+    server_count: int
+
+
+class ServerFolderUpdate(BaseModel):
+    # None or "" unassigns (folder_id -> NULL); a non-empty value is a folder public_id to resolve.
+    # Optional with a None default so an assign call can send either {"folder_id": null} or
+    # {"folder_id": "<uuid>"} and an unassign can even omit the field entirely.
+    folder_id: str | None = None
 
 
 class Summary(BaseModel):

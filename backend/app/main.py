@@ -45,6 +45,12 @@ EXPECTED_SERVER_COLUMNS: list[tuple[str, str]] = [
     ("ram_used_mb", "0"),
     ("process_count", "0"),
     ("vitals_checked_at", "NULL"),
+    # EXPERIMENTAL (feature/server-folders): the FK to folders.id. The `folders` table itself is
+    # created by create_all(); this line ALTERs the pre-existing servers table on an already
+    # populated database. DEFAULT NULL matches the nullable ORM column -- every existing server
+    # starts life "Unassigned". The DDL type is compiled from the ORM column by _column_ddl_type,
+    # so this works unchanged on SQLite and PostgreSQL.
+    ("folder_id", "NULL"),
 ]
 
 DEFAULT_APP_SETTINGS: dict[str, list[str]] = {

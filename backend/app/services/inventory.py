@@ -70,6 +70,10 @@ def to_read(server: Server) -> ServerRead:
         last_backup=server.last_backup,
         last_discovery=server.last_discovery,
         created_at=server.created_at,
+        # EXPERIMENTAL (feature/server-folders): expose the folder as its public_id, or "" when
+        # unassigned. Reading server.folder lazy-loads the related row; that is fine for the
+        # inventory list sizes here, and keeps to_read a pure function of the ORM object.
+        folder_id=server.folder.public_id if server.folder else "",
     )
 
 

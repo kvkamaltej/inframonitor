@@ -108,6 +108,18 @@ export type Server = {
   ram_used_mb: number;
   process_count: number;
   vitals_checked_at: string | null;
+  // EXPERIMENTAL (feature/server-folders): the public_id of the folder this server sits in, or
+  // "" when unassigned. Matched against Folder.id to bucket rows under folder headers.
+  folder_id: string;
+};
+
+// EXPERIMENTAL (feature/server-folders): a flat, optional grouping over servers ("BH", "MH",
+// "EMS"). `id` is the folder's public_id (a uuid string), never a numeric id -- the whole API
+// speaks in public_ids. server_count is computed server-side per request.
+export type Folder = {
+  id: string;
+  name: string;
+  server_count: number;
 };
 
 export type PrivilegedResult = {
@@ -440,6 +452,42 @@ export async function getServer(token: string, id: string): Promise<Server> {
 
 export async function getIntegrations(token: string): Promise<Integration[]> {
   return request<Integration[]>("/integrations", token);
+}
+
+// --- folders (EXPERIMENTAL: feature/server-folders) ---------------------------------------
+// Reads follow the inventory's require_user rule; create/rename/delete/assign are admin-only
+// and come back 403 for anyone else. A duplicate folder name (case-insensitive) is a 409,
+// which request<T> surfaces as an ApiError carrying the body text.
+
+export async function getFolders(token: string): Promise<Folder[]> {
+  return request<Folder[]>("/folders", token);
+}
+
+export async function createFolder(token: string, name: string): Promise<Folder> {
+  return request<Folder>("/folders", token, { method: "POST", body: JSON.stringify({ name }) });
+}
+
+export async function renameFolder(token: string, folderId: string, name: string): Promise<Folder> {
+  return request<Folder>(`/folders/${encodeURIComponent(folderId)}`, token, { method: "PATCH", body: JSON.stringify({ name }) });
+}
+
+export async function deleteFolder(token: string, folderId: string): Promise<void> {
+  // 204 No Content, so request<T> is wrong here: response.json() throws on an empty body.
+  const response = await fetch(`${API_URL}/folders/${encodeURIComponent(folderId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store"
+  });
+  if (!response.ok) throw new ApiError(response.status, await response.text());
+}
+
+// Passing null (or "") unassigns the server; a folder public_id assigns it. Returns the
+// updated server so the caller can patch it into local state without a full reload.
+export async function assignServerFolder(token: string, serverId: string, folderId: string | null): Promise<Server> {
+  return request<Server>(`/servers/${encodeURIComponent(serverId)}/folder`, token, {
+    method: "PUT",
+    body: JSON.stringify({ folder_id: folderId })
+  });
 }
 
 export async function addServer(token: string, payload: unknown): Promise<Server> {

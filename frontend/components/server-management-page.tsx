@@ -1,14 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, ArrowDown, ArrowUp, ArrowUpDown, FileUp, Filter, MonitorDot, Plus, TerminalSquare, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Activity, ArrowDown, ArrowUp, ArrowUpDown, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, List, MonitorDot, Plus, TerminalSquare, Trash2, X } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { AddServerForm } from "@/components/add-server-form";
 import { AppShell } from "@/components/app-shell";
+import { useConfirm } from "@/components/confirm-dialog";
 import { CsvImportPanel } from "@/components/csv-import-panel";
 import { ShellPanel } from "@/components/shell-panel";
 import { StatusPill } from "@/components/status-pill";
-import { getServers, refreshVitals, Server } from "@/lib/api";
+import { assignServerFolder, createFolder, deleteFolder, getFolders, getServers, refreshVitals, Folder, Server } from "@/lib/api";
 
 const ALL = "__all__";
 
@@ -124,8 +125,17 @@ function SortHeader({ label, column, sortKey, sortDir, onSort, className }: { la
   );
 }
 
+// EXPERIMENTAL (feature/server-folders): the "Unassigned" bucket has no folder public_id, so it
+// is keyed by the empty string throughout — the same value ServerRead.folder_id carries when a
+// server is in no folder. Keeping the sentinel identical to the wire value means grouping never
+// has to translate between "" and some other placeholder.
+const UNASSIGNED = "";
+
+type ServerGroup = { key: string; name: string; count: number; rows: Server[] };
+
 function ServerManagementContent({ token, role }: { token: string; role: string }) {
   const [servers, setServers] = useState<Server[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -135,14 +145,84 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   const [envFilter, setEnvFilter] = useState(ALL);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  // Grouped-by-folder is the default view the feature is meant to deliver; the toggle drops back
+  // to the original flat "all servers" table for anyone who wants it.
+  const [grouped, setGrouped] = useState(true);
+  const [showFolderManager, setShowFolderManager] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [folderBusy, setFolderBusy] = useState(false);
+  const [folderError, setFolderError] = useState("");
   const isAdmin = role === "admin";
+  const { confirm, confirmDialog } = useConfirm();
 
   async function load() {
     try {
-      setServers(await getServers(token));
+      // folders are needed by every role for the grouped view, and both endpoints are cheap, so
+      // load them together — a failure of either surfaces as one inventory-load error
+      const [nextServers, nextFolders] = await Promise.all([getServers(token), getFolders(token)]);
+      setServers(nextServers);
+      setFolders(nextFolders);
       setLoadError("");
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Unable to load servers");
+    }
+  }
+
+  // Re-fetch just the folder list after a membership or folder change, so the counts on the
+  // section headers stay honest without a full inventory reload.
+  async function reloadFolders() {
+    try {
+      setFolders(await getFolders(token));
+    } catch {
+      // a stale count is not worth surfacing an error banner over; the next full load corrects it
+    }
+  }
+
+  async function assignFolder(server: Server, folderId: string | null) {
+    try {
+      const updated = await assignServerFolder(token, server.id, folderId);
+      setServers((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      void reloadFolders();
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Unable to move server");
+    }
+  }
+
+  async function submitNewFolder(event: React.FormEvent) {
+    event.preventDefault();
+    const name = newFolderName.trim();
+    if (!name) return;
+    setFolderBusy(true);
+    setFolderError("");
+    try {
+      await createFolder(token, name);
+      setNewFolderName("");
+      await reloadFolders();
+    } catch (error) {
+      // a duplicate name comes back 409; show the server's message rather than a generic one
+      setFolderError(error instanceof Error ? error.message : "Unable to create folder");
+    } finally {
+      setFolderBusy(false);
+    }
+  }
+
+  async function removeFolder(folder: Folder) {
+    const ok = await confirm({
+      title: `Delete folder "${folder.name}"?`,
+      message: folder.server_count > 0
+        ? `Its ${folder.server_count} server${folder.server_count === 1 ? "" : "s"} will move to Unassigned. The servers themselves are not deleted.`
+        : "This folder is empty.",
+      confirmLabel: "Delete folder",
+      danger: true
+    });
+    if (!ok) return;
+    setFolderError("");
+    try {
+      await deleteFolder(token, folder.id);
+      // servers that were in the folder now report folder_id "", so reload both lists
+      await load();
+    } catch (error) {
+      setFolderError(error instanceof Error ? error.message : "Unable to delete folder");
     }
   }
 
@@ -164,6 +244,32 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
       ? compareIp(a.ip_address, b.ip_address)
       : (a.hostname || "").localeCompare(b.hostname || "", undefined, { numeric: true, sensitivity: "base" })));
   }, [servers, typeFilter, envFilter, sortKey, sortDir]);
+
+  // Group the ALREADY filtered-and-sorted rows so the existing filter/sort/vitals behaviour is
+  // preserved untouched within each section. Folders that have no visible row are omitted (a
+  // section header with nothing under it is just noise, and admins assign into a folder from the
+  // per-row picker, not by seeing an empty section). "Unassigned" is always rendered last.
+  const groups = useMemo<ServerGroup[]>(() => {
+    const folderIds = new Set(folders.map((folder) => folder.id));
+    const byKey = new Map<string, Server[]>();
+    for (const server of visibleServers) {
+      // a folder_id that no longer resolves (folder deleted out from under a cached row) falls
+      // back to Unassigned rather than creating a ghost section
+      const key = server.folder_id && folderIds.has(server.folder_id) ? server.folder_id : UNASSIGNED;
+      const bucket = byKey.get(key);
+      if (bucket) bucket.push(server);
+      else byKey.set(key, [server]);
+    }
+    // folders come from the API already ordered case-insensitively by name; keep that order
+    const result: ServerGroup[] = folders
+      .filter((folder) => byKey.has(folder.id))
+      .map((folder) => ({ key: folder.id, name: folder.name, count: byKey.get(folder.id)!.length, rows: byKey.get(folder.id)! }));
+    const unassigned = byKey.get(UNASSIGNED);
+    if (unassigned && unassigned.length) {
+      result.push({ key: UNASSIGNED, name: "Unassigned", count: unassigned.length, rows: unassigned });
+    }
+    return result;
+  }, [visibleServers, folders]);
 
   // A type or environment can disappear from the inventory (renamed, or its last server
   // deleted). Without this the table would silently show zero rows against a filter value
@@ -224,9 +330,49 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   const shellHidden = shellFor !== null && !visibleServers.some((server) => server.id === shellFor.id);
   const columnCount = isAdmin ? 10 : 9;
   const selectClass = "h-9 cursor-pointer rounded-full border-none bg-slate-100 px-4 text-sm font-medium capitalize text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100";
+  // Compact folder picker for a single row. Kept in the Actions column so grouping does not need
+  // an extra table column; it doubles as the assignment control in both grouped and flat views.
+  const rowFolderSelectClass = "h-8 max-w-[10rem] cursor-pointer rounded-full border-none bg-slate-100 px-3 text-xs font-medium text-slate-700 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/60 dark:text-slate-200";
+
+  // One row renderer shared by the grouped and flat views, so the columns can never drift apart
+  // between the two. Admin-only controls (Shell, folder assignment) live in the trailing cell.
+  const renderRow = (server: Server) => (
+    <tr key={server.id} className="transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50">
+      <td className="px-6 py-4"><Link href={`/server/?id=${encodeURIComponent(server.id)}`} className="font-semibold text-accent">{server.hostname}</Link><div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.tags.join(", ")}</div></td>
+      <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{server.ip_address}</td>
+      <td className="px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{osLabel(server)}<div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{[server.os_family, server.package_manager].filter(Boolean).join(" / ")}</div></td>
+      <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{uptimeLabel(server.uptime_seconds)}{server.load_average ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">load {server.load_average}</div> : null}</td>
+      <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(server.cpu_percent)}`}>{server.cpu_percent < 0 ? "-" : `${server.cpu_percent}%`}{server.cpu ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.cpu} cores</div> : null}</td>
+      <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(ramPercent(server))}`}>{ramLabel(server)}{ramPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{ramPercent(server)}% used</div> : null}</td>
+      <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{server.process_count || "-"}</td>
+      <td className="px-6 py-4">
+        <div className="flex flex-col items-start gap-1">
+          {server.server_type ? <Chip label={server.server_type} tone="accent" /> : null}
+          {server.environment ? <Chip label={server.environment} tone="slate" /> : null}
+          {!server.server_type && !server.environment ? <span className="font-medium text-slate-400 dark:text-slate-500">-</span> : null}
+        </div>
+      </td>
+      <td className="px-6 py-4"><StatusPill status={server.status} /></td>
+      {isAdmin ? (
+        <td className="px-6 py-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <button onClick={() => setShellFor(shellFor?.id === server.id ? null : server)} disabled={!server.has_credentials} title={server.has_credentials ? "Open an interactive shell" : "No stored credentials for this server"} className="inline-flex h-8 items-center gap-1.5 rounded-full bg-accent/10 px-3 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-40 dark:bg-accent/20 dark:hover:bg-accent/30">
+              <TerminalSquare size={14} /> Shell
+            </button>
+            {/* Empty value is the Unassigned option, which maps to a null assignment on the wire. */}
+            <select value={server.folder_id || ""} onChange={(event) => void assignFolder(server, event.target.value || null)} aria-label={`Folder for ${server.hostname}`} title="Move this server to a folder" className={rowFolderSelectClass}>
+              <option value="">Unassigned</option>
+              {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+            </select>
+          </div>
+        </td>
+      ) : null}
+    </tr>
+  );
 
   return (
     <section className="space-y-6 px-6 py-6">
+      {confirmDialog}
       {role !== "admin" && (
         <div className="rounded-2xl bg-slate-50 p-4 text-sm font-medium text-slate-600 ring-1 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700">Developer/support roles can view inventory, containers, and logs. Ask an admin to add or update servers.</div>
       )}
@@ -267,8 +413,16 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
             <button disabled={refreshing || visibleServers.length === 0} onClick={() => void refreshAllVitals()} title={filtersActive ? "Probe the servers matching the current filters" : "Probe every server in the inventory"} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
               <Activity size={16} className={refreshing ? "animate-pulse" : ""} /> {refreshing ? "Probing…" : `Refresh vitals${filtersActive && visibleServers.length ? ` (${visibleServers.length})` : ""}`}
             </button>
+            {/* The view toggle is available to every role: grouping is a read affordance, not an
+                admin one. Grouped is the default the feature ships with. */}
+            <button onClick={() => setGrouped((value) => !value)} title={grouped ? "Switch to a single flat list of all servers" : "Group the inventory by folder"} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
+              {grouped ? <><List size={16} /> All servers</> : <><FolderTree size={16} /> Group by folder</>}
+            </button>
             {role === "admin" && (
               <>
+                <button onClick={() => setShowFolderManager((value) => !value)} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
+                  {showFolderManager ? <><X size={16} /> Close folders</> : <><FolderIcon size={16} /> Manage folders</>}
+                </button>
                 <button onClick={() => { setShowImport(!showImport); setShowAddForm(false); }} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
                   {showImport ? <><X size={16} /> Cancel</> : <><FileUp size={16} /> Import from CSV</>}
                 </button>
@@ -288,6 +442,40 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
         {role === "admin" && showImport && (
           <div className="border-b border-slate-100 bg-slate-50 p-6 dark:border-slate-800 dark:bg-slate-900/50">
             <CsvImportPanel token={token} onImported={() => void load()} />
+          </div>
+        )}
+        {role === "admin" && showFolderManager && (
+          <div className="space-y-4 border-b border-slate-100 bg-slate-50 p-6 dark:border-slate-800 dark:bg-slate-900/50">
+            <form onSubmit={(event) => void submitNewFolder(event)} className="flex flex-wrap items-center gap-2">
+              <input
+                value={newFolderName}
+                onChange={(event) => { setNewFolderName(event.target.value); setFolderError(""); }}
+                placeholder="New folder name (e.g. BH)"
+                maxLength={128}
+                aria-label="New folder name"
+                className="h-9 min-w-[14rem] flex-1 rounded-full border-none bg-white px-4 text-sm font-medium text-slate-900 outline-none ring-1 ring-slate-200 transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700"
+              />
+              <button type="submit" disabled={folderBusy || !newFolderName.trim()} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">
+                <FolderPlus size={16} /> {folderBusy ? "Creating…" : "Create folder"}
+              </button>
+            </form>
+            {folderError ? <p className="text-xs font-medium text-danger dark:text-red-400">{folderError}</p> : null}
+            {folders.length ? (
+              <div className="flex flex-wrap gap-2">
+                {folders.map((folder) => (
+                  <span key={folder.id} className="inline-flex h-8 items-center gap-2 rounded-full bg-white px-3 text-xs font-semibold text-slate-700 ring-1 ring-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-700">
+                    <FolderIcon size={13} className="text-accent" />
+                    {folder.name}
+                    <span className="text-slate-400 dark:text-slate-500">{folder.server_count}</span>
+                    <button onClick={() => void removeFolder(folder)} title={`Delete folder ${folder.name}`} className="-mr-1 inline-flex h-5 w-5 items-center justify-center rounded-full text-slate-400 transition-colors hover:bg-danger/10 hover:text-danger dark:hover:bg-red-500/10 dark:hover:text-red-400">
+                      <Trash2 size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">No folders yet. Create one above, then assign servers from the inventory rows.</p>
+            )}
           </div>
         )}
         <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 bg-slate-50 px-6 py-3 dark:border-slate-800 dark:bg-slate-800/50">
@@ -324,32 +512,25 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">
-              {visibleServers.map((server) => (
-                <tr key={server.id} className="transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                  <td className="px-6 py-4"><Link href={`/server/?id=${encodeURIComponent(server.id)}`} className="font-semibold text-accent">{server.hostname}</Link><div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.tags.join(", ")}</div></td>
-                  <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{server.ip_address}</td>
-                  <td className="px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{osLabel(server)}<div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{[server.os_family, server.package_manager].filter(Boolean).join(" / ")}</div></td>
-                  <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{uptimeLabel(server.uptime_seconds)}{server.load_average ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">load {server.load_average}</div> : null}</td>
-                  <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(server.cpu_percent)}`}>{server.cpu_percent < 0 ? "-" : `${server.cpu_percent}%`}{server.cpu ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.cpu} cores</div> : null}</td>
-                  <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(ramPercent(server))}`}>{ramLabel(server)}{ramPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{ramPercent(server)}% used</div> : null}</td>
-                  <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{server.process_count || "-"}</td>
-                  <td className="px-6 py-4">
-                    <div className="flex flex-col items-start gap-1">
-                      {server.server_type ? <Chip label={server.server_type} tone="accent" /> : null}
-                      {server.environment ? <Chip label={server.environment} tone="slate" /> : null}
-                      {!server.server_type && !server.environment ? <span className="font-medium text-slate-400 dark:text-slate-500">-</span> : null}
-                    </div>
-                  </td>
-                  <td className="px-6 py-4"><StatusPill status={server.status} /></td>
-                  {isAdmin ? (
-                    <td className="px-6 py-4">
-                      <button onClick={() => setShellFor(shellFor?.id === server.id ? null : server)} disabled={!server.has_credentials} title={server.has_credentials ? "Open an interactive shell" : "No stored credentials for this server"} className="inline-flex h-8 items-center gap-1.5 rounded-full bg-accent/10 px-3 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-40 dark:bg-accent/20 dark:hover:bg-accent/30">
-                        <TerminalSquare size={14} /> Shell
-                      </button>
-                    </td>
-                  ) : null}
-                </tr>
-              ))}
+              {/* Grouped view: a header row per folder (with its visible count), sections in the
+                  order the API returned folders, Unassigned last. Flat view: the original single
+                  list. Both reuse renderRow so the columns stay identical. */}
+              {grouped
+                ? groups.map((group) => (
+                    <Fragment key={group.key || "__unassigned__"}>
+                      <tr className="bg-slate-50 dark:bg-slate-800/40">
+                        <td colSpan={columnCount} className="px-6 py-2.5">
+                          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                            {group.key ? <FolderIcon size={14} className="text-accent" /> : <MonitorDot size={14} className="text-slate-400 dark:text-slate-500" />}
+                            <span className="text-slate-700 dark:text-slate-200">{group.name}</span>
+                            <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">{group.count}</span>
+                          </div>
+                        </td>
+                      </tr>
+                      {group.rows.map((server) => renderRow(server))}
+                    </Fragment>
+                  ))
+                : visibleServers.map((server) => renderRow(server))}
               {servers.length === 0 ? (
                 <tr><td className="px-6 py-6 text-slate-500 dark:text-slate-400" colSpan={columnCount}>{loadError ? `Unable to load inventory: ${loadError}` : "No servers in inventory yet."}</td></tr>
               ) : null}
