@@ -8,6 +8,7 @@ import {
   deleteServer,
   discoverServer,
   refreshVitals,
+  getContainerEnv,
   getContainerLogs,
   getContainers,
   getMe,
@@ -33,6 +34,7 @@ import { addressError } from "@/lib/address";
 import { DefaultPasswordBanner } from "@/components/app-shell";
 import { useConfirm } from "@/components/confirm-dialog";
 import { LoginPanel } from "@/components/login-panel";
+import { ShellPanel } from "@/components/shell-panel";
 import { StatusPill } from "@/components/status-pill";
 import { StorageChart } from "@/components/storage-chart";
 import { Sidebar } from "@/components/sidebar";
@@ -74,6 +76,9 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   const [actionsOpen, setActionsOpen] = useState(false);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  // Container name whose interactive shell is open ("" = none). Opens a host PTY that auto-runs
+  // `docker exec -it <name> sh` so the operator lands inside the container.
+  const [containerShellFor, setContainerShellFor] = useState("");
 
   const { confirm, confirmDialog } = useConfirm();
   const isAdmin = me?.role === "admin";
@@ -237,6 +242,20 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       setTab("logs");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load logs", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function loadContainerEnv(containerName: string) {
+    if (!containerName) return;
+    setBusy(`env:${containerName}`);
+    try {
+      setSelected(`${containerName} · .env`);
+      setLogs(await getContainerEnv(token, serverId, effectiveRuntime, containerName, { tail }));
+      setTab("logs");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to read container .env", "error");
     } finally {
       setBusy("");
     }
@@ -755,6 +774,27 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
             </Panel>
           ) : null}
 
+          {tab === "containers" && containerShellFor && server ? (
+            <div className="mb-6">
+              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-300">
+                <Terminal size={15} className="text-accent" />
+                Shell inside <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">{containerShellFor}</span>
+                <span className="text-xs text-slate-400">— running <code className="font-mono">{effectiveRuntime} exec -it {containerShellFor} sh</code></span>
+              </div>
+              <ShellPanel
+                // keyed on the container so switching to a different container's shell mounts a
+                // fresh session that runs the new exec, rather than reusing the previous PTY
+                key={containerShellFor}
+                token={token}
+                serverId={serverId}
+                hostname={server.hostname}
+                username={server.username}
+                onClose={() => setContainerShellFor("")}
+                initialCommand={`${effectiveRuntime} exec -it ${containerShellFor} sh`}
+              />
+            </div>
+          ) : null}
+
           {tab === "containers" ? (
             <Panel
               title={`Containers${bothRuntimes ? "" : ` (${detectedRuntime})`}`}
@@ -781,8 +821,10 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                       <td className="px-4 py-3">{container.status}</td>
                       <td className="max-w-xs break-words px-4 py-3">{shortPorts(container.ports) || "-"}</td>
                       <td className="px-4 py-3">
-                        <div className="flex gap-3">
+                        <div className="flex flex-wrap gap-2">
                           <button onClick={() => void loadContainerLogs(container.name)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
+                          <button disabled={loading} onClick={() => void loadContainerEnv(container.name)} title="Show the container's .env file (or its runtime environment if none)" className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">{busy === `env:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />} .env</button>
+                          {canRestartContainer && server?.has_credentials ? <button onClick={() => setContainerShellFor(container.name)} title="Open an interactive shell inside this container" className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30"><Terminal size={12} /> Shell</button> : null}
                           {canRestartContainer ? <button disabled={loading} onClick={() => void restartSelectedContainer(container.name)} className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">{busy === `container:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : null}Restart</button> : null}
                         </div>
                       </td>

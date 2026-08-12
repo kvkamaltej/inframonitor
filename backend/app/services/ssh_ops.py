@@ -2643,6 +2643,41 @@ def container_logs(server: Server, credentials: CredentialPayload, runtime: str,
     return output.splitlines()
 
 
+# Where a .env conventionally lives inside an app image. Fixed literals (never anything from
+# the request), tried in order; the first that exists is shown. WORKDIR is usually one of these.
+_CONTAINER_ENV_PATHS = ("/app/.env", "/code/.env", "/usr/src/app/.env", "/src/.env", "/.env")
+
+
+def container_env_file(server: Server, credentials: CredentialPayload, runtime: str, container: str) -> list[str]:
+    """Return the first .env file found inside the container, as lines.
+
+    Looks in the common app working directories. If none is present, falls back to the
+    container's *runtime* environment (docker exec ... env) so the operator still learns the
+    effective configuration, with a header making the source unambiguous.
+    """
+    binary = "podman" if runtime == "podman" else "docker"
+    paths = " ".join(_q(path) for path in _CONTAINER_ENV_PATHS)
+    # `sh -c` inside the container: print the first readable .env with a header naming it; if
+    # none, print a sentinel so the caller can fall back to the live environment.
+    inner = (
+        'for f in ' + paths + '; do '
+        'if [ -f "$f" ]; then echo "# $f"; cat "$f"; exit 0; fi; '
+        'done; echo "__NO_ENV_FILE__"'
+    )
+    output = run_command(server, credentials, f"{binary} exec {_q(container)} sh -c {_q(inner)}")
+    lines = output.splitlines()
+    if lines and lines[-1].strip() == "__NO_ENV_FILE__":
+        # No file: show the runtime environment instead, clearly labelled.
+        env_output = run_command(server, credentials, f"{binary} exec {_q(container)} env")
+        header = [
+            f"# No .env file found in {', '.join(_CONTAINER_ENV_PATHS)}.",
+            f"# Showing the container's runtime environment ({binary} exec {container} env) instead:",
+            "",
+        ]
+        return header + env_output.splitlines()
+    return lines
+
+
 def service_logs(server: Server, credentials: CredentialPayload, source: str, name_or_path: str, tail: int = 200) -> list[str]:
     safe_tail = max(10, min(tail, 1000))
     if source == "journal":

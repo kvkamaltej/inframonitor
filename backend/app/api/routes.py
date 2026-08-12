@@ -75,6 +75,7 @@ from app.services.ssh_ops import (
     SftpTooLarge,
     SshOperationError,
     SudoPasswordRequired,
+    container_env_file,
     container_logs,
     deploy_war,
     discover_host,
@@ -822,6 +823,18 @@ def logs(server_id: str, runtime: str, container: str, credentials: CredentialPa
     try:
         effective = _credentials_for(server, credentials)
         return LogResponse(runtime=runtime, container=container, lines=container_logs(server, effective, runtime, container, effective.tail))
+    except SshOperationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/servers/{server_id}/containers/{runtime}/{container}/env", response_model=LogResponse)
+def container_env(server_id: str, runtime: str, container: str, credentials: CredentialPayload, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> LogResponse:
+    if runtime not in {"docker", "podman"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Runtime must be docker or podman")
+    server = _server_or_404(db, server_id, claims)
+    try:
+        lines = container_env_file(server, _credentials_for(server, credentials), runtime, container)
+        return LogResponse(runtime=runtime, container=container, lines=lines)
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

@@ -504,6 +504,16 @@ export async function getContainerLogs(token: string, serverId: string, runtime:
   return data.lines;
 }
 
+// Reads the container's .env file (checking the usual app working dirs), falling back to the
+// container's live runtime environment when no file is found. Returns the lines to display.
+export async function getContainerEnv(token: string, serverId: string, runtime: string, container: string, credentials: unknown): Promise<string[]> {
+  const data = await request<{ lines: string[] }>(`/servers/${serverId}/containers/${runtime}/${encodeURIComponent(container)}/env`, token, {
+    method: "POST",
+    body: JSON.stringify(credentials)
+  });
+  return data.lines;
+}
+
 export async function getServiceLogs(token: string, serverId: string, payload: unknown): Promise<string[]> {
   const data = await request<{ lines: string[] }>(`/servers/${serverId}/logs/service`, token, {
     method: "POST",

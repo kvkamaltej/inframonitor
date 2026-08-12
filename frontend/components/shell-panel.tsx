@@ -525,7 +525,8 @@ export function ShellPanel({
   hostname,
   username,
   onClose,
-  servers
+  servers,
+  initialCommand
 }: {
   token: string;
   serverId: string;
@@ -533,6 +534,10 @@ export function ShellPanel({
   username: string;
   onClose: () => void;
   servers?: ShellTarget[];
+  // Optional command run once on the FIRST session as soon as its shell is live. Used to drop
+  // straight into a container ("docker exec -it <name> sh"); typed as a real keystroke so the
+  // operator can Ctrl-C back out to the host shell afterwards.
+  initialCommand?: string;
 }) {
   const counter = useRef(0);
   const apis = useRef(new Map<string, SessionApi>());
@@ -639,6 +644,19 @@ export function ShellPanel({
   const handleStatus = useCallback((key: string, status: SessionStatus) => {
     setStatuses((current) => ({ ...current, [key]: status }));
   }, []);
+
+  // Run initialCommand once, the moment the first session's shell is live. A short delay lets
+  // the remote login shell print its prompt first, so the command is not swallowed mid-banner.
+  const initialSentRef = useRef(false);
+  useEffect(() => {
+    if (!initialCommand || initialSentRef.current) return;
+    if (statuses[initialSession.key]?.phase !== "open") return;
+    const api = apis.current.get(initialSession.key);
+    if (!api) return;
+    initialSentRef.current = true;
+    const timer = window.setTimeout(() => api.run(initialCommand), 300);
+    return () => window.clearTimeout(timer);
+  }, [statuses, initialCommand, initialSession.key]);
 
   // Selection feeds the favourites pane, so accept it from either visible pane in split —
   // not only from the focused one.
