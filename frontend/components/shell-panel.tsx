@@ -543,7 +543,8 @@ export function ShellPanel({
   username,
   onClose,
   servers,
-  initialCommand
+  initialCommand,
+  initialFullscreen
 }: {
   token: string;
   serverId: string;
@@ -555,6 +556,10 @@ export function ShellPanel({
   // straight into a container ("docker exec -it <name> sh"); typed as a real keystroke so the
   // operator can Ctrl-C back out to the host shell afterwards.
   initialCommand?: string;
+  // Open straight into fullscreen. Used by the sidebar shell launcher, which lands here after a
+  // navigation (no user gesture), so we take the overlay fullscreen path rather than the native
+  // Fullscreen API, which would reject without a gesture.
+  initialFullscreen?: boolean;
 }) {
   const counter = useRef(0);
   const apis = useRef(new Map<string, SessionApi>());
@@ -660,6 +665,14 @@ export function ShellPanel({
 
   const handleStatus = useCallback((key: string, status: SessionStatus) => {
     setStatuses((current) => ({ ...current, [key]: status }));
+  }, []);
+
+  // Open in fullscreen when asked (sidebar launcher). No user gesture is available after a
+  // navigation, so the native Fullscreen API would reject — go straight to the overlay path,
+  // which covers the viewport without a gesture. Runs once on mount.
+  useEffect(() => {
+    if (initialFullscreen) setFsMode("overlay");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Run initialCommand once, the moment the first session's shell is live. A short delay lets

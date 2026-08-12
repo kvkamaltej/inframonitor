@@ -20,6 +20,7 @@
 export type ThemeName =
   | "soft-light"
   | "comfortable-dark"
+  | "vanta-black"
   | "dracula"
   | "nord"
   | "solarized-dark"
@@ -43,6 +44,7 @@ export type ThemeMeta = {
 export const THEMES: ThemeMeta[] = [
   { name: "soft-light", label: "Soft Light", isDark: false, hint: "Off-white, easy on the eyes" },
   { name: "comfortable-dark", label: "Comfortable Dark", isDark: true, hint: "Soft blue-gray, not harsh black" },
+  { name: "vanta-black", label: "Vanta Black", isDark: true, hint: "Pure OLED black, maximum contrast" },
   { name: "dracula", label: "Dracula", isDark: true, hint: "Purple-tinged classic" },
   { name: "nord", label: "Nord", isDark: true, hint: "Cool arctic blues" },
   { name: "solarized-dark", label: "Solarized Dark", isDark: true, hint: "Warm low-contrast" },
@@ -209,6 +211,31 @@ export const TERM_PALETTES: Record<ThemeName, TermPalette> = {
     brightMagenta: "#bb9af7",
     brightCyan: "#7dcfff",
     brightWhite: "#c0caf5"
+  },
+  // Vanta Black — pure #000 ground (OLED), crisp near-white text, punchy ANSI so output
+  // stays legible against maximum-contrast black.
+  "vanta-black": {
+    background: "#000000",
+    foreground: "#e6e6e6",
+    cursor: "#ffffff",
+    cursorAccent: "#000000",
+    selectionBackground: "#333333",
+    black: "#000000",
+    red: "#ff5f56",
+    green: "#33d17a",
+    yellow: "#e6c000",
+    blue: "#3b9dff",
+    magenta: "#c678dd",
+    cyan: "#2ac3de",
+    white: "#c7c7c7",
+    brightBlack: "#5c5c5c",
+    brightRed: "#ff8a80",
+    brightGreen: "#69f0ae",
+    brightYellow: "#ffe066",
+    brightBlue: "#82b1ff",
+    brightMagenta: "#e0a3f0",
+    brightCyan: "#84e0ee",
+    brightWhite: "#ffffff"
   },
   dracula: {
     background: "#282a36",

@@ -82,8 +82,10 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   // Container name whose interactive shell is open ("" = none). Opens a host PTY that auto-runs
   // `<runtime> exec -it <name> sh` so the operator lands inside the container.
   const [containerShellFor, setContainerShellFor] = useState("");
-  // Whether the host shell workspace (a plain PTY on this server) is open.
+  // Whether the host shell workspace (a plain PTY on this server) is open, and whether it should
+  // open in fullscreen (true only when launched via the ?shell=1 deep-link, e.g. the sidebar).
   const [hostShellOpen, setHostShellOpen] = useState(false);
+  const [hostShellFullscreen, setHostShellFullscreen] = useState(false);
   // EXPERIMENTAL (feature/server-folders): folders offered in the admin folder-assignment select.
   const [folders, setFolders] = useState<Folder[]>([]);
   const [folderBusy, setFolderBusy] = useState(false);
@@ -172,16 +174,20 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     }
   }, [serverId]);
 
-  // Deep-link: /server/?id=<id>&shell=1 auto-opens the host shell. Lets the sidebar quick-launch
-  // a shell on a chosen server. Fires once, and only when the viewer is actually allowed one
-  // (admin + stored credentials); otherwise the flag is a no-op rather than a broken workspace.
-  const autoShellHandled = useRef(false);
+  // Deep-links fired once after server + me load:
+  //   ?shell=1 → open the host shell (fullscreen, since the sidebar launcher lands here with no
+  //              gesture); admin + stored credentials only.
+  //   ?edit=1  → open the Edit details dialog (admin only); used by the inventory row menu.
+  const autoLinkHandled = useRef(false);
   useEffect(() => {
-    if (autoShellHandled.current || !server || !me) return;
-    const wants = new URLSearchParams(window.location.search).get("shell") === "1";
-    if (!wants) return;
-    autoShellHandled.current = true;
-    if (me.role === "admin" && server.has_credentials) setHostShellOpen(true);
+    if (autoLinkHandled.current || !server || !me) return;
+    autoLinkHandled.current = true;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("shell") === "1" && me.role === "admin" && server.has_credentials) {
+      setHostShellFullscreen(true);
+      setHostShellOpen(true);
+    }
+    if (params.get("edit") === "1" && me.role === "admin") setEditOpen(true);
   }, [server, me]);
 
   // EXPERIMENTAL (feature/server-folders): folders are only needed for the admin assignment
@@ -610,7 +616,8 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
               serverId={serverId}
               hostname={server.hostname}
               username={server.username}
-              onClose={() => setHostShellOpen(false)}
+              onClose={() => { setHostShellOpen(false); setHostShellFullscreen(false); }}
+              initialFullscreen={hostShellFullscreen}
             />
           ) : null}
 

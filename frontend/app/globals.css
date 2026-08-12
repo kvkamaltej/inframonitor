@@ -54,6 +54,18 @@
   --im-edge: #2f3549;
 }
 
+/* Vanta Black — pure OLED black. Page is true #000; cards lift a hair so they read as
+   surfaces against the black rather than disappearing. Maximum contrast, minimal glow. */
+:root[data-theme="vanta-black"] {
+  color-scheme: dark;
+  --im-page: #000000;
+  --im-surface: #0a0a0a;
+  --im-elevated: #141414;
+  --im-fg: #eaeaea;
+  --im-muted: #7d7d7d;
+  --im-edge: #1f1f1f;
+}
+
 /* Dracula. */
 :root[data-theme="dracula"] {
   color-scheme: dark;

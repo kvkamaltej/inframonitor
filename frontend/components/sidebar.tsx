@@ -5,7 +5,6 @@ import { ChevronDown, ChevronRight, Folder as FolderIcon, Layers, Loader2, Menu,
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getFolders, getServers, Folder as FolderType, Server as ServerRow } from "@/lib/api";
-import { ThemePicker } from "@/components/theme-picker";
 import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT, resolveInitialTheme, themeMeta, THEME_EVENT, type ThemeName } from "@/lib/theme";
 
 export function Sidebar({ role }: { role?: string }) {
@@ -205,9 +204,8 @@ export function Sidebar({ role }: { role?: string }) {
             {dark ? <Sun size={20} className="shrink-0" /> : <Moon size={20} className="shrink-0" />}
             <span className={`transition-opacity duration-200 ${open ? "opacity-100 w-auto" : "opacity-0 w-0 hidden"}`}>{dark ? "Light mode" : "Dark mode"}</span>
           </button>
-          {/* Full theme selection lives right under the quick toggle. Only worth showing
-              when the rail is expanded — the <select> needs the width to be usable. */}
-          {open ? <ThemePicker variant="compact" /> : null}
+          {/* Full theme selection lives on the Appearance page, not here — this rail keeps only
+              the one-click light/dark shortcut above. */}
         </div>
       </nav>
     </aside>
