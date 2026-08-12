@@ -9,10 +9,11 @@ import json
 import posixpath
 import re
 import threading
+import uuid
 
 import asyncio
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
@@ -22,7 +23,7 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.security import create_access_token, decode_token, hash_password, require_admin, require_admin_or_developer, require_user, verify_password
-from app.models.entities import AccessPolicy, AppSetting, AuditLog, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
+from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
     AccessPolicyRead,
@@ -32,6 +33,8 @@ from app.schemas.contracts import (
     ConnectionResult,
     ContainerRead,
     CredentialPayload,
+    FolderCreate,
+    FolderRead,
     IntegrationStatus,
     LoginRequest,
     LogResponse,
@@ -43,6 +46,7 @@ from app.schemas.contracts import (
     PolicyAssignmentUpdate,
     PrivilegedOperationResult,
     ServerCreate,
+    ServerFolderUpdate,
     ServerImportRequest,
     ServerImportResult,
     ServerRead,
@@ -423,6 +427,102 @@ def remove_application_type(value: str, _: dict = Depends(require_admin), db: Se
         values.remove(value)
         _save_setting_list(db, "application_types", values)
     return get_options(_, db)
+
+
+# --- folders (EXPERIMENTAL: feature/server-folders) ----------------------------------------
+#
+# A folder is an optional, flat grouping over servers -- "BH", "MH", "EMS" and the like. There
+# is no hierarchy and a server belongs to at most one folder. Mutations are admin-only; reads
+# follow the same require_user rule the inventory does. The client only ever sees a folder's
+# public_id, never its autoincrement primary key.
+
+
+def _folder_or_404(db: Session, public_id: str) -> Folder:
+    folder = db.scalar(select(Folder).where(Folder.public_id == public_id))
+    if not folder:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
+    return folder
+
+
+def _folder_counts(db: Session) -> dict[int, int]:
+    # one grouped query for every folder's membership, rather than reading folder.servers per
+    # folder and calling len() -- that would lazy-load every member row just to count it
+    rows = db.execute(
+        select(Server.folder_id, func.count(Server.id))
+        .where(Server.folder_id.is_not(None))
+        .group_by(Server.folder_id)
+    ).all()
+    return {folder_id: count for folder_id, count in rows}
+
+
+@router.get("/folders", response_model=list[FolderRead])
+def list_folders(_: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[FolderRead]:
+    counts = _folder_counts(db)
+    # ordered case-insensitively so "BH" and "bh"-style names sort where a reader expects, not by
+    # ASCII where uppercase sorts before lowercase
+    folders = db.scalars(select(Folder).order_by(func.lower(Folder.name))).all()
+    return [FolderRead(id=folder.public_id, name=folder.name, server_count=counts.get(folder.id, 0)) for folder in folders]
+
+
+@router.post("/folders", response_model=FolderRead, status_code=status.HTTP_201_CREATED)
+def create_folder(payload: FolderCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> FolderRead:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Folder name is required")
+    # case-insensitive duplicate guard: "BH" and "bh" are the same folder to a human, and the
+    # column's UNIQUE constraint alone is case-sensitive on SQLite
+    if db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower())):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A folder with that name already exists")
+    # public_id is set here and only here: folders are born through this route, so there is no
+    # legacy row that could exist without one, and no separate backfill pass is needed
+    folder = Folder(name=name, public_id=str(uuid.uuid4()))
+    db.add(folder)
+    db.commit()
+    db.refresh(folder)
+    return FolderRead(id=folder.public_id, name=folder.name, server_count=0)
+
+
+@router.patch("/folders/{public_id}", response_model=FolderRead)
+def rename_folder(public_id: str, payload: FolderCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> FolderRead:
+    folder = _folder_or_404(db, public_id)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Folder name is required")
+    # a folder may keep (or re-case) its own name; only a clash with a DIFFERENT folder is a 409
+    clash = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower(), Folder.id != folder.id))
+    if clash:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A folder with that name already exists")
+    folder.name = name
+    db.commit()
+    db.refresh(folder)
+    counts = _folder_counts(db)
+    return FolderRead(id=folder.public_id, name=folder.name, server_count=counts.get(folder.id, 0))
+
+
+@router.delete("/folders/{public_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_folder(public_id: str, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> None:
+    folder = _folder_or_404(db, public_id)
+    # Unassign members FIRST, explicitly. There is deliberately no ON DELETE cascade on the FK, so
+    # with SQLite's PRAGMA foreign_keys=ON a delete leaving servers pointed at this folder would
+    # raise an IntegrityError. Servers must outlive their folder -- they just fall back to the
+    # "Unassigned" group.
+    db.execute(update(Server).where(Server.folder_id == folder.id).values(folder_id=None))
+    db.delete(folder)
+    db.commit()
+
+
+@router.put("/servers/{server_id}/folder", response_model=ServerRead)
+def assign_server_folder(server_id: str, payload: ServerFolderUpdate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> ServerRead:
+    server = _server_or_404(db, server_id)
+    target = (payload.folder_id or "").strip()
+    if not target:
+        # empty string or null means "remove from whatever folder it was in"
+        server.folder_id = None
+    else:
+        server.folder_id = _folder_or_404(db, target).id
+    db.commit()
+    db.refresh(server)
+    return to_read(server)
 
 
 @router.get("/servers", response_model=list[ServerRead])

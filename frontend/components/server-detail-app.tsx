@@ -1,16 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, Clock, Coffee, Copy, Cpu, Database, FileText, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, RefreshCw, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, Clock, Coffee, Copy, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, RefreshCw, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import {
+  assignServerFolder,
   ContainerInfo,
   deleteServer,
   discoverServer,
   refreshVitals,
+  Folder,
   getContainerEnv,
   getContainerLogs,
   getContainers,
+  getFolders,
   getMe,
   getServer,
   getServiceLogs,
@@ -77,10 +80,13 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   const [credentialsOpen, setCredentialsOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   // Container name whose interactive shell is open ("" = none). Opens a host PTY that auto-runs
-  // `docker exec -it <name> sh` so the operator lands inside the container.
+  // `<runtime> exec -it <name> sh` so the operator lands inside the container.
   const [containerShellFor, setContainerShellFor] = useState("");
   // Whether the host shell workspace (a plain PTY on this server) is open.
   const [hostShellOpen, setHostShellOpen] = useState(false);
+  // EXPERIMENTAL (feature/server-folders): folders offered in the admin folder-assignment select.
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderBusy, setFolderBusy] = useState(false);
 
   const { confirm, confirmDialog } = useConfirm();
   const isAdmin = me?.role === "admin";
@@ -178,6 +184,14 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     if (me.role === "admin" && server.has_credentials) setHostShellOpen(true);
   }, [server, me]);
 
+  // EXPERIMENTAL (feature/server-folders): folders are only needed for the admin assignment
+  // select, so fetch them once the role is known. A failure is non-fatal — the select simply
+  // offers "Unassigned" only.
+  useEffect(() => {
+    if (!token || me?.role !== "admin") return;
+    getFolders(token).then(setFolders).catch(() => undefined);
+  }, [token, me?.role]);
+
   if (initializing) return <div className="flex min-h-screen items-center justify-center bg-[#f8f9fa] dark:bg-[#121212]"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
   if (!token) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); void load(nextToken); }} />;
 
@@ -215,6 +229,21 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       notify(error instanceof Error ? error.message : "Unable to refresh vitals", "error");
     } finally {
       setBusy("");
+    }
+  }
+
+  // EXPERIMENTAL (feature/server-folders): move this server into a folder, or "" to unassign.
+  // Optional and non-breaking — the select just reflects and updates server.folder_id.
+  async function assignFolder(folderId: string) {
+    setFolderBusy(true);
+    try {
+      const updated = await assignServerFolder(token, serverId, folderId || null);
+      setServer(updated);
+      notify(folderId ? "Server moved to folder." : "Server removed from folder.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to update folder", "error");
+    } finally {
+      setFolderBusy(false);
     }
   }
 
@@ -669,6 +698,31 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                   <Info icon={<Network size={16} />} title="Environment" value={server?.environment || "-"} />
                 </div>
               </div>
+
+              {/* EXPERIMENTAL (feature/server-folders): optional folder assignment. Admin-only and
+                  non-breaking — a plain select bound to the server's folder_id, saved immediately.
+                  Non-admins see the folder as a read-only line instead. */}
+              {isAdmin ? (
+                <div>
+                  <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
+                    <FolderIcon size={16} className="text-accent" /> Folder
+                    <span className="text-xs font-medium text-slate-400 dark:text-slate-500">optional grouping</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={server?.folder_id || ""}
+                      onChange={(event) => void assignFolder(event.target.value)}
+                      disabled={folderBusy || !server}
+                      aria-label="Assign this server to a folder"
+                      className="h-10 min-w-[16rem] cursor-pointer rounded-xl border border-line bg-white px-3 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                    >
+                      <option value="">Unassigned</option>
+                      {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+                    </select>
+                    {folderBusy ? <Loader2 size={16} className="animate-spin text-accent" /> : null}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
 

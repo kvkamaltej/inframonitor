@@ -39,6 +39,28 @@ class User(Base):
     shell_favorites: Mapped[list["ShellFavorite"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
+class Folder(Base):
+    # EXPERIMENTAL (feature/server-folders): a flat, optional grouping over servers -- think
+    # "BH", "MH", "EMS". A server belongs to at most one folder, and a folder is nothing more
+    # than a named bucket, so there is deliberately no hierarchy, colour, or ordering here yet.
+    __tablename__ = "folders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # public_id is what the API and every URL speak in, never the autoincrement id -- same rule
+    # the Server model already follows. It is set at creation from uuid4(); folders are only ever
+    # born through the API, so there is no legacy row that could sneak in without one.
+    public_id: Mapped[str] = mapped_column(String(36), unique=True, index=True, default="")
+    # unique + case-insensitive-checked in the route: two folders named "BH" and "bh" would be a
+    # confusing pair, so the route rejects the second before it reaches this constraint.
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # No cascade: deleting a folder must UNASSIGN its servers (folder_id -> NULL), never delete
+    # them. That un-assignment is done explicitly in the DELETE route, so this relationship exists
+    # only to read a folder's members and their count.
+    servers: Mapped[list["Server"]] = relationship(back_populates="folder")
+
+
 class Server(Base):
     __tablename__ = "servers"
 
@@ -90,8 +112,15 @@ class Server(Base):
     last_discovery: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # EXPERIMENTAL (feature/server-folders): the folder this server sits in, or NULL for the
+    # "Unassigned" group the UI renders last. Nullable and indexed: most inventory reads either
+    # group by this column or filter to one folder, and a server with no folder is the norm, not
+    # an error. On the parent folder's delete this is set back to NULL rather than cascading.
+    folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
+
     audit_events: Mapped[list["AuditLog"]] = relationship(back_populates="server", cascade="all, delete-orphan")
     server_access: Mapped[list["UserServerAccess"]] = relationship(back_populates="server", cascade="all, delete-orphan")
+    folder: Mapped["Folder | None"] = relationship(back_populates="servers")
 
 
 class AuditLog(Base):

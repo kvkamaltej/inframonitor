@@ -1,15 +1,89 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronDown, ChevronRight, Layers, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, Sun, UserCircle, Users, X } from "lucide-react";
-import { useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
+import { ChevronDown, ChevronRight, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, Sun, TerminalSquare, UserCircle, Users, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { getFolders, getServers, Folder as FolderType, Server as ServerRow } from "@/lib/api";
 
 export function Sidebar({ role }: { role?: string }) {
   const [open, setOpen] = useState(true);
   const [adminOpen, setAdminOpen] = useState(false);
   const [dark, setDark] = useState(false);
   const pathname = usePathname();
+  const router = useRouter();
+  const isAdmin = role === "admin";
+
+  // EXPERIMENTAL (feature/server-folders): the Shell launcher flyout. It lists servers grouped by
+  // folder and launches a host shell by navigating to the detail page with ?shell=1. Data is
+  // fetched lazily the first time the flyout is opened, and only for admins — the shell socket is
+  // admin-only, so there is nothing to launch for anyone else.
+  const [shellOpen, setShellOpen] = useState(false);
+  const [shellServers, setShellServers] = useState<ServerRow[]>([]);
+  const [shellFolders, setShellFolders] = useState<FolderType[]>([]);
+  const [shellLoading, setShellLoading] = useState(false);
+  const [shellError, setShellError] = useState("");
+  // folder public_ids the user has collapsed; everything is expanded by default so hosts are one
+  // click away. "" is the Unassigned group.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  async function loadShellData() {
+    const token = window.localStorage.getItem("inframonitor-token") ?? "";
+    if (!token) return;
+    setShellLoading(true);
+    setShellError("");
+    try {
+      const [servers, folders] = await Promise.all([getServers(token), getFolders(token)]);
+      // only credentialed hosts can actually open a session, so never offer the rest
+      setShellServers(servers.filter((server) => server.has_credentials));
+      setShellFolders(folders);
+    } catch (error) {
+      setShellError(error instanceof Error ? error.message : "Unable to load servers");
+    } finally {
+      setShellLoading(false);
+    }
+  }
+
+  // Refetch each time the flyout opens so a newly onboarded or re-foldered host shows up without a
+  // page reload.
+  useEffect(() => {
+    if (shellOpen && isAdmin) void loadShellData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shellOpen, isAdmin]);
+
+  // Group the credentialed hosts by folder, folders in the API's (case-insensitive) order, with
+  // Unassigned last and any empty folder omitted — a shell launcher only shows what it can launch.
+  const shellGroups = useMemo(() => {
+    const folderIds = new Set(shellFolders.map((folder) => folder.id));
+    const byKey = new Map<string, ServerRow[]>();
+    for (const server of shellServers) {
+      const key = server.folder_id && folderIds.has(server.folder_id) ? server.folder_id : "";
+      const bucket = byKey.get(key);
+      if (bucket) bucket.push(server);
+      else byKey.set(key, [server]);
+    }
+    const groups = shellFolders
+      .filter((folder) => byKey.has(folder.id))
+      .map((folder) => ({ key: folder.id, name: folder.name, servers: byKey.get(folder.id)! }));
+    const unassigned = byKey.get("");
+    if (unassigned && unassigned.length) groups.push({ key: "", name: "Unassigned", servers: unassigned });
+    return groups;
+  }, [shellServers, shellFolders]);
+
+  function toggleGroup(key: string) {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function launchShell(server: ServerRow) {
+    // the detail page auto-opens the host shell when it sees ?shell=1
+    setShellOpen(false);
+    router.push(`/server/?id=${encodeURIComponent(server.id)}&shell=1`);
+  }
 
   useEffect(() => {
     const saved = localStorage.getItem("inframonitor-sidebar");
@@ -66,6 +140,20 @@ export function Sidebar({ role }: { role?: string }) {
         <div className="grid gap-1">
           <NavItem href="/" icon={MonitorCog} label="Dashboard" />
           <NavItem href="/servers" icon={Server} label="Server Management" />
+          {/* EXPERIMENTAL (feature/server-folders): admin-only Shell launcher. It is a button, not
+              a route — it opens a flyout of hosts grouped by folder. Collapsing the sidebar first
+              would hide the flyout's anchor, so opening it also opens the rail. */}
+          {isAdmin && (
+            <button
+              onClick={() => { if (!open) toggle(); setShellOpen((value) => !value); }}
+              className={`group flex h-12 items-center gap-4 rounded-full px-4 text-sm font-medium transition-colors ${shellOpen ? "bg-accent/10 text-accent dark:bg-accent/20" : "text-slate-700 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"}`}
+              title={!open ? "Shell" : undefined}
+              aria-expanded={shellOpen}
+            >
+              <TerminalSquare size={20} className="shrink-0" />
+              <span className={`transition-opacity duration-200 ${open ? "opacity-100 w-auto" : "opacity-0 w-0 hidden"}`}>Shell</span>
+            </button>
+          )}
           {role === "admin" && (
             <>
               <NavItem href="/users" icon={Users} label="Users" />
@@ -107,6 +195,58 @@ export function Sidebar({ role }: { role?: string }) {
         </div>
       </nav>
     </aside>
+    {/* Shell launcher flyout. Rendered as a fixed sibling (not a child of the overflow-hidden
+        aside, which would clip it) and offset by the current rail width so it sits flush against
+        the sidebar in both the expanded and collapsed states. */}
+    {isAdmin && shellOpen && (
+      <>
+        <button aria-label="Close shell launcher" onClick={() => setShellOpen(false)} className="fixed inset-0 z-40 cursor-default" />
+        <div style={{ left: open ? 288 : 72 }} className="fixed top-0 z-50 flex h-screen w-80 flex-col border-r border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-[#161616]">
+          <div className="flex items-center justify-between border-b border-slate-200 px-4 py-4 dark:border-slate-800">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+              <TerminalSquare size={18} className="text-accent" /> Open a shell
+            </div>
+            <button onClick={() => setShellOpen(false)} aria-label="Close" className="inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"><X size={16} /></button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-2">
+            {shellLoading ? (
+              <div className="flex items-center gap-2 px-3 py-4 text-sm text-slate-500 dark:text-slate-400"><Loader2 size={16} className="animate-spin" /> Loading servers…</div>
+            ) : shellError ? (
+              <div className="px-3 py-4 text-sm font-medium text-danger dark:text-red-400">{shellError}</div>
+            ) : shellGroups.length === 0 ? (
+              <div className="px-3 py-4 text-sm text-slate-500 dark:text-slate-400">No servers with stored credentials to open a shell on.</div>
+            ) : (
+              <div className="grid gap-1">
+                {shellGroups.map((group) => {
+                  const isCollapsed = collapsed.has(group.key);
+                  return (
+                    <div key={group.key || "__unassigned__"}>
+                      <button onClick={() => toggleGroup(group.key)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider transition-colors hover:bg-slate-100 dark:hover:bg-slate-800">
+                        {isCollapsed ? <ChevronRight size={14} className="text-slate-400" /> : <ChevronDown size={14} className="text-slate-400" />}
+                        {group.key ? <FolderIcon size={14} className="text-accent" /> : <Server size={14} className="text-slate-400" />}
+                        <span className="flex-1 truncate text-slate-700 dark:text-slate-300">{group.name}</span>
+                        <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">{group.servers.length}</span>
+                      </button>
+                      {!isCollapsed && (
+                        <div className="mb-1 grid gap-0.5 pl-4">
+                          {group.servers.map((server) => (
+                            <button key={server.id} onClick={() => launchShell(server)} title={`Open a shell on ${server.hostname}`} className="group flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-accent/10 hover:text-accent dark:text-slate-300 dark:hover:bg-accent/20">
+                              <TerminalSquare size={14} className="shrink-0 text-slate-400 transition-colors group-hover:text-accent" />
+                              <span className="flex-1 truncate">{server.hostname}</span>
+                              <span className="shrink-0 text-xs text-slate-400 dark:text-slate-500">{server.ip_address}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </>
+    )}
     </>
   );
 }
