@@ -2,25 +2,115 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * EXPERIMENTAL theme system.
+ *
+ * Each named theme is a set of CSS variables selected by `data-theme="<name>"` on
+ * <html> (set pre-hydration by the inline script in layout.tsx, then kept in sync by
+ * lib/theme.ts). The existing Tailwind `dark` class is toggled in tandem — each theme
+ * declares whether it is dark — so every legacy `dark:` utility keeps working while the
+ * finer surface colours come from these variables.
+ *
+ * The Tailwind config aliases token colours (page/surface/elevated/fg/muted/edge) to
+ * these variables, so a utility like `bg-surface` re-themes automatically across all
+ * themes without a `dark:` counterpart.
+ *
+ * `:root` carries the Soft Light values so anything rendered before the attribute is set
+ * (or a page that never sets it) still looks intentional rather than unstyled.
+ */
 :root {
   color-scheme: light;
   --inframonitor-accent: #0f766e;
+
+  /* Soft Light — an off-white page with white cards, so it never reads as "all white". */
+  --im-page: #f6f7f9;
+  --im-surface: #ffffff;
+  --im-elevated: #ffffff;
+  --im-fg: #1f2430;
+  --im-muted: #5b6572;
+  --im-edge: #e2e6ec;
 }
 
+/* Redeclared explicitly so an operator who picks "Soft Light" while the OS prefers dark
+   still gets the light palette (the attribute wins over any inherited context). */
+:root[data-theme="soft-light"] {
+  color-scheme: light;
+  --im-page: #f6f7f9;
+  --im-surface: #ffffff;
+  --im-elevated: #ffffff;
+  --im-fg: #1f2430;
+  --im-muted: #5b6572;
+  --im-edge: #e2e6ec;
+}
+
+/* Comfortable Dark — Tokyo Night. A soft blue-gray, deliberately not flat carbon. */
+:root[data-theme="comfortable-dark"] {
+  color-scheme: dark;
+  --im-page: #1a1b26;
+  --im-surface: #24283b;
+  --im-elevated: #2f3549;
+  --im-fg: #c0caf5;
+  --im-muted: #8b95bd;
+  --im-edge: #2f3549;
+}
+
+/* Dracula. */
+:root[data-theme="dracula"] {
+  color-scheme: dark;
+  --im-page: #282a36;
+  --im-surface: #343746;
+  --im-elevated: #3c3f52;
+  --im-fg: #f8f8f2;
+  --im-muted: #a3aac2;
+  --im-edge: #44475a;
+}
+
+/* Nord. */
+:root[data-theme="nord"] {
+  color-scheme: dark;
+  --im-page: #2e3440;
+  --im-surface: #3b4252;
+  --im-elevated: #434c5e;
+  --im-fg: #e5e9f0;
+  --im-muted: #a3adc0;
+  --im-edge: #434c5e;
+}
+
+/* Solarized Dark — warm, low-contrast by design. */
+:root[data-theme="solarized-dark"] {
+  color-scheme: dark;
+  --im-page: #002b36;
+  --im-surface: #073642;
+  --im-elevated: #0a4653;
+  --im-fg: #93a1a1;
+  --im-muted: #7d9294;
+  --im-edge: #0a4a58;
+}
+
+/* One Dark — Atom's signature. */
+:root[data-theme="one-dark"] {
+  color-scheme: dark;
+  --im-page: #282c34;
+  --im-surface: #2c313a;
+  --im-elevated: #333842;
+  --im-fg: #abb2bf;
+  --im-muted: #828997;
+  --im-edge: #3b4048;
+}
+
+/* Kept so `color-scheme` is right even on the fallback path where only the `dark` class
+   is set (e.g. legacy code toggling it directly before the attribute lands). */
 .dark {
   color-scheme: dark;
 }
 
+/* Page background/text now flow from the active theme's variables rather than a
+   hardcoded light/dark pair. A single declaration replaces the old `body` / `.dark body`
+   split because the variables already carry the per-theme values. */
 body {
   margin: 0;
-  background: #f8f9fa; /* M3 Light Surface */
-  color: #1f1f1f; /* M3 Light On-Surface */
-  min-height: 100vh;
-}
-
-.dark body {
-  background: #121212; /* M3 Dark Surface */
-  color: #e3e3e3; /* M3 Dark On-Surface */
+  background: var(--im-page);
+  color: var(--im-fg);
   min-height: 100vh;
 }
 
@@ -40,9 +130,3 @@ a {
 .border-accent {
   border-color: var(--inframonitor-accent) !important;
 }
-
-
-
-
-
-

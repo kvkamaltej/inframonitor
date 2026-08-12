@@ -155,7 +155,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     }
   }, [serverId]);
 
-  if (initializing) return <div className="flex min-h-screen items-center justify-center bg-[#f8f9fa] dark:bg-[#121212]"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
+  if (initializing) return <div className="flex min-h-screen items-center justify-center bg-page"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
   if (!token) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); void load(nextToken); }} />;
 
   async function copyLogs() {
@@ -422,7 +422,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       {confirmDialog}
       <Sidebar role={me?.role} />
       <div className="min-w-0 flex-1">
-      <header className="border-b border-line bg-white dark:border-slate-700 dark:bg-slate-950">
+      <header className="border-b border-edge bg-elevated">
         <div className="flex items-center justify-between px-6 pl-16 py-5">
           <div>
             <Link href="/servers" className="mb-2 inline-flex items-center gap-2 text-sm text-accent"><ArrowLeft size={16} /> Server List</Link>

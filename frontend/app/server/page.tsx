@@ -8,8 +8,8 @@ import { ServerDetailApp } from "@/components/server-detail-app";
 
 function CenteredCard({ children }: { children: React.ReactNode }) {
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#f8f9fa] px-6 py-12 dark:bg-[#121212]">
-      <div className="w-full max-w-md rounded-3xl bg-white p-8 text-center shadow-sm ring-1 ring-slate-200 dark:bg-[#1e1e1e] dark:ring-slate-800">{children}</div>
+    <main className="flex min-h-screen items-center justify-center bg-page px-6 py-12">
+      <div className="w-full max-w-md rounded-3xl bg-surface p-8 text-center shadow-sm ring-1 ring-edge">{children}</div>
     </main>
   );
 }
