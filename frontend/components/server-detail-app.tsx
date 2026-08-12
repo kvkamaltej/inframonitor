@@ -865,24 +865,38 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
           ) : null}
 
           {tab === "containers" && containerShellFor && server ? (
-            <div className="mb-6">
-              <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-300">
-                <Terminal size={15} className="text-accent" />
-                Shell inside <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">{containerShellFor}</span>
-                <span className="text-xs text-slate-400">— running <code className="font-mono">{effectiveRuntime} exec -it {containerShellFor} sh</code></span>
-              </div>
-              <ShellPanel
-                // keyed on the container so switching to a different container's shell mounts a
-                // fresh session that runs the new exec, rather than reusing the previous PTY
-                key={containerShellFor}
-                token={token}
-                serverId={serverId}
-                hostname={server.hostname}
-                username={server.username}
-                onClose={() => setContainerShellFor("")}
-                initialCommand={`${effectiveRuntime} exec -it ${containerShellFor} sh`}
-              />
-            </div>
+            (() => {
+              // Don't hardcode `docker`: the host may run podman instead (or the discovered
+              // runtime may be wrong). Probe for the binary at exec time and use whichever is
+              // actually on PATH, preferring the detected runtime. Falls back to /bin/sh, and if
+              // no runtime is installed it prints a clear message instead of a cryptic failure.
+              const order = [effectiveRuntime, "docker", "podman"].filter((r, i, a) => a.indexOf(r) === i);
+              const containerShellCommand =
+                `for __rt in ${order.join(" ")}; do command -v "$__rt" >/dev/null 2>&1 && ` +
+                `{ "$__rt" exec -it ${containerShellFor} sh; break; }; done; ` +
+                `command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 || ` +
+                `echo "No docker or podman found on PATH for this user."`;
+              return (
+                <div className="mb-6">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-300">
+                    <Terminal size={15} className="text-accent" />
+                    Shell inside <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">{containerShellFor}</span>
+                    <span className="text-xs text-slate-400">— opens with {order.join(" or ")}, whichever is installed</span>
+                  </div>
+                  <ShellPanel
+                    // keyed on the container so switching to a different container's shell mounts a
+                    // fresh session that runs the new exec, rather than reusing the previous PTY
+                    key={containerShellFor}
+                    token={token}
+                    serverId={serverId}
+                    hostname={server.hostname}
+                    username={server.username}
+                    onClose={() => setContainerShellFor("")}
+                    initialCommand={containerShellCommand}
+                  />
+                </div>
+              );
+            })()
           ) : null}
 
           {tab === "containers" ? (
