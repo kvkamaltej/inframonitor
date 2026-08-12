@@ -79,6 +79,8 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   // Container name whose interactive shell is open ("" = none). Opens a host PTY that auto-runs
   // `docker exec -it <name> sh` so the operator lands inside the container.
   const [containerShellFor, setContainerShellFor] = useState("");
+  // Whether the host shell workspace (a plain PTY on this server) is open.
+  const [hostShellOpen, setHostShellOpen] = useState(false);
 
   const { confirm, confirmDialog } = useConfirm();
   const isAdmin = me?.role === "admin";
@@ -163,6 +165,18 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       setInitializing(false);
     }
   }, [serverId]);
+
+  // Deep-link: /server/?id=<id>&shell=1 auto-opens the host shell. Lets the sidebar quick-launch
+  // a shell on a chosen server. Fires once, and only when the viewer is actually allowed one
+  // (admin + stored credentials); otherwise the flag is a no-op rather than a broken workspace.
+  const autoShellHandled = useRef(false);
+  useEffect(() => {
+    if (autoShellHandled.current || !server || !me) return;
+    const wants = new URLSearchParams(window.location.search).get("shell") === "1";
+    if (!wants) return;
+    autoShellHandled.current = true;
+    if (me.role === "admin" && server.has_credentials) setHostShellOpen(true);
+  }, [server, me]);
 
   if (initializing) return <div className="flex min-h-screen items-center justify-center bg-[#f8f9fa] dark:bg-[#121212]"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
   if (!token) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); void load(nextToken); }} />;
@@ -454,6 +468,17 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
           </div>
           <div className="flex items-center gap-3 text-sm font-medium text-slate-700 dark:text-slate-200">
             {server ? <StatusPill status={server.status} /> : null}
+            {isAdmin && server?.has_credentials ? (
+              <button
+                type="button"
+                onClick={() => setHostShellOpen((open) => !open)}
+                aria-pressed={hostShellOpen}
+                title={`Open an interactive shell on ${server.hostname}`}
+                className={`inline-flex h-9 items-center gap-2 rounded-full px-4 text-sm font-semibold transition-colors ${hostShellOpen ? "bg-accent/10 text-accent hover:bg-accent/20 dark:bg-accent/20 dark:hover:bg-accent/30" : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"}`}
+              >
+                <Terminal size={16} /> Shell
+              </button>
+            ) : null}
             {isAdmin ? (
               <div className="relative">
                 <button
@@ -547,6 +572,17 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
               </div>
               <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">Sent once with this request over SSH stdin, then discarded. Never stored in the browser.</p>
             </form>
+          ) : null}
+
+          {hostShellOpen && server ? (
+            <ShellPanel
+              // one workspace per host; not keyed on tab so it survives tab switches
+              token={token}
+              serverId={serverId}
+              hostname={server.hostname}
+              username={server.username}
+              onClose={() => setHostShellOpen(false)}
+            />
           ) : null}
 
           <div className="flex flex-wrap items-center gap-2">
@@ -824,7 +860,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                         <div className="flex flex-wrap gap-2">
                           <button onClick={() => void loadContainerLogs(container.name)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
                           <button disabled={loading} onClick={() => void loadContainerEnv(container.name)} title="Show the container's .env file (or its runtime environment if none)" className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">{busy === `env:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />} .env</button>
-                          {canRestartContainer && server?.has_credentials ? <button onClick={() => setContainerShellFor(container.name)} title="Open an interactive shell inside this container" className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30"><Terminal size={12} /> Shell</button> : null}
+                          {isAdmin && server?.has_credentials ? <button onClick={() => setContainerShellFor(container.name)} title="Open an interactive shell inside this container" className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30"><Terminal size={12} /> Shell</button> : null}
                           {canRestartContainer ? <button disabled={loading} onClick={() => void restartSelectedContainer(container.name)} className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">{busy === `container:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : null}Restart</button> : null}
                         </div>
                       </td>
