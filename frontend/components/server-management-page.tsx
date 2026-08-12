@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ExternalLink, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, List, MonitorDot, MoreVertical, Pencil, Plus, TerminalSquare, Trash2, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, TerminalSquare, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AddServerForm } from "@/components/add-server-form";
 import { AppShell } from "@/components/app-shell";
@@ -98,6 +98,19 @@ function distinctValues(servers: Server[], pick: (server: Server) => string): st
   return Array.from(seen).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 }
 
+// Pure sort, returning a new array so it can be applied per-group without mutating shared state.
+// A null key means "leave in the given order".
+function sortRows(rows: Server[], sortKey: SortKey | null, sortDir: SortDir): Server[] {
+  if (!sortKey) return rows;
+  const factor = sortDir === "asc" ? 1 : -1;
+  return [...rows].sort((a, b) => factor * (sortKey === "ip"
+    ? compareIp(a.ip_address, b.ip_address)
+    : (a.hostname || "").localeCompare(b.hostname || "", undefined, { numeric: true, sensitivity: "base" })));
+}
+
+type GroupSort = { key: SortKey | null; dir: SortDir };
+const NO_SORT: GroupSort = { key: null, dir: "asc" };
+
 function Chip({ label, tone }: { label: string; tone: "accent" | "slate" }) {
   const styles = tone === "accent"
     ? "bg-accent/10 text-accent dark:bg-accent/20"
@@ -138,16 +151,18 @@ type ServerGroup = { key: string; name: string; count: number; rows: Server[] };
 // so it never collides with the ALL sentinel, and from the wire value used for grouping.
 const UNASSIGNED_FILTER = "__unassigned__";
 
-// The vertical ⋮ row menu. Replaces the loose Shell button + group <select> that used to sit
-// in the Actions cell with a single menu holding Open / Edit / Shell and the group assignment.
-// The dropdown is positioned `fixed` off the button's rect so the inventory card's
-// `overflow-hidden` can never clip it, and it closes on scroll, resize or a click away.
-function RowActions({ server, folders, canShell, onShell, onAssign }: {
+// The vertical ⋮ row menu: Open / Edit / Refresh vitals / Shell, plus "Move to group…", which
+// opens a searchable dialog rather than listing every group inline — an inline list does not
+// scale to hundreds or thousands of groups. The dropdown is positioned `fixed` off the button's
+// rect so the inventory card's `overflow-hidden` can never clip it, and it closes on scroll,
+// resize or a click away.
+function RowActions({ server, canShell, vitalsBusy, onShell, onRefreshVitals, onMoveToGroup }: {
   server: Server;
-  folders: Folder[];
   canShell: boolean;
+  vitalsBusy: boolean;
   onShell: () => void;
-  onAssign: (folderId: string | null) => void;
+  onRefreshVitals: () => void;
+  onMoveToGroup: () => void;
 }) {
   const router = useRouter();
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
@@ -183,7 +198,7 @@ function RowActions({ server, folders, canShell, onShell, onAssign }: {
         title={`Actions for ${server.hostname}`}
         className="inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-slate-200 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100"
       >
-        <MoreVertical size={16} />
+        {vitalsBusy ? <Loader2 size={16} className="animate-spin text-accent" /> : <MoreVertical size={16} />}
       </button>
       {pos ? (
         <>
@@ -195,24 +210,86 @@ function RowActions({ server, folders, canShell, onShell, onAssign }: {
             <button role="menuitem" className={item} onClick={() => { setPos(null); router.push(`/server/?id=${encodeURIComponent(server.id)}&edit=1`); }}>
               <Pencil size={14} className="text-accent" /> Edit details
             </button>
+            <button role="menuitem" disabled={vitalsBusy} className={item} onClick={() => { setPos(null); onRefreshVitals(); }} title="Probe this server's live vitals over SSH">
+              <RefreshCw size={14} className="text-accent" /> Refresh vitals
+            </button>
             <button role="menuitem" disabled={!canShell} className={item} onClick={() => { setPos(null); onShell(); }} title={canShell ? "Open an interactive shell" : "No stored credentials for this server"}>
               <TerminalSquare size={14} className="text-accent" /> Open shell
             </button>
             <div className="my-1 border-t border-line dark:border-slate-700" />
-            <p className="px-4 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">Move to group</p>
-            <button role="menuitem" className={`${item} justify-between`} onClick={() => { setPos(null); onAssign(null); }}>
-              <span>Unassigned</span>{!server.folder_id ? <Check size={13} className="text-accent" /> : null}
+            <button role="menuitem" className={item} onClick={() => { setPos(null); onMoveToGroup(); }}>
+              <FolderIcon size={14} className="text-accent" /> Move to group…
             </button>
-            {folders.map((folder) => (
-              <button key={folder.id} role="menuitem" className={`${item} justify-between`} onClick={() => { setPos(null); onAssign(folder.id); }}>
-                <span className="flex min-w-0 items-center gap-2"><FolderIcon size={13} className="shrink-0 text-accent" /> <span className="truncate">{folder.name}</span></span>
-                {server.folder_id === folder.id ? <Check size={13} className="shrink-0 text-accent" /> : null}
-              </button>
-            ))}
           </div>
         </>
       ) : null}
     </>
+  );
+}
+
+// Searchable group-assignment dialog, opened from the row menu's "Move to group…". Filtering by
+// name is what keeps this usable with a very large number of groups, where the old inline list
+// would have been unnavigable. Enter assigns the single remaining match.
+function GroupAssignDialog({ server, folders, onClose, onAssign }: {
+  server: Server;
+  folders: Folder[];
+  onClose: () => void;
+  onAssign: (folderId: string | null) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const matches = needle ? folders.filter((folder) => folder.name.toLowerCase().includes(needle)) : folders;
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+      // Enter assigns when the search has narrowed to exactly one group
+      if (event.key === "Enter" && matches.length === 1) onAssign(matches[0].id);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [matches, onAssign, onClose]);
+
+  const item = "flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800";
+  return (
+    <div className="fixed inset-0 z-[80] flex items-start justify-center bg-black/40 p-4 pt-24" role="dialog" aria-modal="true">
+      <button aria-label="Cancel" onClick={onClose} className="absolute inset-0 cursor-default" />
+      <div className="relative z-10 w-full max-w-md overflow-hidden rounded-2xl border border-line bg-panel shadow-xl dark:border-slate-700 dark:bg-slate-900">
+        <div className="flex items-center justify-between border-b border-line px-5 py-4 dark:border-slate-700">
+          <h2 className="min-w-0 truncate font-semibold text-slate-900 dark:text-slate-100">Move <span className="text-accent">{server.hostname}</span> to a group</h2>
+          <button type="button" onClick={onClose} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"><X size={16} /></button>
+        </div>
+        <div className="p-3">
+          <div className="relative mb-2">
+            <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              autoFocus
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={`Search ${folders.length} group${folders.length === 1 ? "" : "s"}…`}
+              className="h-10 w-full rounded-xl border border-line bg-white pl-9 pr-3 text-sm outline-none transition-colors focus:ring-2 focus:ring-accent dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            />
+          </div>
+          <div className="max-h-72 overflow-auto">
+            <button className={item} onClick={() => onAssign(null)}>
+              <span className="flex items-center gap-2"><MonitorDot size={14} className="text-slate-400" /> Unassigned</span>
+              {!server.folder_id ? <Check size={14} className="text-accent" /> : null}
+            </button>
+            {matches.map((folder) => (
+              <button key={folder.id} className={item} onClick={() => onAssign(folder.id)}>
+                <span className="flex min-w-0 items-center gap-2"><FolderIcon size={14} className="shrink-0 text-accent" /> <span className="truncate">{folder.name}</span> <span className="shrink-0 text-xs text-slate-400">{folder.server_count}</span></span>
+                {server.folder_id === folder.id ? <Check size={14} className="shrink-0 text-accent" /> : null}
+              </button>
+            ))}
+            {folders.length === 0 ? (
+              <p className="px-3 py-4 text-sm text-slate-500 dark:text-slate-400">No groups yet. Create one with “Manage groups”.</p>
+            ) : matches.length === 0 ? (
+              <p className="px-3 py-4 text-sm text-slate-500 dark:text-slate-400">No groups match “{query}”.</p>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -232,6 +309,13 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // Grouped-by-folder is the default view the feature is meant to deliver; the toggle drops back
   // to the original flat "all servers" table for anyone who wants it.
   const [grouped, setGrouped] = useState(true);
+  // Per-server vitals refresh in flight (ids), the row whose group-assignment dialog is open,
+  // per-group sort overrides, and which group sections are collapsed. Sort and collapse are
+  // keyed by group key ("" is the Unassigned bucket, same sentinel used everywhere else).
+  const [vitalsBusyIds, setVitalsBusyIds] = useState<Set<string>>(new Set());
+  const [assignFor, setAssignFor] = useState<Server | null>(null);
+  const [groupSort, setGroupSort] = useState<Record<string, GroupSort>>({});
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [showFolderManager, setShowFolderManager] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [folderBusy, setFolderBusy] = useState(false);
@@ -270,6 +354,44 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Unable to move server");
     }
+  }
+
+  // Probe one server's vitals (the row-menu action). Mirrors refreshAllVitals but for a single
+  // host, with a per-id busy flag so only that row's control spins.
+  async function refreshOneVitals(server: Server) {
+    setVitalsBusyIds((current) => new Set(current).add(server.id));
+    setLoadError("");
+    try {
+      const updated = await refreshVitals(token, server.id);
+      setServers((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+    } catch {
+      setLoadError(`Vitals unavailable for ${server.hostname}`);
+    } finally {
+      setVitalsBusyIds((current) => {
+        const next = new Set(current);
+        next.delete(server.id);
+        return next;
+      });
+    }
+  }
+
+  // Per-group sort: clicking a section's column header sorts only that section. Same column
+  // flips direction; a new column starts ascending.
+  function toggleGroupSort(groupKey: string, column: SortKey) {
+    setGroupSort((current) => {
+      const existing = current[groupKey] ?? NO_SORT;
+      const dir: SortDir = existing.key === column ? (existing.dir === "asc" ? "desc" : "asc") : "asc";
+      return { ...current, [groupKey]: { key: column, dir } };
+    });
+  }
+
+  function toggleCollapse(groupKey: string) {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
   }
 
   async function submitNewFolder(event: React.FormEvent) {
@@ -317,7 +439,9 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
 
   const filtersActive = typeFilter !== ALL || envFilter !== ALL || groupFilter !== ALL;
 
-  const visibleServers = useMemo(() => {
+  // Filter only — sorting is applied afterwards, globally for the flat view and per-section for
+  // the grouped view, so each group can be sorted independently.
+  const filteredServers = useMemo(() => {
     const folderIds = new Set(folders.map((folder) => folder.id));
     const inGroup = (server: Server) => {
       if (groupFilter === ALL) return true;
@@ -325,17 +449,15 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
       if (groupFilter === UNASSIGNED_FILTER) return resolved === UNASSIGNED;
       return resolved === groupFilter;
     };
-    const rows = servers.filter((server) => (
+    return servers.filter((server) => (
       (typeFilter === ALL || server.server_type === typeFilter)
       && (envFilter === ALL || server.environment === envFilter)
       && inGroup(server)
     ));
-    if (!sortKey) return rows;
-    const factor = sortDir === "asc" ? 1 : -1;
-    return rows.sort((a, b) => factor * (sortKey === "ip"
-      ? compareIp(a.ip_address, b.ip_address)
-      : (a.hostname || "").localeCompare(b.hostname || "", undefined, { numeric: true, sensitivity: "base" })));
-  }, [servers, folders, typeFilter, envFilter, groupFilter, sortKey, sortDir]);
+  }, [servers, folders, typeFilter, envFilter, groupFilter]);
+
+  // The flat view's sorted rows (also what "Refresh vitals" probes and what the count shows).
+  const visibleServers = useMemo(() => sortRows(filteredServers, sortKey, sortDir), [filteredServers, sortKey, sortDir]);
 
   // Group the ALREADY filtered-and-sorted rows so the existing filter/sort/vitals behaviour is
   // preserved untouched within each section. Folders that have no visible row are omitted (a
@@ -344,7 +466,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   const groups = useMemo<ServerGroup[]>(() => {
     const folderIds = new Set(folders.map((folder) => folder.id));
     const byKey = new Map<string, Server[]>();
-    for (const server of visibleServers) {
+    for (const server of filteredServers) {
       // a folder_id that no longer resolves (folder deleted out from under a cached row) falls
       // back to Unassigned rather than creating a ghost section
       const key = server.folder_id && folderIds.has(server.folder_id) ? server.folder_id : UNASSIGNED;
@@ -361,7 +483,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
       result.push({ key: UNASSIGNED, name: "Unassigned", count: unassigned.length, rows: unassigned });
     }
     return result;
-  }, [visibleServers, folders]);
+  }, [filteredServers, folders]);
 
   // A type or environment can disappear from the inventory (renamed, or its last server
   // deleted). Without this the table would silently show zero rows against a filter value
@@ -448,26 +570,28 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
         <td className="px-6 py-4">
           <RowActions
             server={server}
-            folders={folders}
             canShell={server.has_credentials}
+            vitalsBusy={vitalsBusyIds.has(server.id)}
             onShell={() => setShellFor(shellFor?.id === server.id ? null : server)}
-            onAssign={(folderId) => void assignFolder(server, folderId)}
+            onRefreshVitals={() => void refreshOneVitals(server)}
+            onMoveToGroup={() => setAssignFor(server)}
           />
         </td>
       ) : null}
     </tr>
   );
 
-  // A full column-headed table for one set of rows. Used once in the flat view and once per
-  // section in the grouped view, so a group's name renders as a *section heading above its own
-  // table* rather than as a banner row wedged under a shared column header.
-  const serverTable = (rows: Server[]) => (
+  // A full column-headed table for one set of rows, with its own sort context. Used once in the
+  // flat view (global sort) and once per section in the grouped view (each section's own sort),
+  // so a group's name renders as a *section heading above its own table* and each group sorts
+  // independently of the others.
+  const serverTable = (rows: Server[], sKey: SortKey | null, sDir: SortDir, onSort: (column: SortKey) => void) => (
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm">
         <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
           <tr>
-            <SortHeader label="Host" column="hostname" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
-            <SortHeader label="IP" column="ip" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+            <SortHeader label="Host" column="hostname" sortKey={sKey} sortDir={sDir} onSort={onSort} />
+            <SortHeader label="IP" column="ip" sortKey={sKey} sortDir={sDir} onSort={onSort} />
             <th className="px-6 py-4 font-semibold">OS</th>
             <th className="whitespace-nowrap px-6 py-4 font-semibold">Uptime</th>
             <th className="whitespace-nowrap px-6 py-4 font-semibold">CPU</th>
@@ -488,6 +612,14 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   return (
     <section className="space-y-6 px-6 py-6">
       {confirmDialog}
+      {assignFor ? (
+        <GroupAssignDialog
+          server={assignFor}
+          folders={folders}
+          onClose={() => setAssignFor(null)}
+          onAssign={(folderId) => { void assignFolder(assignFor, folderId); setAssignFor(null); }}
+        />
+      ) : null}
       {role !== "admin" && (
         <div className="rounded-2xl bg-slate-50 p-4 text-sm font-medium text-slate-600 ring-1 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700">Developer/support roles can view inventory, containers, and logs. Ask an admin to add or update servers.</div>
       )}
@@ -627,19 +759,30 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
           </div>
         ) : grouped ? (
           <div className="divide-y divide-slate-200 dark:divide-slate-800">
-            {groups.map((group) => (
-              <div key={group.key || "__unassigned__"}>
-                <div className="flex items-center gap-2 px-6 py-3">
-                  {group.key ? <FolderIcon size={16} className="text-accent" /> : <MonitorDot size={16} className="text-slate-400 dark:text-slate-500" />}
-                  <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">{group.name}</h3>
-                  <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">{group.count}</span>
+            {groups.map((group) => {
+              const gsort = groupSort[group.key] ?? NO_SORT;
+              const isCollapsed = collapsed.has(group.key);
+              return (
+                <div key={group.key || "__unassigned__"}>
+                  <button
+                    type="button"
+                    onClick={() => toggleCollapse(group.key)}
+                    aria-expanded={!isCollapsed}
+                    title={isCollapsed ? "Expand group" : "Collapse group"}
+                    className="flex w-full items-center gap-2 px-6 py-3 text-left transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/40"
+                  >
+                    {isCollapsed ? <ChevronRight size={16} className="shrink-0 text-slate-400" /> : <ChevronDown size={16} className="shrink-0 text-slate-400" />}
+                    {group.key ? <FolderIcon size={16} className="text-accent" /> : <MonitorDot size={16} className="text-slate-400 dark:text-slate-500" />}
+                    <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">{group.name}</h3>
+                    <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">{group.count}</span>
+                  </button>
+                  {isCollapsed ? null : serverTable(sortRows(group.rows, gsort.key, gsort.dir), gsort.key, gsort.dir, (column) => toggleGroupSort(group.key, column))}
                 </div>
-                {serverTable(group.rows)}
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
-          serverTable(visibleServers)
+          serverTable(visibleServers, sortKey, sortDir, toggleSort)
         )}
       </div>
     </section>
