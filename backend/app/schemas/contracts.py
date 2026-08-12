@@ -36,6 +36,22 @@ class ServerCreate(BaseModel):
     private_key: str = ""
 
 
+class ServerUpdate(BaseModel):
+    # Every field optional: a PATCH sends only what changed. model_dump(exclude_unset=True) in
+    # the route distinguishes "field omitted" from "field set to empty", so clearing an alias
+    # (alias="") and leaving it untouched are different requests.
+    hostname: str | None = None
+    alias: str | None = None
+    ip_address: str | None = None
+    ssh_port: int | None = None
+    username: str | None = None
+    environment: str | None = None
+    server_type: str | None = None
+    tags: list[str] | None = None
+    business_owner: str | None = None
+    support_contact: str | None = None
+
+
 class ServerRead(BaseModel):
     id: str
     hostname: str

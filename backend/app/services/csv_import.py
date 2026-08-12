@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.crypto import encrypt_secret
 from app.models.entities import Server, ServerStatus
 from app.schemas.contracts import ServerImportResult, ServerImportRow
+from app.services.validation import validate_host_address
 
 CSV_HEADERS = [
     "hostname",
@@ -126,6 +127,13 @@ def _build_server(fields: dict[str, str]) -> Server:
     missing = [name for name in _REQUIRED_FIELDS if not fields.get(name)]
     if missing:
         raise _RowError(f"Missing required values: {', '.join(missing)}")
+    # An IP-shaped ip_address must be a real IPv4; a hostname/domain is accepted as-is. Raised
+    # as _RowError so the per-row message survives (a bare ValueError becomes "Row could not be
+    # imported" in the generic handler, hiding what was wrong).
+    try:
+        validate_host_address(fields.get("ip_address", ""))
+    except ValueError as exc:
+        raise _RowError(str(exc)) from exc
     for name, limit in _MAX_LENGTHS.items():
         if len(fields.get(name, "")) > limit:
             raise _RowError(f"{name} is longer than {limit} characters")

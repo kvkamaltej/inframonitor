@@ -12,7 +12,7 @@ import threading
 
 import asyncio
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
@@ -46,6 +46,7 @@ from app.schemas.contracts import (
     ServerImportRequest,
     ServerImportResult,
     ServerRead,
+    ServerUpdate,
     ServerAccessUpdate,
     ServiceLogRequest,
     ServiceRestartRequest,
@@ -68,6 +69,7 @@ from app.schemas.contracts import (
 from app.services.csv_import import CsvImportError, import_servers
 from app.services.integrations import check_integrations
 from app.services.inventory import InventoryService, to_read
+from app.services.validation import validate_host_address
 from app.services.ssh_ops import (
     ShellSession,
     SftpTooLarge,
@@ -430,8 +432,30 @@ def list_servers(claims: dict = Depends(require_user), db: Session = Depends(get
     return InventoryService(db).list_servers(_accessible_server_ids(db, user))
 
 
+def _validate_address_or_400(value: str) -> None:
+    try:
+        validate_host_address(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+def _reject_duplicate(db: Session, *, hostname: str = "", ip_address: str = "", exclude_id: int | None = None) -> None:
+    # hostname/ip are not DB-unique, but CSV import refuses collisions, so a rename matches that
+    # stance: changing a server's hostname or IP to one another server already holds is a 409.
+    # exclude_id excludes the server being edited, so a no-op save is not a self-collision.
+    if hostname:
+        clash = db.scalar(select(Server).where(func.lower(Server.hostname) == hostname.strip().lower()))
+        if clash and clash.id != exclude_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Another server already uses hostname {hostname}")
+    if ip_address:
+        clash = db.scalar(select(Server).where(func.lower(Server.ip_address) == ip_address.strip().lower()))
+        if clash and clash.id != exclude_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Another server already uses IP address {ip_address}")
+
+
 @router.post("/servers", response_model=ServerRead, status_code=status.HTTP_201_CREATED)
 def create_server(payload: ServerCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> ServerRead:
+    _validate_address_or_400(payload.ip_address)
     created = InventoryService(db).create_server(payload)
     server = db.scalar(select(Server).where(Server.public_id == created.id))
     if server and (payload.password or payload.private_key):
@@ -703,6 +727,49 @@ def delete_server(server_id: str, _: dict = Depends(require_admin), db: Session 
     server = _server_or_404(db, server_id)
     db.delete(server)
     db.commit()
+
+
+_EDITABLE_TEXT_FIELDS = ("hostname", "alias", "ip_address", "username", "environment", "server_type", "business_owner", "support_contact")
+
+
+@router.patch("/servers/{server_id}", response_model=ServerRead)
+def update_server(server_id: str, payload: ServerUpdate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> ServerRead:
+    server = _server_or_404(db, server_id)
+    # exclude_unset: only touch fields the client actually sent, so an edit dialog that submits
+    # a subset never blanks the rest.
+    data = payload.model_dump(exclude_unset=True)
+
+    if "ip_address" in data:
+        ip = (data["ip_address"] or "").strip()
+        if not ip:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="IP address / hostname cannot be empty")
+        _validate_address_or_400(ip)
+    if "hostname" in data and not (data["hostname"] or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Hostname cannot be empty")
+    if "username" in data and not (data["username"] or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="SSH user cannot be empty")
+    if "ssh_port" in data and data["ssh_port"] is not None:
+        port = int(data["ssh_port"])
+        if port < 1 or port > 65535:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="SSH port must be between 1 and 65535")
+    _reject_duplicate(
+        db,
+        hostname=data["hostname"].strip() if data.get("hostname") else "",
+        ip_address=data["ip_address"].strip() if data.get("ip_address") else "",
+        exclude_id=server.id,
+    )
+
+    for field in _EDITABLE_TEXT_FIELDS:
+        if field in data and data[field] is not None:
+            setattr(server, field, data[field].strip())
+    if "ssh_port" in data and data["ssh_port"] is not None:
+        server.ssh_port = int(data["ssh_port"])
+    if "tags" in data and data["tags"] is not None:
+        server.tags = ",".join(sorted({tag.strip() for tag in data["tags"] if tag.strip()}))
+
+    db.commit()
+    db.refresh(server)
+    return to_read(server)
 
 
 @router.put("/servers/{server_id}/credentials", response_model=ConnectionResult)

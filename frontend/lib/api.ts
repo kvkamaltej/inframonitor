@@ -93,6 +93,8 @@ export type Server = {
   package_manager: string;
   status: string;
   health_score: number;
+  business_owner: string;
+  support_contact: string;
   tags: string[];
   installed_services: string[];
   discovered_services: Array<Record<string, string>>;
@@ -444,6 +446,29 @@ export async function getIntegrations(token: string): Promise<Integration[]> {
 
 export async function addServer(token: string, payload: unknown): Promise<Server> {
   return request<Server>("/servers", token, { method: "POST", body: JSON.stringify(payload) });
+}
+
+// Partial edit of a server's metadata (rename, re-tag, fix an IP). Send only the fields that
+// changed; the backend PATCH leaves omitted fields untouched. A bad IP comes back 400 and an
+// hostname/IP clash with another server comes back 409, both surfaced as ApiError.
+export type ServerUpdate = Partial<{
+  hostname: string;
+  alias: string;
+  ip_address: string;
+  username: string;
+  ssh_port: number;
+  environment: string;
+  server_type: string;
+  tags: string[];
+  business_owner: string;
+  support_contact: string;
+}>;
+
+export async function updateServer(token: string, serverId: string, payload: ServerUpdate): Promise<Server> {
+  return request<Server>(`/servers/${encodeURIComponent(serverId)}`, token, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
 }
 
 export async function deleteServer(token: string, serverId: string): Promise<void> {

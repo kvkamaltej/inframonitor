@@ -3,6 +3,7 @@
 import { Plus } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 import { addServer, getOptions, OptionList } from "@/lib/api";
+import { addressError } from "@/lib/address";
 
 export function AddServerForm({ token, onAdded }: { token: string; onAdded: () => void }) {
   const [saving, setSaving] = useState(false);
@@ -30,9 +31,19 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
       .map((tag) => tag.trim())
       .filter(Boolean);
 
+    const ipAddress = String(form.get("ip_address") ?? "");
+    // Cheap local guard so a mistyped address is caught before a round-trip; the backend
+    // re-checks and is the source of truth.
+    const badAddress = addressError(ipAddress);
+    if (badAddress) {
+      setMessage(badAddress);
+      setSaving(false);
+      return;
+    }
+
     const payload = {
       hostname: String(form.get("hostname") ?? ""),
-      ip_address: String(form.get("ip_address") ?? ""),
+      ip_address: ipAddress,
       username: String(form.get("username") ?? ""),
       ssh_port: Number(form.get("ssh_port") ?? 22),
       environment: String(form.get("environment") ?? "production"),

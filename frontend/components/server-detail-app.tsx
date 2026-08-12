@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, Clock, Coffee, Copy, Cpu, Database, FileText, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, RefreshCw, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, Clock, Coffee, Copy, Cpu, Database, FileText, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, RefreshCw, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import {
   ContainerInfo,
@@ -25,8 +25,11 @@ import {
   TomcatInstance,
   TomcatLogFile,
   TomcatPrerequisite,
-  TomcatWebapp
+  TomcatWebapp,
+  updateServer,
+  ServerUpdate
 } from "@/lib/api";
+import { addressError } from "@/lib/address";
 import { DefaultPasswordBanner } from "@/components/app-shell";
 import { useConfirm } from "@/components/confirm-dialog";
 import { LoginPanel } from "@/components/login-panel";
@@ -70,6 +73,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   // content gets the full width and the occasional admin action is one click away.
   const [actionsOpen, setActionsOpen] = useState(false);
   const [credentialsOpen, setCredentialsOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
 
   const { confirm, confirmDialog } = useConfirm();
   const isAdmin = me?.role === "admin";
@@ -450,6 +454,9 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                       <button role="menuitem" disabled={loading} onClick={() => { setActionsOpen(false); void runDiscovery(); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800">
                         <RefreshCw size={15} className="text-accent" /> Discover services &amp; storage
                       </button>
+                      <button role="menuitem" onClick={() => { setActionsOpen(false); setEditOpen(true); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800">
+                        <Pencil size={15} className="text-accent" /> Edit server details
+                      </button>
                       <button role="menuitem" onClick={() => { setActionsOpen(false); setCredentialsOpen(true); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800">
                         <KeyRound size={15} className="text-accent" /> Manage SSH credentials
                       </button>
@@ -467,6 +474,19 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       </header>
 
       <DefaultPasswordBanner me={me} />
+
+      {editOpen && server ? (
+        <EditServerDialog
+          server={server}
+          onClose={() => setEditOpen(false)}
+          onSave={async (changes) => {
+            const updated = await updateServer(token, serverId, changes);
+            setServer(updated);
+            setEditOpen(false);
+            notify("Server details updated.");
+          }}
+        />
+      ) : null}
 
       {credentialsOpen ? (
         <CredentialsDialog
@@ -1074,6 +1094,116 @@ function CredentialsDialog({ hasCredentials, busy, onClose, onSave }: { hasCrede
           <div className="flex items-center justify-end gap-2 pt-1">
             <button type="button" onClick={onClose} className="h-10 rounded-full border border-line px-5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</button>
             <button type="submit" disabled={saving || busy} className="h-10 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{saving ? "Saving…" : "Save encrypted"}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function EditServerDialog({ server, onClose, onSave }: { server: Server; onClose: () => void; onSave: (changes: ServerUpdate) => Promise<void> }) {
+  const [hostname, setHostname] = useState(server.hostname);
+  const [ipAddress, setIpAddress] = useState(server.ip_address);
+  const [alias, setAlias] = useState(server.alias);
+  const [username, setUsername] = useState(server.username);
+  const [sshPort, setSshPort] = useState(String(server.ssh_port));
+  const [environment, setEnvironment] = useState(server.environment);
+  const [serverType, setServerType] = useState(server.server_type);
+  const [tags, setTags] = useState(server.tags.join(", "));
+  const [businessOwner, setBusinessOwner] = useState(server.business_owner ?? "");
+  const [supportContact, setSupportContact] = useState(server.support_contact ?? "");
+  const [saving, setSaving] = useState(false);
+  const [localError, setLocalError] = useState("");
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!hostname.trim()) return setLocalError("Hostname cannot be empty.");
+    if (!ipAddress.trim()) return setLocalError("IP address / hostname cannot be empty.");
+    if (!username.trim()) return setLocalError("SSH user cannot be empty.");
+    const badAddress = addressError(ipAddress);
+    if (badAddress) return setLocalError(badAddress);
+    const port = Number(sshPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return setLocalError("SSH port must be a whole number between 1 and 65535.");
+
+    setSaving(true);
+    setLocalError("");
+    try {
+      await onSave({
+        hostname: hostname.trim(),
+        ip_address: ipAddress.trim(),
+        alias: alias.trim(),
+        username: username.trim(),
+        ssh_port: port,
+        environment: environment.trim(),
+        server_type: serverType.trim(),
+        tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
+        business_owner: businessOwner.trim(),
+        support_contact: supportContact.trim()
+      });
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : "Unable to save changes");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const field = "h-11 w-full rounded-xl border border-line bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100";
+  const labelClass = "mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400";
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+      <button aria-label="Cancel" onClick={onClose} className="absolute inset-0 cursor-default" />
+      <div className="relative z-10 max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-line bg-panel shadow-xl dark:border-slate-700 dark:bg-slate-900">
+        <div className="sticky top-0 flex items-center justify-between border-b border-line bg-panel px-5 py-4 dark:border-slate-700 dark:bg-slate-900">
+          <h2 className="flex items-center gap-2 font-semibold text-slate-900 dark:text-slate-100"><Pencil size={18} className="text-accent" /> Edit server details</h2>
+          <button type="button" onClick={onClose} className="inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"><X size={16} /></button>
+        </div>
+        <form onSubmit={submit} className="grid gap-4 p-5 sm:grid-cols-2">
+          <div className="sm:col-span-2">
+            <label className={labelClass}>Hostname</label>
+            <input value={hostname} onChange={(event) => setHostname(event.target.value)} className={field} />
+          </div>
+          <div>
+            <label className={labelClass}>IP address / hostname</label>
+            <input value={ipAddress} onChange={(event) => setIpAddress(event.target.value)} className={field} />
+          </div>
+          <div>
+            <label className={labelClass}>Alias</label>
+            <input value={alias} onChange={(event) => setAlias(event.target.value)} placeholder="optional" className={field} />
+          </div>
+          <div>
+            <label className={labelClass}>SSH user</label>
+            <input value={username} onChange={(event) => setUsername(event.target.value)} className={field} />
+          </div>
+          <div>
+            <label className={labelClass}>SSH port</label>
+            <input value={sshPort} onChange={(event) => setSshPort(event.target.value)} type="number" min={1} max={65535} className={field} />
+          </div>
+          <div>
+            <label className={labelClass}>Environment</label>
+            <input value={environment} onChange={(event) => setEnvironment(event.target.value)} className={field} />
+          </div>
+          <div>
+            <label className={labelClass}>Server type</label>
+            <input value={serverType} onChange={(event) => setServerType(event.target.value)} className={field} />
+          </div>
+          <div className="sm:col-span-2">
+            <label className={labelClass}>Tags <span className="font-normal normal-case text-slate-400">(comma separated)</span></label>
+            <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="web, prod" className={field} />
+          </div>
+          <div>
+            <label className={labelClass}>Business owner</label>
+            <input value={businessOwner} onChange={(event) => setBusinessOwner(event.target.value)} placeholder="optional" className={field} />
+          </div>
+          <div>
+            <label className={labelClass}>Support contact</label>
+            <input value={supportContact} onChange={(event) => setSupportContact(event.target.value)} placeholder="optional" className={field} />
+          </div>
+          {localError ? <p className="text-xs font-medium text-danger dark:text-red-400 sm:col-span-2">{localError}</p> : null}
+          <p className="text-xs text-slate-500 dark:text-slate-400 sm:col-span-2">SSH credentials and discovered facts are unchanged — use “Manage SSH credentials” for those.</p>
+          <div className="flex items-center justify-end gap-2 pt-1 sm:col-span-2">
+            <button type="button" onClick={onClose} className="h-10 rounded-full border border-line px-5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</button>
+            <button type="submit" disabled={saving} className="h-10 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{saving ? "Saving…" : "Save changes"}</button>
           </div>
         </form>
       </div>
