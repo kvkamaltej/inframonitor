@@ -50,7 +50,7 @@ hiddenimports = [
 
 hiddenimports += collect_submodules("app")
 
-for pkg in ("cryptography", "paramiko", "bcrypt", "nacl", "cffi", "pydantic"):
+for pkg in ("cryptography", "paramiko", "bcrypt", "nacl", "cffi", "pydantic", "psycopg", "pymysql", "hvac", "requests"):
     pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
     datas += pkg_datas
     binaries += pkg_binaries
@@ -67,10 +67,10 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    # Desktop is SQLite-only; the Postgres driver and monitoring stack are server-profile only,
-    # and tkinter is never used. (If a build errors on a missing psycopg symbol, drop it here —
-    # SQLAlchemy only imports it for a postgresql URL.)
-    excludes=["tkinter", "psycopg", "prometheus_client"],
+    # The app's own DB is SQLite, but the Database console can connect out to Postgres (psycopg)
+    # and MySQL (pymysql), and the Vault integration uses hvac/requests — all collected above,
+    # so they are NOT excluded. Only tkinter and the server-profile metrics stack are dropped.
+    excludes=["tkinter", "prometheus_client"],
     noarchive=False,
 )
 
