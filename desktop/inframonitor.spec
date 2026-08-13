@@ -76,27 +76,25 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# ONEFILE build: everything (interpreter, libs, frontend/out, backend) is packed INTO the single
+# InfraMonitor.exe — no `_internal` folder. There is no COLLECT for a onefile build; a.binaries
+# and a.datas go straight into EXE. Trade-off vs the old onedir: the exe self-extracts to a temp
+# dir on each launch (a second or two of startup, covered by the splash), but it is one portable
+# file. sys._MEIPASS still points at the extraction dir, so launcher._base_dir() is unchanged.
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="InfraMonitor",
     debug=False,
     strip=False,
     upx=False,
+    runtime_tmpdir=None,
     # console=False -> no console window. Flip to True while debugging a build to see backend
     # tracebacks.
     console=False,
     disable_windowed_traceback=False,
     icon=os.path.join(ROOT, "desktop", "inframonitor.ico"),
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    name="InfraMonitor",
 )
