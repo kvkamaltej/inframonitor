@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronDown, ChevronRight, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, Sun, TerminalSquare, UserCircle, Users, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Database, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, Sun, TerminalSquare, UserCircle, Users, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getFolders, getServers, Folder as FolderType, Server as ServerRow } from "@/lib/api";
@@ -156,6 +156,9 @@ export function Sidebar({ role, guest = false }: { role?: string; guest?: boolea
         <div className="grid gap-1">
           <NavItem href="/" icon={MonitorCog} label="Dashboard" />
           <NavItem href="/servers" icon={Server} label="Server Management" />
+          {/* Database console (feature/db-connect): visible to any signed-in account, hidden for
+              desktop guests. The backend also blocks guests (require_user_not_guest -> 403). */}
+          {!guest && <NavItem href="/databases" icon={Database} label="Databases" />}
           {/* EXPERIMENTAL (feature/server-folders): admin-only Shell launcher. It is a button, not
               a route — it opens a flyout of hosts grouped by folder. Collapsing the sidebar first
               would hide the flyout's anchor, so opening it also opens the rail. */}

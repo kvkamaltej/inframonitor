@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
 from app.core.crypto import decrypt_secret, encrypt_secret
-from app.core.security import create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, verify_password
+from app.core.security import create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, require_user_not_guest, verify_password
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
@@ -33,6 +33,10 @@ from app.schemas.contracts import (
     ConnectionResult,
     ContainerRead,
     CredentialPayload,
+    DbConnectionRequest,
+    DbConnectionResult,
+    DbQueryRequest,
+    DbQueryResult,
     FolderCreate,
     FolderRead,
     IntegrationStatus,
@@ -71,6 +75,8 @@ from app.schemas.contracts import (
     WarDeployResult,
 )
 from app.services.csv_import import CsvImportError, import_servers
+from app.services.db_console import DEFAULT_PORTS, ENGINES, DbConsoleError
+from app.services import db_console
 from app.services.integrations import check_integrations
 from app.services.inventory import InventoryService, to_read
 from app.services.validation import validate_host_address
@@ -1944,3 +1950,53 @@ def delete_shell_favorite(favorite_id: int, claims: dict = Depends(require_user)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Favorite not found")
     db.delete(favorite)
     db.commit()
+
+
+# --- database console (feature/db-connect) -------------------------------------------------
+#
+# A standalone SQL console: a signed-in (non-guest) user supplies connection parameters and
+# credentials per request, and the backend opens a fresh PostgreSQL/MySQL connection, runs the
+# work, and closes it. Nothing is stored. Blocked for desktop guests (require_user_not_guest):
+# the console dials out to arbitrary databases, so it must be a real account.
+#
+# IN scope: standalone params (not a managed server), test + run a read-only query, postgres +
+# mysql, per-request credentials. OUT of scope (follow-ons): saved/stored connections, a schema
+# browser, SQL autocomplete, and write-transaction management.
+
+# how many rows a single query may return, before the caller's own limit is applied
+_DB_DEFAULT_ROW_LIMIT = 1000
+_DB_MAX_ROW_LIMIT = 5000
+
+
+def _db_engine_or_400(engine: str) -> str:
+    normalized = (engine or "").strip().lower()
+    if normalized not in ENGINES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Engine must be postgres or mysql")
+    return normalized
+
+
+@router.post("/db/test-connection", response_model=DbConnectionResult)
+def db_test_connection(payload: DbConnectionRequest, _: dict = Depends(require_user_not_guest)) -> DbConnectionResult:
+    engine = _db_engine_or_400(payload.engine)
+    port = payload.port or DEFAULT_PORTS[engine]
+    try:
+        message = db_console.test_connection(engine, payload.host, port, payload.username, payload.password, payload.database)
+        return DbConnectionResult(ok=True, message=message)
+    except DbConsoleError as exc:
+        # a bad host/credentials is an expected outcome here, not a server error: report it as a
+        # clean ok=false with HTTP 200 so the UI can render the reason inline
+        return DbConnectionResult(ok=False, message=str(exc))
+
+
+@router.post("/db/query", response_model=DbQueryResult)
+def db_query(payload: DbQueryRequest, _: dict = Depends(require_user_not_guest)) -> DbQueryResult:
+    engine = _db_engine_or_400(payload.engine)
+    port = payload.port or DEFAULT_PORTS[engine]
+    row_cap = min(payload.limit or _DB_DEFAULT_ROW_LIMIT, _DB_MAX_ROW_LIMIT)
+    try:
+        result = db_console.run_query(engine, payload.host, port, payload.username, payload.password, payload.database, payload.sql, row_cap)
+    except DbConsoleError as exc:
+        # never a 500 on a bad query or unreachable host: surface the DB error text as a 400 the
+        # console can display
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return DbQueryResult(**result)

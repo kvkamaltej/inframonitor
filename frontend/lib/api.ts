@@ -752,6 +752,47 @@ export async function sftpDownload(token: string, serverId: string, path: string
   }
 }
 
+// --- database console (feature/db-connect) -------------------------------------------------
+// A standalone SQL console: the caller supplies connection params + credentials on every call,
+// and the backend opens a fresh PostgreSQL/MySQL connection, runs the work, and closes it.
+// Nothing is stored. Both endpoints are blocked for desktop guests (403) — sign in to use them.
+
+export type DbEngine = "postgres" | "mysql";
+
+export type DbConnectionParams = {
+  engine: DbEngine;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  database: string;
+};
+
+export type DbConnectionResult = {
+  ok: boolean;
+  message: string;
+};
+
+export type DbQueryResult = {
+  columns: string[];
+  // row-major, aligned to `columns`; cells are JSON scalars (the backend stringifies anything else)
+  rows: Array<Array<string | number | boolean | null>>;
+  row_count: number;
+  // true when the result was cut to the row cap, so the UI can say "showing the first N rows"
+  truncated: boolean;
+  elapsed_ms: number;
+};
+
+export async function dbTestConnection(token: string, params: DbConnectionParams): Promise<DbConnectionResult> {
+  return request<DbConnectionResult>("/db/test-connection", token, { method: "POST", body: JSON.stringify(params) });
+}
+
+// A bad query or unreachable host comes back 400 with the DB error text in the body, which
+// request<T> surfaces as an ApiError the console can display; a guest hitting this gets 403.
+export async function dbQuery(token: string, params: DbConnectionParams & { sql: string; limit?: number }): Promise<DbQueryResult> {
+  return request<DbQueryResult>("/db/query", token, { method: "POST", body: JSON.stringify(params) });
+}
+
 export async function getShellFavorites(token: string): Promise<ShellFavorite[]> {
   return request<ShellFavorite[]>("/shell/favorites", token);
 }

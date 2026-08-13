@@ -13,6 +13,8 @@ bcrypt==4.0.1
 httpx==0.28.1
 paramiko==3.5.1
 psycopg[binary]==3.2.3
+# Database console (feature/db-connect): MySQL driver. psycopg above already covers PostgreSQL.
+pymysql==1.1.1
 prometheus-client==0.21.1
 python-multipart==0.0.20
 pytest==8.3.4
