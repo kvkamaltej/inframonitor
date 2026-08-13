@@ -205,6 +205,13 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     getFolders(token).then(setFolders).catch(() => undefined);
   }, [token, me?.role]);
 
+  // Re-run the currently-shown log source on the chosen interval (skipped while a request is in
+  // flight). Declared here — above the early returns below — so the hook runs on every render and
+  // never trips the Rules of Hooks (React #310).
+  useAutoRefresh(logsAuto, () => {
+    if (logRefresher && !busy) logRefresher();
+  });
+
   if (initializing) return <div className="flex min-h-screen items-center justify-center bg-page"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
   // Guest mode sets `me` with an empty token; only fall to the login gate when there's no session.
   if (!me) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); void load(nextToken); }} />;
@@ -477,11 +484,6 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     }
   }
 
-  // Re-run the currently-shown log source on the chosen interval (skipped while a request is in
-  // flight so slow tails don't stack up).
-  useAutoRefresh(logsAuto, () => {
-    if (logRefresher && !busy) logRefresher();
-  });
 
   async function removeServer() {
     if (!(await confirm({
