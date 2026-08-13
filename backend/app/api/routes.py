@@ -49,6 +49,7 @@ from app.schemas.contracts import (
     OptionCreate,
     OptionList,
     PasswordChange,
+    ProfileUpdate,
     PolicyAssignmentUpdate,
     PrivilegedOperationResult,
     RoleMenusResponse,
@@ -245,6 +246,7 @@ def me(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> M
     if claims.get("guest"):
         return MeResponse(
             email="Guest",
+            full_name="Guest",
             role="admin",
             using_default_password=False,
             guest=True,
@@ -256,10 +258,23 @@ def me(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> M
     user = _current_user(db, claims)
     return MeResponse(
         email=claims.get("sub") or user.email,
+        full_name=user.full_name,
         role="admin" if role == "administrator" else str(role or ""),
         using_default_password=_hash_matches_default(user.password_hash, _configured_default_password()),
         menus=menus_for_role(matrix, role, guest=False),
     )
+
+
+@router.patch("/auth/profile", response_model=MeResponse)
+def update_profile(payload: ProfileUpdate, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> MeResponse:
+    # A desktop guest has no account row to edit.
+    if claims.get("guest"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Guest sessions have no profile. Sign in to edit your details.")
+    user = _current_user(db, claims)
+    user.full_name = payload.full_name.strip()
+    db.commit()
+    db.refresh(user)
+    return me(claims, db)
 
 
 @router.post("/auth/change-password", response_model=ConnectionResult)

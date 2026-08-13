@@ -204,6 +204,7 @@ export type Integration = {
 
 export type Me = {
   email: string;
+  full_name: string;
   role: "admin" | "developer" | "support" | string;
   using_default_password: boolean;
   // desktop guest session (no login). The UI shows a "Guest" state and a Sign-in affordance.
@@ -413,6 +414,12 @@ export async function changePassword(token: string, currentPassword: string, new
     method: "POST",
     body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
   });
+}
+
+// Update the signed-in account's display name. Returns the refreshed Me (so callers can
+// re-render the header/profile). Not available to guests (403).
+export async function updateProfile(token: string, fullName: string): Promise<Me> {
+  return request<Me>("/auth/profile", token, { method: "PATCH", body: JSON.stringify({ full_name: fullName }) });
 }
 
 export async function getUsers(token: string): Promise<UserAccount[]> {

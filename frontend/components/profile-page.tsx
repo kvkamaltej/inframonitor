@@ -2,7 +2,47 @@
 
 import { FormEvent, useState } from "react";
 import { AppShell } from "@/components/app-shell";
-import { changePassword } from "@/lib/api";
+import { changePassword, updateProfile, Me } from "@/lib/api";
+
+// Edit the signed-in account's display name. Kept as its own component so it can hold the
+// controlled input seeded from `me` and refresh the session (reloadMe) after a save.
+function ProfileDetails({ token, me, reloadMe }: { token: string; me: Me; reloadMe: () => Promise<void> }) {
+  const [name, setName] = useState(me.full_name ?? "");
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextName = name.trim();
+    if (!nextName) {
+      setMessage("Name cannot be empty.");
+      return;
+    }
+    setSaving(true);
+    setMessage("");
+    try {
+      await updateProfile(token, nextName);
+      await reloadMe();
+      setMessage("Profile updated.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to update profile");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form onSubmit={(event) => void save(event)} className="grid gap-4 border-b border-slate-100 p-8 dark:border-slate-800/50">
+      <h3 className="mb-2 text-sm font-semibold text-slate-700 dark:text-slate-300">Profile details</h3>
+      <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Display name</label>
+      <input value={name} onChange={(event) => setName(event.target.value)} maxLength={255} placeholder="Your name" className="h-12 rounded-xl border-none bg-slate-100 px-4 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100" />
+      <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Email</label>
+      <input value={me.email} disabled title="Email is the login identity and cannot be changed here" className="h-12 cursor-not-allowed rounded-xl border-none bg-slate-100 px-4 text-sm font-medium text-slate-400 outline-none dark:bg-slate-800/30 dark:text-slate-500" />
+      <button disabled={saving || name.trim() === (me.full_name ?? "").trim()} className="mt-2 inline-flex h-12 w-fit items-center justify-center rounded-full bg-accent px-6 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{saving ? "Saving..." : "Save profile"}</button>
+      {message ? <p className="text-sm font-medium text-slate-700 dark:text-slate-300">{message}</p> : null}
+    </form>
+  );
+}
 
 export function ProfilePage() {
   const [message, setMessage] = useState("");
@@ -34,13 +74,14 @@ export function ProfilePage() {
 
   return (
     <AppShell title="Profile" subtitle="Manage your account">
-      {({ token, me }) => (
+      {({ token, me, reloadMe }) => (
         <section className="mx-auto max-w-2xl px-6 py-12">
           <div className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-200 dark:bg-[#1e1e1e] dark:ring-slate-800">
             <div className="border-b border-slate-100 bg-slate-50 px-8 py-6 dark:border-slate-800/50 dark:bg-slate-800/20">
-              <div className="text-xl font-semibold text-slate-900 dark:text-slate-100">{me.email}</div>
+              <div className="text-xl font-semibold text-slate-900 dark:text-slate-100">{me.full_name || me.email}</div>
               <div className="mt-1 text-sm font-medium text-slate-500 dark:text-slate-400 capitalize">{me.role} Account</div>
             </div>
+            <ProfileDetails token={token} me={me} reloadMe={reloadMe} />
             <form onSubmit={(event) => void submit(event, token)} className="grid gap-4 p-8">
               <h3 className="mb-2 text-sm font-semibold text-slate-700 dark:text-slate-300">Change Password</h3>
               <input name="current_password" type="password" required placeholder="Current password" className="h-12 rounded-xl border-none bg-slate-100 px-4 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100" />

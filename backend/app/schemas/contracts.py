@@ -15,12 +15,20 @@ class LoginRequest(BaseModel):
 
 class MeResponse(BaseModel):
     email: str
+    # display name of the signed-in account, so the Profile page can show and edit it
+    full_name: str = ""
     role: str
     # true while this account's password still matches ADMIN_PASSWORD (the seeded default),
     # so the UI can show a persistent "change your password" banner
     using_default_password: bool = False
     # desktop guest session (no login): the UI shows a "Guest" state and a Sign-in affordance.
     guest: bool = False
+
+
+class ProfileUpdate(BaseModel):
+    # only the display name is editable here; email is the login identity (JWT subject) and is
+    # not changed from the profile page.
+    full_name: str = Field(min_length=1, max_length=255)
     # the effective sidebar menu-item keys for this caller's role, derived from the role->menu
     # matrix (AppSetting "role_menus"). The frontend renders the rail from this rather than from
     # hardcoded role checks. A guest gets the "guest" row.
