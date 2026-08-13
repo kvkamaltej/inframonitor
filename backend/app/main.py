@@ -394,5 +394,27 @@ if settings.metrics_enabled:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+class _CachedStaticFiles(StaticFiles):
+    """StaticFiles that sets Cache-Control so a redeploy never strands a browser on stale chunks.
+
+    Next.js code-splits each route into content-hashed chunk files that its HTML references by
+    name. With no explicit Cache-Control the browser caches the HTML heuristically and can keep
+    serving an old index that points at chunk hashes the new build no longer has -- a ChunkLoadError
+    when navigating (e.g. clicking Servers after a deploy). Fix: hashed assets under _next/static
+    are immutable and cached for a year; every other response (the HTML shells) must revalidate, so
+    a new deploy is picked up on the next request.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        # StaticFiles normalises the path with the OS separator (backslashes on Windows), so
+        # compare on forward slashes to match _next/static on every platform.
+        if path.replace("\\", "/").startswith("_next/static/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 if os.path.isdir(settings.static_dir):
-    app.mount("/", StaticFiles(directory=settings.static_dir, html=True), name="ui")
+    app.mount("/", _CachedStaticFiles(directory=settings.static_dir, html=True), name="ui")
