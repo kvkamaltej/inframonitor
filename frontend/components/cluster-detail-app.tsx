@@ -10,6 +10,7 @@ import {
   Calendar,
   Check,
   Copy,
+  Download,
   Cpu,
   FileText,
   HeartPulse,
@@ -54,6 +55,7 @@ import {
 } from "@/lib/api";
 import { Sidebar } from "@/components/sidebar";
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
+import { downloadTextFile, safeFilename } from "@/lib/download";
 
 type Tab = "overview" | "nodes" | "pods" | "workloads" | "logs" | "health" | "events";
 type Tone = "info" | "error";
@@ -619,6 +621,7 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
                   </label>
                   <button disabled={loading} onClick={() => void loadLogs()} className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{busy === "logs" ? <Loader2 size={16} className="animate-spin" /> : <ScrollText size={16} />} Load logs</button>
                   <button type="button" disabled={!podLogs?.log?.trim()} onClick={() => void copyLogs()} title="Copy the log output to the clipboard" className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">{logsCopied ? <Check size={16} /> : <Copy size={16} />} {logsCopied ? "Copied" : "Copy"}</button>
+                  <button type="button" disabled={!podLogs?.log?.trim()} onClick={() => podLogs?.log && downloadTextFile(`${safeFilename(logsPod || "pod")}${podLogs.container ? "-" + safeFilename(podLogs.container) : ""}.log`, podLogs.log)} title="Download the log as a file" className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"><Download size={16} /> Download</button>
                   <AutoRefreshSelect value={logsAuto} onChange={setLogsAuto} disabled={!logsPod} className="ml-1" />
                 </div>
                 <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-100">{podLogs ? (podLogs.log?.trim() ? podLogs.log : `No log output for ${logsPod || "this pod"}.`) : "Choose a pod (from the Pods tab) or type a namespace + pod, then Load logs."}</pre>

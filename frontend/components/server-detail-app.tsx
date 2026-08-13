@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, Clock, Coffee, Copy, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, RefreshCw, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, Clock, Coffee, Copy, Download, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, RefreshCw, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
+import { downloadTextFile, safeFilename } from "@/lib/download";
 import {
   assignServerFolder,
   ContainerInfo,
@@ -993,6 +994,14 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                     className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-40 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
                   >
                     {logsCopied ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
+                  </button>
+                  <button
+                    onClick={() => downloadTextFile(`${safeFilename(selected || "server-log")}.log`, logs.join("\n"))}
+                    disabled={logs.length === 0}
+                    title="Download the log as a file"
+                    className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-40 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                  >
+                    <Download size={13} /> Download
                   </button>
                   <button onClick={() => setIsFullscreen(!isFullscreen)} className="text-accent hover:underline text-sm font-medium">
                     {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
