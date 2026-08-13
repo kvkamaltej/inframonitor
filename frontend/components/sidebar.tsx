@@ -19,7 +19,9 @@ function fallbackMenus(role?: string, guest?: boolean): string[] {
 
 export function Sidebar({ role, guest = false, menus }: { role?: string; guest?: boolean; menus?: string[] }) {
   const [open, setOpen] = useState(true);
-  const [adminOpen, setAdminOpen] = useState(false);
+  // default the Administration group open: the admin account's core pages (Users, Access, Vault,
+  // App Database) now live inside it, so hiding them behind a click each visit is friction.
+  const [adminOpen, setAdminOpen] = useState(true);
   const [dark, setDark] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
@@ -35,6 +37,9 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
   // The shell flyout fetches host lists and the shell socket is admin-only; drive its data load
   // off the same visibility flag so a role that is not shown "shell" never fetches for it.
   const canShell = allowed.has("shell");
+  // The Administration group collects the admin-only pages. Show the header if the caller may see
+  // any child; each item inside is still gated by its own menu key.
+  const showAdmin = allowed.has("users") || allowed.has("access") || allowed.has("vault") || allowed.has("appdatabase") || allowed.has("administration");
 
   // EXPERIMENTAL (feature/server-folders): the Shell launcher flyout. It lists servers grouped by
   // folder and launches a host shell by navigating to the detail page with ?shell=1. Data is
@@ -173,7 +178,7 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
       <nav className="flex flex-1 flex-col px-2 py-4">
         <div className="grid gap-1">
           {allowed.has("dashboard") && <NavItem href="/" icon={MonitorCog} label="Dashboard" />}
-          {allowed.has("servers") && <NavItem href="/servers" icon={Server} label="Server Management" />}
+          {allowed.has("servers") && <NavItem href="/servers" icon={Server} label="Servers" />}
           {/* Database console (feature/db-connect): gated through the role->menu matrix; the
               backend also blocks guests (require_user_not_guest -> 403). */}
           {allowed.has("databases") && <NavItem href="/databases" icon={Database} label="Databases" />}
@@ -194,16 +199,11 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
               <span className={`transition-opacity duration-200 ${open ? "opacity-100 w-auto" : "opacity-0 w-0 hidden"}`}>Shell</span>
             </button>
           )}
-          {allowed.has("users") && <NavItem href="/users" icon={Users} label="Users" />}
           {allowed.has("policies") && <NavItem href="/policies" icon={Shield} label="Server Policies" />}
-          {allowed.has("access") && <NavItem href="/access" icon={SlidersHorizontal} label="Access Control" />}
-          {/* feature/vault-secrets: Vault config, gated through the role->menu matrix; the backend
-              endpoints stay require_admin_not_guest. */}
-          {allowed.has("vault") && <NavItem href="/vault" icon={Vault} label="Vault" />}
-          {/* feature/app-db-backend: switch the app's OWN database (SQLite -> Postgres/MySQL).
-              Admin-only; backend endpoints are require_admin_not_guest. */}
-          {allowed.has("appdatabase") && <NavItem href="/app-database" icon={DatabaseZap} label="App Database" />}
-          {allowed.has("administration") && (
+          {/* Administration groups the admin-only pages (Users, Access Control, Vault, App
+              Database) plus the master-data lists. Each child stays gated by its own menu key; the
+              backend endpoints remain require_admin(_not_guest). */}
+          {showAdmin && (
             <div className="mt-2">
               <button onClick={() => { if (!open) toggle(); setAdminOpen(!adminOpen); }} className="flex h-12 w-full items-center justify-between rounded-full px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800" title={!open ? "Administration" : undefined}>
                 <div className="flex items-center gap-4">
@@ -214,8 +214,12 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
               </button>
               {adminOpen && open && (
                 <div className="mt-1 grid gap-1 pl-4">
-                  <NavItem href="/master/server-types" icon={Settings} label="Server Types" />
-                  <NavItem href="/master/environments" icon={Settings} label="Environments" />
+                  {allowed.has("users") && <NavItem href="/users" icon={Users} label="Users" />}
+                  {allowed.has("access") && <NavItem href="/access" icon={SlidersHorizontal} label="Access Control" />}
+                  {allowed.has("vault") && <NavItem href="/vault" icon={Vault} label="Vault" />}
+                  {allowed.has("appdatabase") && <NavItem href="/app-database" icon={DatabaseZap} label="App Database" />}
+                  {allowed.has("administration") && <NavItem href="/master/server-types" icon={Settings} label="Server Types" />}
+                  {allowed.has("administration") && <NavItem href="/master/environments" icon={Settings} label="Environments" />}
                 </div>
               )}
             </div>

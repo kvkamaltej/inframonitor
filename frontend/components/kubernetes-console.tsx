@@ -70,6 +70,9 @@ export function KubernetesConsole({ token }: { token: string }) {
   const [testNote, setTestNote] = useState<StatusNote>(null);
   const [formError, setFormError] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
+  // The add/edit form is hidden until requested, matching how servers are added (a button reveals
+  // the create form) rather than sitting open permanently under the list.
+  const [formOpen, setFormOpen] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -103,7 +106,14 @@ export function KubernetesConsole({ token }: { token: string }) {
     setFormError("");
   }
 
+  function openCreate() {
+    resetForm();
+    setFormOpen(true);
+    if (typeof window !== "undefined") window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  }
+
   function startEdit(cluster: KubeCluster) {
+    setFormOpen(true);
     setEditingId(cluster.id);
     setName(cluster.name);
     setAuthMethod(cluster.auth_method);
@@ -172,6 +182,7 @@ export function KubernetesConsole({ token }: { token: string }) {
       if (editingId) await updateKubeCluster(token, editingId, buildInput());
       else await createKubeCluster(token, buildInput());
       resetForm();
+      setFormOpen(false);
       await load();
     } catch (error) {
       setFormError(error instanceof ApiError ? error.message : error instanceof Error ? error.message : "Save failed");
@@ -185,7 +196,10 @@ export function KubernetesConsole({ token }: { token: string }) {
     setListError("");
     try {
       await deleteKubeCluster(token, cluster.id);
-      if (editingId === cluster.id) resetForm();
+      if (editingId === cluster.id) {
+        resetForm();
+        setFormOpen(false);
+      }
       await load();
     } catch (error) {
       setListError(error instanceof Error ? error.message : "Delete failed");
@@ -200,6 +214,13 @@ export function KubernetesConsole({ token }: { token: string }) {
           <Boxes size={18} className="text-accent" />
           <h2 className="text-base font-semibold text-fg">Clusters</h2>
           <span className="ml-2 text-xs font-medium text-muted">Select a cluster to view its nodes, pods and health.</span>
+          <button
+            type="button"
+            onClick={openCreate}
+            className="ml-auto inline-flex h-9 items-center justify-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80"
+          >
+            <Plus size={16} /> Add cluster
+          </button>
         </div>
         <div className="p-6">
           {loading ? (
@@ -212,7 +233,16 @@ export function KubernetesConsole({ token }: { token: string }) {
               <span className="break-words">{listError}</span>
             </div>
           ) : clusters.length === 0 ? (
-            <p className="text-sm font-medium text-muted">No clusters yet. Add one below to get started.</p>
+            <div className="flex flex-col items-start gap-3">
+              <p className="text-sm font-medium text-muted">No clusters yet.</p>
+              <button
+                type="button"
+                onClick={openCreate}
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80"
+              >
+                <Plus size={16} /> Add cluster
+              </button>
+            </div>
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {clusters.map((cluster) => (
@@ -283,20 +313,19 @@ export function KubernetesConsole({ token }: { token: string }) {
         </div>
       </div>
 
-      {/* Add / edit form */}
+      {/* Add / edit form — hidden until "Add cluster" (or an edit) opens it, like the servers page */}
+      {formOpen && (
       <div className="overflow-hidden rounded-3xl bg-elevated shadow-sm ring-1 ring-edge">
         <div className="flex items-center gap-3 border-b border-edge px-6 py-5">
           {editingId ? <Pencil size={18} className="text-accent" /> : <Plus size={18} className="text-accent" />}
           <h2 className="text-base font-semibold text-fg">{editingId ? "Edit cluster" : "Add cluster"}</h2>
-          {editingId && (
-            <button
-              type="button"
-              onClick={resetForm}
-              className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-muted transition-colors hover:text-fg"
-            >
-              <X size={14} /> Cancel edit
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => { resetForm(); setFormOpen(false); }}
+            className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-muted transition-colors hover:text-fg"
+          >
+            <X size={14} /> {editingId ? "Cancel edit" : "Close"}
+          </button>
         </div>
         <div className="space-y-5 p-6">
           <div className="grid gap-4 md:grid-cols-3">
@@ -469,6 +498,7 @@ export function KubernetesConsole({ token }: { token: string }) {
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 }

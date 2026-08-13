@@ -8,6 +8,8 @@ import {
   Ban,
   Boxes,
   Calendar,
+  Check,
+  Copy,
   Cpu,
   FileText,
   HeartPulse,
@@ -98,6 +100,7 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
   const [logsTail, setLogsTail] = useState(200);
   const [logsPrevious, setLogsPrevious] = useState(false);
   const [podLogs, setPodLogs] = useState<KubePodLogs | null>(null);
+  const [logsCopied, setLogsCopied] = useState(false);
 
   const [message, setMessage] = useState("");
   const [tone, setTone] = useState<Tone>("info");
@@ -230,6 +233,33 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
       notify(errText(error, "Unable to load pod logs"), "error");
     } finally {
       setBusy("");
+    }
+  }
+
+  // Copy the current log output. Uses the async Clipboard API in a secure context (localhost /
+  // https) and falls back to a hidden-textarea execCommand so it also works over plain http on a
+  // LAN IP, where navigator.clipboard is unavailable.
+  async function copyLogs() {
+    const text = podLogs?.log ?? "";
+    if (!text.trim()) return;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setLogsCopied(true);
+      window.setTimeout(() => setLogsCopied(false), 1500);
+    } catch {
+      notify("Could not copy to the clipboard.", "error");
     }
   }
 
@@ -453,10 +483,14 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
                         <td className="px-4 py-3">
                           <div className="flex flex-wrap justify-end gap-2">
                             {node.linked_server_id ? (
-                              <Link href={`/server?id=${node.linked_server_id}`} title="Open the linked server's detail page (shell lives there)" className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">
-                                <Terminal size={12} /> {node.linked_server_alias || "Open shell"}
+                              <Link href={`/server/?id=${encodeURIComponent(node.linked_server_id)}&shell=1`} title={`Open a shell on ${node.linked_server_alias || node.name} (via its linked server)`} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">
+                                <Terminal size={12} /> Shell{node.linked_server_alias ? ` · ${node.linked_server_alias}` : ""}
                               </Link>
-                            ) : null}
+                            ) : (
+                              <span title="No server is linked to this node. Add a server whose IP or hostname matches this node to open a shell." className="inline-flex items-center gap-1 rounded-full bg-slate-100/60 px-3 py-1 text-xs font-medium text-muted dark:bg-slate-800/50">
+                                <Terminal size={12} /> No shell
+                              </span>
+                            )}
                             <button disabled={loading} onClick={() => void toggleCordon(node)} className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:hover:bg-accent/30">
                               {busy === `node:${node.name}` ? <Loader2 size={12} className="animate-spin" /> : <Ban size={12} />} {node.schedulable ? "Cordon" : "Uncordon"}
                             </button>
@@ -576,6 +610,7 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
                     Previous (crashed) container
                   </label>
                   <button disabled={loading} onClick={() => void loadLogs()} className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{busy === "logs" ? <Loader2 size={16} className="animate-spin" /> : <ScrollText size={16} />} Load logs</button>
+                  <button type="button" disabled={!podLogs?.log?.trim()} onClick={() => void copyLogs()} title="Copy the log output to the clipboard" className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">{logsCopied ? <Check size={16} /> : <Copy size={16} />} {logsCopied ? "Copied" : "Copy"}</button>
                 </div>
                 <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-100">{podLogs ? (podLogs.log?.trim() ? podLogs.log : `No log output for ${logsPod || "this pod"}.`) : "Choose a pod (from the Pods tab) or type a namespace + pod, then Load logs."}</pre>
               </Panel>
