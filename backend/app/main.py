@@ -17,7 +17,7 @@ import secrets
 from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.core.database import Base, SessionLocal, engine
-from app.core.menus import DEFAULT_ROLE_MENUS, ROLE_MENUS_KEY
+from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_MENUS_KEY
 from app.core.security import SEEDED_GUEST_EMAIL, hash_password, verify_password
 from app.models.entities import AppSetting, Role, Server, User
 
@@ -124,6 +124,62 @@ def _backfill_public_ids() -> None:
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_servers_public_id ON servers(public_id)"))
 
 
+_ROLE_MENUS_PROVISIONED_KEY = "role_menus_provisioned"
+
+
+def _backfill_role_menus() -> None:
+    """Make newly-added menu items visible to existing installs without clobbering admin edits.
+
+    The role->menu matrix is seeded once, so a menu item added to MENU_ITEMS in a later release
+    would never appear for a database that was seeded before it existed (the App Database item is
+    the case that surfaced this). We track the set of already-"provisioned" items; anything in
+    MENU_ITEMS not yet provisioned is appended to each role whose DEFAULT_ROLE_MENUS row includes
+    it, then the provisioned marker is advanced. Items an admin explicitly removed stay removed,
+    because they are already in the provisioned set. First run against a pre-existing matrix (no
+    marker) treats the union of the stored rows as provisioned, so only genuinely-new vocabulary
+    is added.
+    """
+    with SessionLocal() as db:
+        setting = db.get(AppSetting, ROLE_MENUS_KEY)
+        if not setting:
+            return  # not seeded yet; _seed_defaults writes a fresh, complete matrix
+        try:
+            matrix = json.loads(setting.value)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(matrix, dict):
+            return
+        marker = db.get(AppSetting, _ROLE_MENUS_PROVISIONED_KEY)
+        if marker:
+            try:
+                provisioned = set(json.loads(marker.value))
+            except (ValueError, TypeError):
+                provisioned = set()
+        else:
+            provisioned = {item for row in matrix.values() if isinstance(row, list) for item in row}
+        new_items = [item for item in MENU_ITEMS if item not in provisioned]
+        changed = False
+        if new_items:
+            for role, defaults in DEFAULT_ROLE_MENUS.items():
+                row = matrix.get(role)
+                row = row if isinstance(row, list) else []
+                for item in new_items:
+                    if item in defaults and item not in row:
+                        row.append(item)
+                matrix[role] = row
+            setting.value = json.dumps(matrix)
+            changed = True
+        full = json.dumps(list(MENU_ITEMS))
+        if marker is None:
+            db.add(AppSetting(key=_ROLE_MENUS_PROVISIONED_KEY, value=full))
+            changed = True
+        elif marker.value != full:
+            marker.value = full
+            changed = True
+        if changed:
+            db.commit()
+
+
 def _seed_defaults() -> None:
     with SessionLocal() as db:
         for key, value in DEFAULT_APP_SETTINGS.items():
@@ -211,6 +267,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _ensure_shell_favorites_unique()
     _backfill_public_ids()
     _seed_defaults()
+    _backfill_role_menus()
     _warn_if_default_admin_password()
     yield
 
