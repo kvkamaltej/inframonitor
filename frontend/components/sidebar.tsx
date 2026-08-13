@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronDown, ChevronRight, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, Sun, TerminalSquare, UserCircle, Users, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, Sun, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getFolders, getServers, Folder as FolderType, Server as ServerRow } from "@/lib/api";
@@ -174,7 +174,10 @@ export function Sidebar({ role, guest = false }: { role?: string; guest?: boolea
             <>
               <NavItem href="/users" icon={Users} label="Users" />
               <NavItem href="/policies" icon={Shield} label="Server Policies" />
-              
+              {/* feature/vault-secrets: admin-only Vault config. canManage already excludes the
+                  desktop guest, matching require_admin_not_guest on the backend endpoints. */}
+              <NavItem href="/vault" icon={Vault} label="Vault" />
+
               <div className="mt-2">
                 <button onClick={() => { if (!open) toggle(); setAdminOpen(!adminOpen); }} className="flex h-12 w-full items-center justify-between rounded-full px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800" title={!open ? "Administration" : undefined}>
                   <div className="flex items-center gap-4">
