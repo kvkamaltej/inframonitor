@@ -26,8 +26,8 @@ credentials, so losing it makes them undecryptable.
 ## Run from source (no build)
 
 ```
-INFRAMONITOR_DESKTOP_HEADLESS=1 python desktop/app.py   # smoke test: boots backend, prints URL, exits
-python desktop/app.py                                    # opens the real window (needs pywebview)
+INFRAMONITOR_DESKTOP_HEADLESS=1 python desktop/launcher.py   # smoke test: boots backend, prints URL, exits
+python desktop/launcher.py                                    # opens the real window (needs pywebview)
 ```
 
 `pip install -r desktop/requirements.txt` first for the windowed run. Python **3.12** — the

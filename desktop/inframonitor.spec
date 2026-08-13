@@ -1,22 +1,37 @@
 # PyInstaller spec for the Infra Monitor desktop app.
 #
-# Build from the REPO ROOT (so the relative paths below resolve):
+# Build from the REPO ROOT:
 #     pyinstaller desktop/inframonitor.spec --noconfirm
 #
-# Produces a onedir bundle at dist/InfraMonitor/ with InfraMonitor.exe inside. onedir (not
-# onefile) is deliberate: it starts faster and avoids the onefile temp-extract on every
-# launch. Switch EXE(exclude_binaries=...) / add a onefile EXE if a single file is required.
+# Paths are made absolute from SPECPATH (the directory of this spec) rather than left
+# relative, because PyInstaller resolves relative spec paths against the spec's own directory
+# (desktop/), not the invocation cwd — so "desktop/app.py" would wrongly become
+# desktop/desktop/app.py. Deriving everything from the repo root avoids that entirely.
+#
+# Produces a onedir bundle at dist/InfraMonitor/ (InfraMonitor.exe + _internal/). onedir is
+# deliberate: faster start, no per-launch temp extraction.
+
+import os
+import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-# The static UI is served by the backend from STATIC_DIR; bundle it as data at the same
-# relative path the app expects under sys._MEIPASS.
-datas = [("frontend/out", "frontend/out")]
+ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
+BACKEND = os.path.join(ROOT, "backend")
+
+# collect_submodules("app") imports the package while this spec runs (before Analysis uses
+# pathex), so the backend has to be importable now.
+if BACKEND not in sys.path:
+    sys.path.insert(0, BACKEND)
+
+# The static UI is served by the backend from STATIC_DIR; bundle it at the same relative path
+# the app expects under the bundle root.
+datas = [(os.path.join(ROOT, "frontend", "out"), "frontend/out")]
 binaries = []
 
 # uvicorn selects its loop / http / websocket / lifespan implementations by *string* at
-# runtime, so PyInstaller's static analysis never sees them. Name them explicitly. The
-# websocket ones are load-bearing here: the interactive shell is a WS upgrade.
+# runtime, so PyInstaller's static analysis never sees them. The websocket ones are
+# load-bearing: the interactive shell is a WS upgrade.
 hiddenimports = [
     "app.main",
     "uvicorn.loops.auto",
@@ -29,15 +44,12 @@ hiddenimports = [
     "websockets",
     "websockets.legacy",
     "websockets.legacy.server",
-    # passlib picks its bcrypt backend dynamically; python-jose picks its crypto backend too.
     "passlib.handlers.bcrypt",
     "jose.backends.cryptography_backend",
 ]
 
-# Freeze the whole backend package (its modules are imported lazily inside app.py).
 hiddenimports += collect_submodules("app")
 
-# Native-extension packages whose data/binaries PyInstaller's default hooks miss parts of.
 for pkg in ("cryptography", "paramiko", "bcrypt", "nacl", "cffi", "pydantic"):
     pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
     datas += pkg_datas
@@ -45,17 +57,19 @@ for pkg in ("cryptography", "paramiko", "bcrypt", "nacl", "cffi", "pydantic"):
     hiddenimports += pkg_hidden
 
 a = Analysis(
-    ["desktop/app.py"],
-    # Make the backend package importable at freeze time so its dependency tree is pulled in.
-    pathex=["backend"],
+    # NB: the entry script is launcher.py, NOT app.py — an entry script named app.py would be
+    # frozen as a top-level module `app`, shadowing the backend's `app` package so that
+    # `import app.main` resolves to the launcher and fails with "'app' is not a package".
+    [os.path.join(ROOT, "desktop", "launcher.py")],
+    pathex=[BACKEND],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    # Desktop is SQLite-only; the Postgres driver and the monitoring stack are server-profile
-    # only, and tkinter is never used. Dropping them slims the bundle. (If a build errors on a
-    # missing psycopg symbol, remove it from here — SQLAlchemy only imports it for a pg URL.)
+    # Desktop is SQLite-only; the Postgres driver and monitoring stack are server-profile only,
+    # and tkinter is never used. (If a build errors on a missing psycopg symbol, drop it here —
+    # SQLAlchemy only imports it for a postgresql URL.)
     excludes=["tkinter", "psycopg", "prometheus_client"],
     noarchive=False,
 )
@@ -71,8 +85,8 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=False,
-    # console=False -> no console window. Flip to True while debugging a build so backend
-    # tracebacks are visible.
+    # console=False -> no console window. Flip to True while debugging a build to see backend
+    # tracebacks.
     console=False,
     disable_windowed_traceback=False,
 )

@@ -11,9 +11,12 @@ already talks to a relative `/api`, so pointing a webview at http://127.0.0.1:<p
 works" with no rebuild.
 
 Run modes:
-  * normal:   python desktop/app.py            -> starts the backend and opens the window
+  * normal:   python desktop/launcher.py       -> starts the backend and opens the window
   * headless: INFRAMONITOR_DESKTOP_HEADLESS=1  -> starts the backend, prints the URL, exits
               (used to smoke-test the bootstrap without a display or pywebview installed)
+
+The entry script is named launcher.py, NOT app.py, on purpose: PyInstaller would freeze an
+`app.py` entry script as a top-level `app` module, shadowing the backend's `app` package.
 """
 
 from __future__ import annotations
@@ -147,7 +150,16 @@ def main() -> int:
 
     # Headless: prove the backend boots (CI / smoke test) without a display or pywebview.
     if os.environ.get("INFRAMONITOR_DESKTOP_HEADLESS") == "1":
-        print(f"HEADLESS OK: serving {url}  (data dir: {data_dir})")
+        message = f"HEADLESS OK: serving {url}  (data dir: {data_dir})"
+        print(message)
+        # A windowed (console=False) frozen build has no visible stdout, so also drop a
+        # sentinel file when asked, letting a build check confirm the packaged backend booted.
+        marker = os.environ.get("INFRAMONITOR_DESKTOP_HEALTHFILE")
+        if marker:
+            try:
+                Path(marker).write_text(message, encoding="utf-8")
+            except OSError:
+                pass
         return 0
 
     # Imported here, not at module top, so the headless path needs neither pywebview nor a
