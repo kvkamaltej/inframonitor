@@ -89,6 +89,7 @@ exe = EXE(
     # tracebacks.
     console=False,
     disable_windowed_traceback=False,
+    icon=os.path.join(ROOT, "desktop", "inframonitor.ico"),
 )
 
 coll = COLLECT(
