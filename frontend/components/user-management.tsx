@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { Loader2, Plus, Users, X } from "lucide-react";
+import { Loader2, Pencil, Plus, Trash2, Users, X } from "lucide-react";
 import { createUser, deleteUser, getUsers, updateUser, ApiError, UserAccount } from "@/lib/api";
 import { useConfirm } from "@/components/confirm-dialog";
 
@@ -177,9 +177,13 @@ export function UserManagement({ token }: { token: string }) {
                   <td className="px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{user.full_name}</td>
                   <td className="px-6 py-4 font-medium text-slate-700 dark:text-slate-300 capitalize">{user.role}</td>
                   <td className="px-6 py-4">
-                    <div className="flex items-center gap-4">
-                      <button onClick={() => openEdit(user)} className="font-semibold text-accent hover:text-accent/80">Edit</button>
-                      <button onClick={() => void remove(user)} className="font-semibold text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300">Delete</button>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => openEdit(user)} title="Edit user" aria-label="Edit user" className="inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-accent/10 hover:text-accent dark:text-slate-400">
+                        <Pencil size={15} />
+                      </button>
+                      <button onClick={() => void remove(user)} title="Delete user" aria-label="Delete user" className="inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-red-100 hover:text-red-600 dark:text-slate-400 dark:hover:bg-red-900/40 dark:hover:text-red-300">
+                        <Trash2 size={15} />
+                      </button>
                     </div>
                   </td>
                 </tr>
