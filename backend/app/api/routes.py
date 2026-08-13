@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
 from app.core.crypto import decrypt_secret, encrypt_secret
-from app.core.security import create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_or_developer, require_user, verify_password
+from app.core.security import create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, verify_password
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
@@ -252,7 +252,7 @@ def change_password(payload: PasswordChange, claims: dict = Depends(require_user
 
 
 @router.get("/users", response_model=list[UserRead])
-def list_users(_: dict = Depends(require_admin), db: Session = Depends(get_db)) -> list[UserRead]:
+def list_users(_: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> list[UserRead]:
     users = db.scalars(select(User).order_by(User.email)).all()
     return [
         UserRead(
@@ -267,7 +267,7 @@ def list_users(_: dict = Depends(require_admin), db: Session = Depends(get_db)) 
 
 
 @router.post("/users", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-def create_user(payload: UserCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> UserRead:
+def create_user(payload: UserCreate, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> UserRead:
     from app.models.entities import Role
 
     if db.scalar(select(User).where(User.email == payload.email)):
@@ -282,7 +282,7 @@ def create_user(payload: UserCreate, _: dict = Depends(require_admin), db: Sessi
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_user(user_id: int, claims: dict = Depends(require_admin), db: Session = Depends(get_db)) -> None:
+def delete_user(user_id: int, claims: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> None:
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -293,7 +293,7 @@ def delete_user(user_id: int, claims: dict = Depends(require_admin), db: Session
 
 
 @router.get("/users/{user_id}/server-access", response_model=UserServerAccessRead)
-def get_user_server_access(user_id: int, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> UserServerAccessRead:
+def get_user_server_access(user_id: int, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> UserServerAccessRead:
     if not db.get(User, user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     rows = db.scalars(select(Server.public_id).join(UserServerAccess, UserServerAccess.server_id == Server.id).where(UserServerAccess.user_id == user_id)).all()
@@ -301,7 +301,7 @@ def get_user_server_access(user_id: int, _: dict = Depends(require_admin), db: S
 
 
 @router.put("/users/{user_id}/server-access", response_model=UserServerAccessRead)
-def update_user_server_access(user_id: int, payload: ServerAccessUpdate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> UserServerAccessRead:
+def update_user_server_access(user_id: int, payload: ServerAccessUpdate, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> UserServerAccessRead:
     if not db.get(User, user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     servers = db.scalars(select(Server).where(Server.public_id.in_(payload.server_ids))).all() if payload.server_ids else []
@@ -330,12 +330,12 @@ def _policy_read(policy: AccessPolicy) -> AccessPolicyRead:
 
 
 @router.get("/policies", response_model=list[AccessPolicyRead])
-def list_policies(_: dict = Depends(require_admin), db: Session = Depends(get_db)) -> list[AccessPolicyRead]:
+def list_policies(_: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> list[AccessPolicyRead]:
     return [_policy_read(policy) for policy in db.scalars(select(AccessPolicy).order_by(AccessPolicy.name)).all()]
 
 
 @router.post("/policies", response_model=AccessPolicyRead, status_code=status.HTTP_201_CREATED)
-def create_policy(payload: AccessPolicyCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> AccessPolicyRead:
+def create_policy(payload: AccessPolicyCreate, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> AccessPolicyRead:
     if db.scalar(select(AccessPolicy).where(AccessPolicy.name == payload.name.strip())):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Policy already exists")
     policy = AccessPolicy(
@@ -353,7 +353,7 @@ def create_policy(payload: AccessPolicyCreate, _: dict = Depends(require_admin),
 
 
 @router.put("/policies/{policy_id}/users", response_model=AccessPolicyRead)
-def assign_policy_users(policy_id: int, payload: PolicyAssignmentUpdate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> AccessPolicyRead:
+def assign_policy_users(policy_id: int, payload: PolicyAssignmentUpdate, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> AccessPolicyRead:
     policy = db.get(AccessPolicy, policy_id)
     if not policy:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Policy not found")

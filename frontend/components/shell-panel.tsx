@@ -1477,7 +1477,7 @@ export function ShellPanel({
                 onClose={() => setPane("none")}
               />
             ) : (
-              <ShellFavorites token={token} selection={selection} onInsert={insertIntoActive} onRun={runInActive} />
+              <ShellFavorites token={token} selection={selection} onInsert={insertIntoActive} onRun={runInActive} onClose={() => setPane("none")} />
             )}
           </aside>
         ) : null}

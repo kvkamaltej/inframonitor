@@ -7,13 +7,17 @@ import { usePathname, useRouter } from "next/navigation";
 import { getFolders, getServers, Folder as FolderType, Server as ServerRow } from "@/lib/api";
 import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT, resolveInitialTheme, themeMeta, THEME_EVENT, type ThemeName } from "@/lib/theme";
 
-export function Sidebar({ role }: { role?: string }) {
+export function Sidebar({ role, guest = false }: { role?: string; guest?: boolean }) {
   const [open, setOpen] = useState(true);
   const [adminOpen, setAdminOpen] = useState(false);
   const [dark, setDark] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
   const isAdmin = role === "admin";
+  // A desktop guest is functionally admin (it can operate servers, open shells) but is NOT an
+  // account and must not manage the RBAC system, so the user/policy/administration menus and the
+  // personal Profile are hidden. Signing in as a real user brings them back.
+  const canManage = isAdmin && !guest;
 
   // EXPERIMENTAL (feature/server-folders): the Shell launcher flyout. It lists servers grouped by
   // folder and launches a host shell by navigating to the detail page with ?shell=1. Data is
@@ -166,7 +170,7 @@ export function Sidebar({ role }: { role?: string }) {
               <span className={`transition-opacity duration-200 ${open ? "opacity-100 w-auto" : "opacity-0 w-0 hidden"}`}>Shell</span>
             </button>
           )}
-          {role === "admin" && (
+          {canManage && (
             <>
               <NavItem href="/users" icon={Users} label="Users" />
               <NavItem href="/policies" icon={Shield} label="Server Policies" />
@@ -191,8 +195,9 @@ export function Sidebar({ role }: { role?: string }) {
         </div>
         
         <div className="mt-auto grid gap-1 pt-4">
-          <NavItem href="/profile" icon={UserCircle} label="Profile" />
-          {role === "admin" && (
+          {/* Profile is a real account's page; a guest has no account, so it is hidden until sign-in. */}
+          {!guest && <NavItem href="/profile" icon={UserCircle} label="Profile" />}
+          {(canManage || guest) && (
             <NavItem href="/appearance" icon={Palette} label="Appearance" />
           )}
           <button

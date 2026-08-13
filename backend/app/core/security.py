@@ -83,3 +83,11 @@ def require_admin_or_developer(claims: dict = Depends(require_user)) -> dict:
     if claims.get("role") not in {"admin", "administrator", "developer"}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or developer role required")
     return claims
+
+
+def require_admin_not_guest(claims: dict = Depends(require_admin)) -> dict:
+    # A desktop guest is admin for operating servers but is not an account and must not touch the
+    # RBAC system (users, policies). Sign in as a real admin for those.
+    if claims.get("guest"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not available in guest mode. Sign in to manage users and policies.")
+    return claims
