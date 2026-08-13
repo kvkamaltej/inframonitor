@@ -109,16 +109,48 @@ def _configure_env(data_dir: Path, base_dir: Path) -> None:
         sys.path.insert(0, str(backend))
 
 
-def _run_server(port: int) -> None:
-    import uvicorn
-    from app.main import app
+def _redirect_std_streams(data_dir: Path) -> None:
+    """Give stdout/stderr a real destination when frozen with no console.
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    server = uvicorn.Server(config)
-    # Signal handlers can only be installed on the main thread, and this runs on a worker
-    # thread so the webview owns the main thread. No-op them rather than crash on startup.
-    server.install_signal_handlers = lambda: None  # type: ignore[assignment]
-    server.run()
+    A PyInstaller windowed build (console=False), launched by double-click, has
+    `sys.stdout is None` and `sys.stderr is None`. Anything that writes to them — uvicorn's
+    logging, the backend's startup banner, a stray print — then raises AttributeError during
+    startup, which is exactly why the backend died before creating its DB and no window opened.
+    Point both at a rolling log file so those writes succeed and we also get diagnostics.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    try:
+        log = open(data_dir / "runtime.log", "a", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    if sys.stdout is None:
+        sys.stdout = log
+    if sys.stderr is None:
+        sys.stderr = log
+
+
+def _run_server(port: int) -> None:
+    try:
+        import uvicorn
+        from app.main import app
+
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        # Signal handlers can only be installed on the main thread, and this runs on a worker
+        # thread so the webview owns the main thread. No-op them rather than crash on startup.
+        server.install_signal_handlers = lambda: None  # type: ignore[assignment]
+        server.run()
+    except BaseException:
+        # This runs on a worker thread; an unhandled exception here would otherwise vanish
+        # (its stderr may be None) and only show up as "backend never became healthy". Record it.
+        import traceback
+
+        try:
+            (_data_dir() / "startup-error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        except OSError:
+            pass
+        raise
 
 
 def _wait_healthy(port: int, timeout: float = 30.0) -> bool:
@@ -137,6 +169,9 @@ def _wait_healthy(port: int, timeout: float = 30.0) -> bool:
 def main() -> int:
     base_dir = _base_dir()
     data_dir = _data_dir()
+    # Must happen before the server thread starts (and before any print/logging), or a windowed
+    # frozen build crashes writing to a None stream.
+    _redirect_std_streams(data_dir)
     _configure_env(data_dir, base_dir)
 
     port = int(os.environ.get("INFRAMONITOR_DESKTOP_PORT") or _free_port())
