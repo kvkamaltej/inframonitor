@@ -21,6 +21,10 @@ class MeResponse(BaseModel):
     using_default_password: bool = False
     # desktop guest session (no login): the UI shows a "Guest" state and a Sign-in affordance.
     guest: bool = False
+    # the effective sidebar menu-item keys for this caller's role, derived from the role->menu
+    # matrix (AppSetting "role_menus"). The frontend renders the rail from this rather than from
+    # hardcoded role checks. A guest gets the "guest" row.
+    menus: list[str] = Field(default_factory=list)
 
 
 class ServerCreate(BaseModel):
@@ -373,6 +377,21 @@ class OptionList(BaseModel):
 
 class OptionCreate(BaseModel):
     value: str
+
+
+class RoleMenusResponse(BaseModel):
+    # roles: the full ordered list of role keys the grid has a column/row for.
+    # items: the full ordered menu-item vocabulary. Together they let the editor render the
+    # complete role x item grid, while `menus` holds the currently-saved selections.
+    roles: list[str]
+    items: list[str]
+    menus: dict[str, list[str]]
+
+
+class RoleMenusUpdate(BaseModel):
+    # role key -> selected menu-item keys. Unknown roles/items are dropped server-side; a role
+    # omitted here is reset to its default row.
+    menus: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ShellFavoriteRead(BaseModel):

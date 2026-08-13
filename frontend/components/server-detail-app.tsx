@@ -494,7 +494,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   return (
     <main className="flex min-h-screen">
       {confirmDialog}
-      <Sidebar role={me?.role} guest={me?.guest} />
+      <Sidebar role={me?.role} guest={me?.guest} menus={me?.menus} />
       <div className="min-w-0 flex-1">
       <header className="border-b border-edge bg-elevated">
         <div className="flex items-center justify-between px-6 pl-16 py-5">

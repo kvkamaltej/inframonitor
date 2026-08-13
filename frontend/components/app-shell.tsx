@@ -173,7 +173,7 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
 
   return (
     <main className="flex min-h-screen">
-      <Sidebar role={me.role} guest={me.guest} />
+      <Sidebar role={me.role} guest={me.guest} menus={me.menus} />
       <div className="min-w-0 flex-1">
         {/* Top header re-themed via variables (bg-elevated / border-edge / text-fg) so it
             tracks the active theme across all six palettes instead of a fixed white/#1e1e1e. */}

@@ -1,23 +1,40 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronDown, ChevronRight, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, Sun, TerminalSquare, UserCircle, Users, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, SlidersHorizontal, Sun, TerminalSquare, UserCircle, Users, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getFolders, getServers, Folder as FolderType, Server as ServerRow } from "@/lib/api";
 import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT, resolveInitialTheme, themeMeta, THEME_EVENT, type ThemeName } from "@/lib/theme";
 
-export function Sidebar({ role, guest = false }: { role?: string; guest?: boolean }) {
+// Built-in per-role menu sets, used only as a fallback when the server sends no `menus` (or an
+// empty one) so the rail is never blank. These mirror app.core.menus.DEFAULT_ROLE_MENUS and the
+// sidebar's previous hardcoded behaviour: admins see everything, a desktop guest gets the shell
+// and appearance but no account pages, and developer/support get the read-only pages.
+function fallbackMenus(role?: string, guest?: boolean): string[] {
+  if (guest) return ["dashboard", "servers", "shell", "appearance"];
+  if (role === "admin") return ["dashboard", "servers", "shell", "users", "policies", "administration", "access", "appearance", "profile"];
+  return ["dashboard", "servers", "profile"];
+}
+
+export function Sidebar({ role, guest = false, menus }: { role?: string; guest?: boolean; menus?: string[] }) {
   const [open, setOpen] = useState(true);
   const [adminOpen, setAdminOpen] = useState(false);
   const [dark, setDark] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
-  const isAdmin = role === "admin";
-  // A desktop guest is functionally admin (it can operate servers, open shells) but is NOT an
-  // account and must not manage the RBAC system, so the user/policy/administration menus and the
-  // personal Profile are hidden. Signing in as a real user brings them back.
-  const canManage = isAdmin && !guest;
+
+  // The rail now renders from the effective menu set (me.menus), not from role checks. An
+  // absent/empty set falls back to the built-in per-role defaults so a missing config never
+  // yields an empty sidebar. Menu VISIBILITY only: the backend still guards each endpoint by
+  // role, so a role that is shown an item it cannot use will simply get a 403 on that page.
+  const allowed = useMemo(() => {
+    const fromConfig = (menus ?? []).filter(Boolean);
+    return new Set(fromConfig.length ? fromConfig : fallbackMenus(role, guest));
+  }, [menus, role, guest]);
+  // The shell flyout fetches host lists and the shell socket is admin-only; drive its data load
+  // off the same visibility flag so a role that is not shown "shell" never fetches for it.
+  const canShell = allowed.has("shell");
 
   // EXPERIMENTAL (feature/server-folders): the Shell launcher flyout. It lists servers grouped by
   // folder and launches a host shell by navigating to the detail page with ?shell=1. Data is
@@ -52,9 +69,9 @@ export function Sidebar({ role, guest = false }: { role?: string; guest?: boolea
   // Refetch each time the flyout opens so a newly onboarded or re-foldered host shows up without a
   // page reload.
   useEffect(() => {
-    if (shellOpen && isAdmin) void loadShellData();
+    if (shellOpen && canShell) void loadShellData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shellOpen, isAdmin]);
+  }, [shellOpen, canShell]);
 
   // Group the credentialed hosts by folder, folders in the API's (case-insensitive) order, with
   // Unassigned last and any empty folder omitted — a shell launcher only shows what it can launch.
@@ -154,12 +171,12 @@ export function Sidebar({ role, guest = false }: { role?: string; guest?: boolea
         </div>
       <nav className="flex flex-1 flex-col px-2 py-4">
         <div className="grid gap-1">
-          <NavItem href="/" icon={MonitorCog} label="Dashboard" />
-          <NavItem href="/servers" icon={Server} label="Server Management" />
-          {/* EXPERIMENTAL (feature/server-folders): admin-only Shell launcher. It is a button, not
-              a route — it opens a flyout of hosts grouped by folder. Collapsing the sidebar first
+          {allowed.has("dashboard") && <NavItem href="/" icon={MonitorCog} label="Dashboard" />}
+          {allowed.has("servers") && <NavItem href="/servers" icon={Server} label="Server Management" />}
+          {/* EXPERIMENTAL (feature/server-folders): the Shell launcher. It is a button, not a
+              route — it opens a flyout of hosts grouped by folder. Collapsing the sidebar first
               would hide the flyout's anchor, so opening it also opens the rail. */}
-          {isAdmin && (
+          {canShell && (
             <button
               onClick={() => { if (!open) toggle(); setShellOpen((value) => !value); }}
               className={`group flex h-12 items-center gap-4 rounded-full px-4 text-sm font-medium transition-colors ${shellOpen ? "bg-accent/10 text-accent dark:bg-accent/20" : "text-slate-700 hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"}`}
@@ -170,34 +187,33 @@ export function Sidebar({ role, guest = false }: { role?: string; guest?: boolea
               <span className={`transition-opacity duration-200 ${open ? "opacity-100 w-auto" : "opacity-0 w-0 hidden"}`}>Shell</span>
             </button>
           )}
-          {canManage && (
-            <>
-              <NavItem href="/users" icon={Users} label="Users" />
-              <NavItem href="/policies" icon={Shield} label="Server Policies" />
-              
-              <div className="mt-2">
-                <button onClick={() => { if (!open) toggle(); setAdminOpen(!adminOpen); }} className="flex h-12 w-full items-center justify-between rounded-full px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800" title={!open ? "Administration" : undefined}>
-                  <div className="flex items-center gap-4">
-                    <Layers size={20} className="shrink-0" />
-                    <span className={`transition-opacity duration-200 ${open ? "opacity-100" : "opacity-0 hidden"}`}>Administration</span>
-                  </div>
-                  {open && <span className="text-slate-400">{adminOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>}
-                </button>
-                {adminOpen && open && (
-                  <div className="mt-1 grid gap-1 pl-4">
-                    <NavItem href="/master/server-types" icon={Settings} label="Server Types" />
-                    <NavItem href="/master/environments" icon={Settings} label="Environments" />
-                  </div>
-                )}
-              </div>
-            </>
+          {allowed.has("users") && <NavItem href="/users" icon={Users} label="Users" />}
+          {allowed.has("policies") && <NavItem href="/policies" icon={Shield} label="Server Policies" />}
+          {allowed.has("access") && <NavItem href="/access" icon={SlidersHorizontal} label="Access Control" />}
+          {allowed.has("administration") && (
+            <div className="mt-2">
+              <button onClick={() => { if (!open) toggle(); setAdminOpen(!adminOpen); }} className="flex h-12 w-full items-center justify-between rounded-full px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800" title={!open ? "Administration" : undefined}>
+                <div className="flex items-center gap-4">
+                  <Layers size={20} className="shrink-0" />
+                  <span className={`transition-opacity duration-200 ${open ? "opacity-100" : "opacity-0 hidden"}`}>Administration</span>
+                </div>
+                {open && <span className="text-slate-400">{adminOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>}
+              </button>
+              {adminOpen && open && (
+                <div className="mt-1 grid gap-1 pl-4">
+                  <NavItem href="/master/server-types" icon={Settings} label="Server Types" />
+                  <NavItem href="/master/environments" icon={Settings} label="Environments" />
+                </div>
+              )}
+            </div>
           )}
         </div>
         
         <div className="mt-auto grid gap-1 pt-4">
-          {/* Profile is a real account's page; a guest has no account, so it is hidden until sign-in. */}
-          {!guest && <NavItem href="/profile" icon={UserCircle} label="Profile" />}
-          {(canManage || guest) && (
+          {/* Profile is a real account's page; a guest has no account, so it stays hidden for a
+              guest even if the matrix lists it — a structural guard on top of the menu set. */}
+          {!guest && allowed.has("profile") && <NavItem href="/profile" icon={UserCircle} label="Profile" />}
+          {allowed.has("appearance") && (
             <NavItem href="/appearance" icon={Palette} label="Appearance" />
           )}
           <button
@@ -217,7 +233,7 @@ export function Sidebar({ role, guest = false }: { role?: string; guest?: boolea
     {/* Shell launcher flyout. Rendered as a fixed sibling (not a child of the overflow-hidden
         aside, which would clip it) and offset by the current rail width so it sits flush against
         the sidebar in both the expanded and collapsed states. */}
-    {isAdmin && shellOpen && (
+    {canShell && shellOpen && (
       <>
         <button aria-label="Close shell launcher" onClick={() => setShellOpen(false)} className="fixed inset-0 z-40 cursor-default" />
         <div style={{ left: open ? 288 : 72 }} className="fixed top-0 z-50 flex h-screen w-80 flex-col border-r border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-[#161616]">

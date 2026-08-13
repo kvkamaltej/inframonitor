@@ -12,10 +12,13 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Match, Mount
 
+import secrets
+
 from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.core.database import Base, SessionLocal, engine
-from app.core.security import hash_password, verify_password
+from app.core.menus import DEFAULT_ROLE_MENUS, ROLE_MENUS_KEY
+from app.core.security import SEEDED_GUEST_EMAIL, hash_password, verify_password
 from app.models.entities import AppSetting, Role, Server, User
 
 
@@ -126,6 +129,10 @@ def _seed_defaults() -> None:
         for key, value in DEFAULT_APP_SETTINGS.items():
             if not db.get(AppSetting, key):
                 db.add(AppSetting(key=key, value=json.dumps(value)))
+        # the role -> sidebar-menu matrix, seeded once with defaults that reproduce the
+        # previous hardcoded sidebar behaviour; admins edit it from the Access Control page
+        if not db.get(AppSetting, ROLE_MENUS_KEY):
+            db.add(AppSetting(key=ROLE_MENUS_KEY, value=json.dumps(DEFAULT_ROLE_MENUS)))
         admin = db.scalar(select(User).where(User.email == settings.admin_email))
         if not admin:
             db.add(
@@ -134,6 +141,20 @@ def _seed_defaults() -> None:
                     full_name="Infra Monitor Administrator",
                     password_hash=hash_password(settings.admin_password),
                     role=Role.administrator,
+                )
+            )
+        # the built-in guest account: a real row so it shows in User Management and gives the
+        # "guest" role a home. Its password is a throwaway random hash -- nothing can verify
+        # against it, so this account can never actually sign in via /auth/login. The desktop's
+        # login-less loopback guest is a separate synthetic session, not this row.
+        guest = db.scalar(select(User).where(User.email == SEEDED_GUEST_EMAIL))
+        if not guest:
+            db.add(
+                User(
+                    email=SEEDED_GUEST_EMAIL,
+                    full_name="Guest",
+                    password_hash=hash_password(secrets.token_urlsafe(32)),
+                    role=Role.guest,
                 )
             )
         db.commit()

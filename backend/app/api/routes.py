@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
 from app.core.crypto import decrypt_secret, encrypt_secret
-from app.core.security import create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, verify_password
+from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_KEYS, ROLE_MENUS_KEY, menus_for_role
+from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, verify_password
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
@@ -45,6 +46,8 @@ from app.schemas.contracts import (
     PasswordChange,
     PolicyAssignmentUpdate,
     PrivilegedOperationResult,
+    RoleMenusResponse,
+    RoleMenusUpdate,
     ServerCreate,
     ServerFolderUpdate,
     ServerImportRequest,
@@ -106,8 +109,8 @@ def _role_value(role: str) -> str:
     normalized = role.strip().lower()
     if normalized == "administrator":
         normalized = "admin"
-    if normalized not in {"admin", "developer", "support"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role must be admin, developer, or support")
+    if normalized not in {"admin", "developer", "support", "guest"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Role must be admin, developer, support, or guest")
     return normalized
 
 
@@ -226,10 +229,17 @@ def _hash_matches_default(password_hash: str, default_password: str) -> bool:
 
 @router.get("/auth/me", response_model=MeResponse)
 def me(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> MeResponse:
+    matrix = _role_menus_saved(db)
     # Desktop guest: no backing user row to load, so answer directly. Full-access (admin) but
-    # flagged guest so the UI can show the Sign-in option.
+    # flagged guest so the UI can show the Sign-in option; its menus come from the "guest" row.
     if claims.get("guest"):
-        return MeResponse(email="Guest", role="admin", using_default_password=False, guest=True)
+        return MeResponse(
+            email="Guest",
+            role="admin",
+            using_default_password=False,
+            guest=True,
+            menus=menus_for_role(matrix, "admin", guest=True),
+        )
     role = claims.get("role")
     # this used to echo the token only; it now loads the user because the default-password
     # warning has to compare against the stored hash
@@ -238,6 +248,7 @@ def me(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> M
         email=claims.get("sub") or user.email,
         role="admin" if role == "administrator" else str(role or ""),
         using_default_password=_hash_matches_default(user.password_hash, _configured_default_password()),
+        menus=menus_for_role(matrix, role, guest=False),
     )
 
 
@@ -288,6 +299,11 @@ def delete_user(user_id: int, claims: dict = Depends(require_admin_not_guest), d
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if user.email == claims.get("sub"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You cannot delete your own user")
+    # The built-in guest account is a fixture the "guest" menu row and desktop guest state lean
+    # on. Blocking the delete keeps it stable rather than having it silently reappear on the next
+    # restart (the seeder would recreate it anyway).
+    if user.email == SEEDED_GUEST_EMAIL:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The built-in guest user cannot be deleted.")
     db.delete(user)
     db.commit()
 
@@ -377,6 +393,67 @@ def get_options(_: dict = Depends(require_user), db: Session = Depends(get_db)) 
         server_types=_setting_list(db, "server_types"),
         application_types=_setting_list(db, "application_types"),
     )
+
+
+# --- role -> menu matrix -------------------------------------------------------------------
+#
+# A per-role map of which sidebar items a role SEES. Persisted as one JSON AppSetting
+# ("role_menus"). This governs menu VISIBILITY only -- endpoint authorization is unchanged and
+# still enforced by the require_admin / require_admin_not_guest guards, so a role seeing a menu
+# item does not gain access to the API behind it.
+
+
+def _role_menus_saved(db: Session) -> dict[str, list[str]]:
+    # Returns the matrix as saved, starting from the defaults so any role absent from the stored
+    # JSON is filled in. A role present but set to an empty list is preserved as empty here (the
+    # editor must reflect what was saved); the never-blank fallback happens in menus_for_role,
+    # which is what /auth/me uses to build a caller's effective list.
+    result = {role: list(items) for role, items in DEFAULT_ROLE_MENUS.items()}
+    setting = db.get(AppSetting, ROLE_MENUS_KEY)
+    if setting:
+        try:
+            parsed = json.loads(setting.value)
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            for role, items in parsed.items():
+                if role in ROLE_KEYS and isinstance(items, list):
+                    cleaned: list[str] = []
+                    for item in items:
+                        if item in MENU_ITEMS and item not in cleaned:
+                            cleaned.append(item)
+                    result[role] = cleaned
+    return result
+
+
+@router.get("/settings/role-menus", response_model=RoleMenusResponse)
+def get_role_menus(_: dict = Depends(require_user), db: Session = Depends(get_db)) -> RoleMenusResponse:
+    # require_user: every signed-in caller (and the desktop guest) can READ the matrix so the
+    # frontend can render its own menu. Only the editor UI (admins) fetches the whole grid.
+    return RoleMenusResponse(roles=list(ROLE_KEYS), items=list(MENU_ITEMS), menus=_role_menus_saved(db))
+
+
+@router.put("/settings/role-menus", response_model=RoleMenusResponse)
+def update_role_menus(payload: RoleMenusUpdate, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> RoleMenusResponse:
+    clean: dict[str, list[str]] = {}
+    for role, items in payload.menus.items():
+        if role not in ROLE_KEYS:
+            continue
+        deduped: list[str] = []
+        for item in items:
+            if item in MENU_ITEMS and item not in deduped:
+                deduped.append(item)
+        clean[role] = deduped
+    # a role omitted from the payload is reset to its default row rather than left dangling
+    for role in ROLE_KEYS:
+        clean.setdefault(role, list(DEFAULT_ROLE_MENUS.get(role, [])))
+    setting = db.get(AppSetting, ROLE_MENUS_KEY)
+    if not setting:
+        setting = AppSetting(key=ROLE_MENUS_KEY, value="{}")
+        db.add(setting)
+    setting.value = json.dumps(clean)
+    db.commit()
+    return RoleMenusResponse(roles=list(ROLE_KEYS), items=list(MENU_ITEMS), menus=clean)
 
 
 @router.post("/settings/environments", response_model=OptionList)
