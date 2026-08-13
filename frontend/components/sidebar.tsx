@@ -33,8 +33,9 @@ export function Sidebar({ role, guest = false }: { role?: string; guest?: boolea
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   async function loadShellData() {
+    // Empty token is fine: a desktop guest has no token, and getServers("")/getFolders("") are
+    // served from loopback. Bailing on "" was why guest-added servers never appeared here.
     const token = window.localStorage.getItem("inframonitor-token") ?? "";
-    if (!token) return;
     setShellLoading(true);
     setShellError("");
     try {
