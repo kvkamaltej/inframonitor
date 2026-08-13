@@ -1,0 +1,171 @@
+"""Standalone desktop entrypoint for Infra Monitor.
+
+Runs the existing FastAPI backend on a private 127.0.0.1 port and shows it in a native OS
+webview window. No Docker, no separate browser, no server to operate: one double-clickable
+app. Its database and secret live under the per-user application-data directory, so
+reinstalling or upgrading the app never touches them — the desktop analogue of the
+container's named data volume.
+
+The whole app is intentionally the *same* backend the server deployment runs. The static UI
+already talks to a relative `/api`, so pointing a webview at http://127.0.0.1:<port> "just
+works" with no rebuild.
+
+Run modes:
+  * normal:   python desktop/app.py            -> starts the backend and opens the window
+  * headless: INFRAMONITOR_DESKTOP_HEADLESS=1  -> starts the backend, prints the URL, exits
+              (used to smoke-test the bootstrap without a display or pywebview installed)
+"""
+
+from __future__ import annotations
+
+import os
+import secrets
+import socket
+import sys
+import threading
+import time
+import urllib.request
+from pathlib import Path
+
+
+def _is_frozen() -> bool:
+    # PyInstaller sets both of these on the frozen executable.
+    return getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+
+
+def _base_dir() -> Path:
+    """Directory the bundled resources (backend package, frontend/out) sit under.
+
+    Frozen: PyInstaller unpacks datas to sys._MEIPASS. In a dev checkout: the repo root.
+    """
+    if _is_frozen():
+        return Path(sys._MEIPASS)  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parent.parent
+
+
+def _data_dir() -> Path:
+    """Per-user, writable directory for the DB + secret. Created if missing.
+
+    Survives app upgrades because it lives outside the install/bundle. Override with
+    INFRAMONITOR_DATA_DIR (used by tests so they don't touch the real profile).
+    """
+    override = os.environ.get("INFRAMONITOR_DATA_DIR")
+    if override:
+        target = Path(override)
+    elif sys.platform.startswith("win"):
+        root = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+        target = root / "InfraMonitor"
+    elif sys.platform == "darwin":
+        target = Path.home() / "Library" / "Application Support" / "InfraMonitor"
+    else:
+        root = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+        target = root / "InfraMonitor"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _load_or_create_secret(data_dir: Path) -> str:
+    """The one secret the app must keep forever.
+
+    JWT_SECRET signs logins AND is the Fernet key encrypting stored SSH credentials, so it is
+    generated once and persisted (0600) in the data dir. Losing it makes every stored
+    credential undecryptable — same rule as the server deployment, enforced here automatically.
+    """
+    key_file = data_dir / "secret.key"
+    if key_file.exists():
+        existing = key_file.read_text(encoding="utf-8").strip()
+        if len(existing) >= 32:
+            return existing
+    secret = secrets.token_urlsafe(48)
+    key_file.write_text(secret, encoding="utf-8")
+    try:
+        os.chmod(key_file, 0o600)
+    except OSError:
+        # best-effort on filesystems without POSIX perms (e.g. some Windows setups)
+        pass
+    return secret
+
+
+def _free_port() -> int:
+    # Bind to port 0 and let the OS pick a free ephemeral port on loopback only.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _configure_env(data_dir: Path, base_dir: Path) -> None:
+    os.environ.setdefault("JWT_SECRET", _load_or_create_secret(data_dir))
+    os.environ["DATABASE_URL"] = f"sqlite:///{(data_dir / 'inframonitor.db').as_posix()}"
+    os.environ["STATIC_DIR"] = str(base_dir / "frontend" / "out")
+    # A single-machine desktop app has nothing to scrape it and nothing to link to.
+    os.environ.setdefault("METRICS_ENABLED", "false")
+    # In a dev checkout the backend package is not on sys.path; add it. When frozen it is
+    # baked into the executable (pathex in the .spec) and this is a no-op.
+    backend = base_dir / "backend"
+    if backend.is_dir() and str(backend) not in sys.path:
+        sys.path.insert(0, str(backend))
+
+
+def _run_server(port: int) -> None:
+    import uvicorn
+    from app.main import app
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    # Signal handlers can only be installed on the main thread, and this runs on a worker
+    # thread so the webview owns the main thread. No-op them rather than crash on startup.
+    server.install_signal_handlers = lambda: None  # type: ignore[assignment]
+    server.run()
+
+
+def _wait_healthy(port: int, timeout: float = 30.0) -> bool:
+    deadline = time.monotonic() + timeout
+    url = f"http://127.0.0.1:{port}/health"
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                if response.status == 200:
+                    return True
+        except Exception:
+            time.sleep(0.25)
+    return False
+
+
+def main() -> int:
+    base_dir = _base_dir()
+    data_dir = _data_dir()
+    _configure_env(data_dir, base_dir)
+
+    port = int(os.environ.get("INFRAMONITOR_DESKTOP_PORT") or _free_port())
+    threading.Thread(target=_run_server, args=(port,), daemon=True).start()
+
+    if not _wait_healthy(port):
+        print("Infra Monitor backend did not become healthy in time.", file=sys.stderr)
+        return 1
+
+    url = f"http://127.0.0.1:{port}/"
+
+    # Headless: prove the backend boots (CI / smoke test) without a display or pywebview.
+    if os.environ.get("INFRAMONITOR_DESKTOP_HEADLESS") == "1":
+        print(f"HEADLESS OK: serving {url}  (data dir: {data_dir})")
+        return 0
+
+    # Imported here, not at module top, so the headless path needs neither pywebview nor a
+    # webview runtime installed.
+    import webview
+
+    webview.create_window(
+        "Infra Monitor",
+        url,
+        width=1400,
+        height=900,
+        min_size=(940, 600),
+    )
+    # Blocks on the main thread until the window is closed; the daemon server thread then dies
+    # with the process.
+    webview.start()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

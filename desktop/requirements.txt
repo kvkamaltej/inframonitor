@@ -1,0 +1,13 @@
+# Desktop-only build/runtime deps, on TOP of backend/requirements.txt.
+#
+# pywebview renders the app in the OS-native webview (WebView2 on Windows, WebKit on
+# macOS/Linux) — no Chromium bundled.
+pywebview>=5.0
+
+# Windows EdgeChromium (WebView2) backend for pywebview needs pythonnet. The WebView2
+# *runtime* itself is a system component, preinstalled on Windows 11 and most updated
+# Windows 10; if missing, ship the Evergreen bootstrapper alongside the installer.
+pythonnet>=3.0 ; sys_platform == "win32"
+
+# Freezer. Only needed to build the executable, not to run from source.
+pyinstaller>=6.6

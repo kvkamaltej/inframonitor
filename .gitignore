@@ -15,7 +15,11 @@ backups/
 
 # --- Python ----------------------------------------------------------------
 .venv/
+.venv-desktop/
 venv/
+# PyInstaller desktop build output (desktop/inframonitor.spec)
+/build/
+/dist/
 __pycache__/
 *.py[cod]
 *.egg-info/
