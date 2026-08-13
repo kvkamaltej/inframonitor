@@ -16,6 +16,13 @@ bearer_scheme = HTTPBearer(auto_error=False)
 # of these as its source address, so guest access can never leak onto the LAN.
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
+# The email of the real, seeded guest account (role "guest"). It is deliberately NOT the
+# subject the desktop synthetic session carries (guest_claims -> "guest@localhost"): the seeded
+# row exists so admins can see/manage the guest role in User Management and so the "guest" menu
+# row has a home, while the desktop auto-login remains a separate, login-less loopback session.
+# The seeded account's password is a random unusable hash, so no one can log in as it.
+SEEDED_GUEST_EMAIL = "guest@local"
+
 
 def is_loopback_client(host: str | None) -> bool:
     return (host or "") in _LOOPBACK_HOSTS

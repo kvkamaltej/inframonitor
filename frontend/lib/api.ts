@@ -208,6 +208,18 @@ export type Me = {
   using_default_password: boolean;
   // desktop guest session (no login). The UI shows a "Guest" state and a Sign-in affordance.
   guest?: boolean;
+  // effective sidebar menu-item keys for this caller's role, from the role->menu matrix. The
+  // sidebar renders from this rather than hardcoded role checks; absent/empty means "fall back
+  // to the built-in per-role defaults" (see sidebar.tsx).
+  menus?: string[];
+};
+
+// The role x menu-item matrix for the Access Control editor. `roles` and `items` are the full
+// vocabularies (grid axes); `menus` holds the currently-saved selection per role.
+export type RoleMenus = {
+  roles: string[];
+  items: string[];
+  menus: Record<string, string[]>;
 };
 
 export type UserAccount = {
@@ -440,6 +452,18 @@ export async function createPolicy(token: string, payload: unknown): Promise<Acc
 
 export async function assignPolicyUsers(token: string, policyId: number, userIds: number[]): Promise<AccessPolicy> {
   return request<AccessPolicy>(`/policies/${policyId}/users`, token, { method: "PUT", body: JSON.stringify({ user_ids: userIds }) });
+}
+
+// Reads the role->menu matrix. require_user, so any signed-in caller (and the desktop guest)
+// may read it; the Access Control editor fetches the full grid, individual pages do not need to.
+export async function getRoleMenus(token: string): Promise<RoleMenus> {
+  return request<RoleMenus>("/settings/role-menus", token);
+}
+
+// Saves the matrix. Admin-only (require_admin_not_guest): a desktop guest gets 403. A role
+// omitted from `menus` is reset to its default row server-side.
+export async function updateRoleMenus(token: string, menus: Record<string, string[]>): Promise<RoleMenus> {
+  return request<RoleMenus>("/settings/role-menus", token, { method: "PUT", body: JSON.stringify({ menus }) });
 }
 
 export async function getSummary(token: string): Promise<Summary> {

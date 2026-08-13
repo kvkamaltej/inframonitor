@@ -12,6 +12,10 @@ class Role(str, Enum):
     administrator = "administrator"
     developer = "developer"
     support = "support"
+    # A real, seeded account (guest@local) that carries the "guest" menu row and is otherwise
+    # a normal user row an admin can see in User Management. Distinct from the desktop's
+    # synthetic loopback guest session (sub guest@localhost), which has no backing row.
+    guest = "guest"
 
 
 class ServerStatus(str, Enum):
