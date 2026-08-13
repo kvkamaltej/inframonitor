@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, Clock, Coffee, Copy, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, RefreshCw, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
+import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
 import {
   assignServerFolder,
   ContainerInfo,
@@ -64,6 +65,10 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   const [sudoPassword, setSudoPassword] = useState("");
   const [selected, setSelected] = useState("");
   const [logs, setLogs] = useState<string[]>([]);
+  // Auto-refresh for the shared log pane: the interval, and a closure that re-runs whichever log
+  // source was last opened (container / Tomcat / service / database), so the timer reloads it.
+  const [logsAuto, setLogsAuto] = useState(0);
+  const [logRefresher, setLogRefresher] = useState<null | (() => void)>(null);
   const [message, setMessage] = useState("");
   const [tone, setTone] = useState<Tone>("info");
   // Which action is in flight ("" = idle). `loading` stays derived so every existing
@@ -286,6 +291,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
 
   async function loadContainerLogs(containerName = selected) {
     if (!containerName) return;
+    setLogRefresher(() => () => loadContainerLogs(containerName));
     setBusy("busy");
     try {
       setSelected(containerName);
@@ -423,6 +429,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   }
 
   async function loadTomcatLog(instance: TomcatInstance, file: TomcatLogFile) {
+    setLogRefresher(() => () => loadTomcatLog(instance, file));
     setBusy("busy");
     try {
       const payload = { instance: instance.name, log_file: file.path, tail };
@@ -440,6 +447,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   async function loadServiceUnitLogs(row: Record<string, string>) {
     const unit = row.name ?? "";
     if (!unit) return;
+    setLogRefresher(() => () => loadServiceUnitLogs(row));
     setBusy("busy");
     try {
       const payload = { source: "journal", name_or_path: unit, tail };
@@ -455,6 +463,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   }
 
   async function loadDbLogs(item: Record<string, string>) {
+    setLogRefresher(() => () => loadDbLogs(item));
     setBusy("busy");
     try {
       setSelected(item.path ?? item.database ?? "database");
@@ -466,6 +475,12 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       setBusy("");
     }
   }
+
+  // Re-run the currently-shown log source on the chosen interval (skipped while a request is in
+  // flight so slow tails don't stack up).
+  useAutoRefresh(logsAuto, () => {
+    if (logRefresher && !busy) logRefresher();
+  });
 
   async function removeServer() {
     if (!(await confirm({
@@ -963,6 +978,15 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
               <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5 font-semibold text-slate-900 dark:border-slate-800 dark:text-slate-100">
                 <span className="flex items-center gap-2"><FileText size={18} className="text-accent" />Logs {selected ? <span className="font-mono text-xs font-medium text-slate-500 dark:text-slate-400">{selected}</span> : ""}</span>
                 <div className="flex items-center gap-3">
+                  <AutoRefreshSelect value={logsAuto} onChange={setLogsAuto} disabled={!logRefresher} />
+                  <button
+                    onClick={() => logRefresher?.()}
+                    disabled={!logRefresher || busy !== ""}
+                    title="Reload the current log now"
+                    className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-40 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                  >
+                    <RefreshCw size={13} className={busy !== "" ? "animate-spin" : ""} /> Refresh
+                  </button>
                   <button
                     onClick={() => void copyLogs()}
                     disabled={logs.length === 0}

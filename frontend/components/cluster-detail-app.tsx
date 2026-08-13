@@ -53,6 +53,7 @@ import {
   scaleKubeDeployment
 } from "@/lib/api";
 import { Sidebar } from "@/components/sidebar";
+import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
 
 type Tab = "overview" | "nodes" | "pods" | "workloads" | "logs" | "health" | "events";
 type Tone = "info" | "error";
@@ -101,6 +102,7 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
   const [logsPrevious, setLogsPrevious] = useState(false);
   const [podLogs, setPodLogs] = useState<KubePodLogs | null>(null);
   const [logsCopied, setLogsCopied] = useState(false);
+  const [logsAuto, setLogsAuto] = useState(0);
 
   const [message, setMessage] = useState("");
   const [tone, setTone] = useState<Tone>("info");
@@ -262,6 +264,12 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
       notify("Could not copy to the clipboard.", "error");
     }
   }
+
+  // Auto-refresh the pod logs on the chosen interval, but only once a pod is selected and no other
+  // request is in flight (so a slow fetch never stacks up behind the timer).
+  useAutoRefresh(logsAuto, () => {
+    if (logsNamespace && logsPod && !busy) void loadLogs();
+  });
 
   // ---- initial + lazy loading ------------------------------------------------------------
   useEffect(() => {
@@ -611,6 +619,7 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
                   </label>
                   <button disabled={loading} onClick={() => void loadLogs()} className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{busy === "logs" ? <Loader2 size={16} className="animate-spin" /> : <ScrollText size={16} />} Load logs</button>
                   <button type="button" disabled={!podLogs?.log?.trim()} onClick={() => void copyLogs()} title="Copy the log output to the clipboard" className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">{logsCopied ? <Check size={16} /> : <Copy size={16} />} {logsCopied ? "Copied" : "Copy"}</button>
+                  <AutoRefreshSelect value={logsAuto} onChange={setLogsAuto} disabled={!logsPod} className="ml-1" />
                 </div>
                 <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-100">{podLogs ? (podLogs.log?.trim() ? podLogs.log : `No log output for ${logsPod || "this pod"}.`) : "Choose a pod (from the Pods tab) or type a namespace + pod, then Load logs."}</pre>
               </Panel>
