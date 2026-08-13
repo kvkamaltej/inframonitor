@@ -213,6 +213,28 @@ class KubeCluster(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class DbConnection(Base):
+    # A saved, reusable database connection (feature/db-connect follow-on). Like Server and
+    # KubeCluster, the API and every URL speak in the public_id (a uuid string), never the
+    # autoincrement id. The password is encrypted at rest with the same Fernet path
+    # (app.core.crypto) and is never echoed back by any read model. A connection may sit in a
+    # Folder (the "group"), exactly like a server, or be unassigned (folder_id NULL).
+    __tablename__ = "db_connections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    public_id: Mapped[str] = mapped_column(String(36), unique=True, index=True, default="")
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    # postgres | mysql -- validated in the route so a bad value is a clean 400.
+    engine: Mapped[str] = mapped_column(String(32), default="postgres")
+    host: Mapped[str] = mapped_column(String(255), default="")
+    port: Mapped[int] = mapped_column(Integer, default=5432)
+    username: Mapped[str] = mapped_column(String(255), default="")
+    encrypted_password: Mapped[str] = mapped_column(Text, default="")
+    database: Mapped[str] = mapped_column(String(255), default="")
+    folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ShellFavorite(Base):
     __tablename__ = "shell_favorites"
     # one name per user, not globally: two people may both keep a "tail catalina" entry

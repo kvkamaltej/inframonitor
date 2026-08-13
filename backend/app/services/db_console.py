@@ -126,6 +126,103 @@ def _significant_after(sql: str, start: int) -> bool:
     return False
 
 
+def _is_word_char(ch: str) -> bool:
+    return ch.isalnum() or ch == "_"
+
+
+def _parse_limit_value(sql: str, start: int) -> int | None:
+    """Parse the row-count that follows a `LIMIT` keyword at `sql[start:]`.
+
+    Returns the plain integer row count, or None when it is not a plain integer (a bind
+    parameter like `LIMIT :n` / `LIMIT ?`, or an expression). Handles both the MySQL
+    `LIMIT <offset>, <row_count>` form (returns row_count) and `LIMIT <row_count> OFFSET <n>`
+    (returns row_count -- OFFSET does not change the cap).
+    """
+    length = len(sql)
+    i = start
+    while i < length and sql[i].isspace():
+        i += 1
+    j = i
+    while j < length and sql[j].isdigit():
+        j += 1
+    if j == i:
+        return None  # not a plain integer: a bind parameter or an expression
+    first = int(sql[i:j])
+    # a MySQL `LIMIT <offset>, <row_count>` puts the real cap in the second value
+    k = j
+    while k < length and sql[k].isspace():
+        k += 1
+    if k < length and sql[k] == ",":
+        k += 1
+        while k < length and sql[k].isspace():
+            k += 1
+        m = k
+        while m < length and sql[m].isdigit():
+            m += 1
+        if m == k:
+            return None  # `LIMIT 5, :param` -- not a simple integer
+        return int(sql[k:m])
+    return first
+
+
+def parse_limit(sql: str) -> int | None:
+    """Return the integer row count of a top-level `LIMIT <n>` clause in `sql`, else None.
+
+    Uses the same quote/comment-aware scan as `_has_multiple_statements`: a `limit` that sits
+    inside a string literal, quoted identifier, or comment is ignored. Only a plain-integer row
+    count is honoured (`LIMIT :param`, `LIMIT ?`, expressions -> None). The last top-level LIMIT
+    wins, so an outer clause takes precedence over one inside a subquery.
+    """
+    in_single = in_double = in_backtick = False
+    length = len(sql)
+    i = 0
+    found: int | None = None
+    while i < length:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < length else ""
+        if in_single:
+            if ch == "'":
+                if nxt == "'":  # escaped '' inside a literal
+                    i += 2
+                    continue
+                in_single = False
+        elif in_double:
+            if ch == '"':
+                in_double = False
+        elif in_backtick:
+            if ch == "`":
+                in_backtick = False
+        elif ch == "-" and nxt == "-":  # line comment
+            end = sql.find("\n", i + 2)
+            if end == -1:
+                break
+            i = end + 1
+            continue
+        elif ch == "/" and nxt == "*":  # block comment
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                break
+            i = end + 2
+            continue
+        elif ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch == "`":
+            in_backtick = True
+        elif ch in ("l", "L") and sql[i : i + 5].lower() == "limit":
+            before = sql[i - 1] if i > 0 else ""
+            after = sql[i + 5] if i + 5 < length else ""
+            if not _is_word_char(before) and not _is_word_char(after):
+                parsed = _parse_limit_value(sql, i + 5)
+                if parsed is not None:
+                    found = parsed
+                i += 5
+                continue
+        i += 1
+    return found
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, bool):  # bool is an int subclass; keep it a bool
         return value
@@ -277,6 +374,55 @@ def run_query(
             "truncated": truncated,
             "elapsed_ms": elapsed_ms,
         }
+    except DbConsoleError:
+        raise
+    except Exception as exc:
+        raise DbConsoleError(_clean_message(exc)) from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# Read-only introspection queries: PostgreSQL scans every user schema; MySQL is single-database,
+# so it lists only the connected database's tables (DATABASE()).
+_LIST_TABLES_SQL = {
+    "postgres": (
+        "SELECT table_schema, table_name, table_type FROM information_schema.tables "
+        "WHERE table_schema NOT IN ('pg_catalog','information_schema') "
+        "ORDER BY table_schema, table_name"
+    ),
+    "mysql": (
+        "SELECT table_schema, table_name, table_type FROM information_schema.tables "
+        "WHERE table_schema = DATABASE() ORDER BY table_name"
+    ),
+}
+
+
+def list_tables(engine: str, host: str, port: int, username: str, password: str, database: str) -> list[dict]:
+    """List the tables and views visible to the connection.
+
+    Returns `[{"schema", "name", "type"}, ...]` sorted by (schema, name), where type is "view"
+    when the catalog reports a VIEW and "table" otherwise. Raises DbConsoleError on failure.
+    """
+    sql = _LIST_TABLES_SQL["postgres"] if engine == "postgres" else _LIST_TABLES_SQL["mysql"]
+    conn = None
+    try:
+        conn = _connect(engine, host, port, username, password, database)
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            rows = list(cur.fetchall()) if cur.description else []
+        tables = []
+        for row in rows:
+            schema = str(row[0]) if row[0] is not None else ""
+            name = str(row[1]) if row[1] is not None else ""
+            ttype = str(row[2]) if len(row) > 2 and row[2] is not None else ""
+            kind = "view" if "VIEW" in ttype.upper() else "table"
+            tables.append({"schema": schema, "name": name, "type": kind})
+        tables.sort(key=lambda t: (t["schema"], t["name"]))
+        return tables
     except DbConsoleError:
         raise
     except Exception as exc:

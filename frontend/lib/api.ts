@@ -949,6 +949,98 @@ export async function dbQuery(token: string, params: DbConnectionParams & { sql:
   return request<DbQueryResult>("/db/query", token, { method: "POST", body: JSON.stringify(params) });
 }
 
+// --- stored database connections (feature/db-connections) ----------------------------------
+// Persistent, named PostgreSQL/MySQL connections. Unlike the ad-hoc console above, the
+// credentials are stored server-side and the password is write-only: the read shape reports
+// `has_password` instead of the value. Blocked for desktop guests (403); sign in to use them.
+
+export type DbConnection = {
+  id: string;
+  name: string;
+  engine: DbEngine;
+  host: string;
+  port: number;
+  username: string;
+  database: string;
+  group: string | null;
+  has_password: boolean;
+  created_at: string;
+};
+
+export type DbConnectionInput = {
+  name: string;
+  engine: DbEngine;
+  host: string;
+  port: number;
+  username?: string;
+  // write-only: send a non-empty value to set/replace it; leave blank on edit to keep the stored one
+  password?: string;
+  database?: string;
+  group?: string | null;
+};
+
+export type DbTable = {
+  schema: string;
+  name: string;
+  type: string;
+};
+
+export async function getDbConnections(token: string): Promise<DbConnection[]> {
+  return request<DbConnection[]>("/db/connections", token);
+}
+
+export async function createDbConnection(token: string, input: DbConnectionInput): Promise<DbConnection> {
+  return request<DbConnection>("/db/connections", token, { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function updateDbConnection(token: string, id: string, input: Partial<DbConnectionInput>): Promise<DbConnection> {
+  return request<DbConnection>(`/db/connections/${encodeURIComponent(id)}`, token, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export async function deleteDbConnection(token: string, id: string): Promise<void> {
+  // 204 No Content, so request<T> is wrong here: response.json() throws on an empty body.
+  const response = await fetch(`${API_URL}/db/connections/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store"
+  });
+  if (!response.ok) throw new ApiError(response.status, await response.text());
+}
+
+// Probes an UNSAVED connection's params (the create/edit form's values) without storing anything.
+export async function testDbConnection(token: string, input: DbConnectionInput): Promise<DbConnectionResult> {
+  return request<DbConnectionResult>("/db/connections/test", token, { method: "POST", body: JSON.stringify(input) });
+}
+
+// Probes a stored connection by id, using its saved credentials.
+export async function testDbConnectionById(token: string, id: string): Promise<DbConnectionResult> {
+  return request<DbConnectionResult>(`/db/connections/${encodeURIComponent(id)}/test`, token, { method: "POST" });
+}
+
+export async function getDbTables(token: string, id: string): Promise<DbTable[]> {
+  return request<DbTable[]>(`/db/connections/${encodeURIComponent(id)}/tables`, token);
+}
+
+export async function runConnectionQuery(token: string, id: string, sql: string, limit?: number): Promise<DbQueryResult> {
+  return request<DbQueryResult>(`/db/connections/${encodeURIComponent(id)}/query`, token, {
+    method: "POST",
+    body: JSON.stringify({ sql, limit })
+  });
+}
+
+// Edit a user's details (admin-only). full_name/role update the row; a non-empty password resets
+// it, a blank/omitted password keeps the stored one. Returns the refreshed UserAccount.
+export async function updateUser(
+  token: string,
+  id: number,
+  payload: { full_name?: string; role?: string; password?: string }
+): Promise<UserAccount> {
+  return request<UserAccount>(`/users/${encodeURIComponent(String(id))}`, token, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+}
+
 export async function getShellFavorites(token: string): Promise<ShellFavorite[]> {
   return request<ShellFavorite[]>("/shell/favorites", token);
 }

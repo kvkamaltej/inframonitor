@@ -26,7 +26,7 @@ from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_KEYS, ROLE_MENUS
 from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, require_user_not_guest, verify_password
 from app.services.secrets import VaultError, get_vault_config, load_credentials, save_vault_config, store_credentials, test_vault
 from app.services import db_backend
-from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
+from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, Folder, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
     AccessPolicyRead,
@@ -40,10 +40,15 @@ from app.schemas.contracts import (
     ConnectionResult,
     ContainerRead,
     CredentialPayload,
+    DbConnectionCreate,
+    DbConnectionQueryRequest,
+    DbConnectionRead,
     DbConnectionRequest,
     DbConnectionResult,
+    DbConnectionUpdate,
     DbQueryRequest,
     DbQueryResult,
+    DbTable,
     FolderCreate,
     FolderRead,
     IntegrationStatus,
@@ -95,6 +100,7 @@ from app.schemas.contracts import (
     TomcatLogRequest,
     UserCreate,
     UserRead,
+    UserUpdate,
     UserServerAccessRead,
     VaultConfigRead,
     VaultConfigWrite,
@@ -336,6 +342,41 @@ def create_user(payload: UserCreate, _: dict = Depends(require_admin_not_guest),
     db.commit()
     db.refresh(user)
     return UserRead(id=user.id, email=user.email, full_name=user.full_name, role=role, created_at=user.created_at)
+
+
+@router.patch("/users/{user_id}", response_model=UserRead)
+def update_user(user_id: int, payload: UserUpdate, claims: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> UserRead:
+    from app.models.entities import Role
+
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    data = payload.model_dump(exclude_unset=True)
+
+    if "full_name" in data and data["full_name"] is not None:
+        user.full_name = data["full_name"]
+    if "role" in data and data["role"] is not None:
+        role = _role_value(data["role"])
+        # a caller must not change their own role: an admin who demotes themselves would lock the
+        # account out of the very screen they are on, so this is refused rather than silently applied.
+        current = "admin" if user.role.value == "administrator" else user.role.value
+        if user.email == claims.get("sub") and role != current:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You cannot change your own role")
+        user.role = Role.administrator if role == "admin" else Role(role)
+    if data.get("password"):
+        if len(data["password"]) < 8:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters")
+        user.password_hash = hash_password(data["password"])
+
+    db.commit()
+    db.refresh(user)
+    return UserRead(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        role="admin" if user.role.value == "administrator" else user.role.value,
+        created_at=user.created_at,
+    )
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -2236,8 +2277,9 @@ def delete_shell_favorite(favorite_id: int, claims: dict = Depends(require_user)
 # mysql, per-request credentials. OUT of scope (follow-ons): saved/stored connections, a schema
 # browser, SQL autocomplete, and write-transaction management.
 
-# how many rows a single query may return, before the caller's own limit is applied
-_DB_DEFAULT_ROW_LIMIT = 1000
+# how many rows a single query may return by default. A top-level LIMIT in the SQL raises the
+# cap to the user's own LIMIT instead (hard-capped at _DB_MAX_ROW_LIMIT); see parse_limit.
+_DB_DEFAULT_ROW_LIMIT = 200
 _DB_MAX_ROW_LIMIT = 5000
 
 
@@ -2265,12 +2307,175 @@ def db_test_connection(payload: DbConnectionRequest, _: dict = Depends(require_u
 def db_query(payload: DbQueryRequest, _: dict = Depends(require_user_not_guest)) -> DbQueryResult:
     engine = _db_engine_or_400(payload.engine)
     port = payload.port or DEFAULT_PORTS[engine]
-    row_cap = min(payload.limit or _DB_DEFAULT_ROW_LIMIT, _DB_MAX_ROW_LIMIT)
+    row_cap = min(db_console.parse_limit(payload.sql) or _DB_DEFAULT_ROW_LIMIT, _DB_MAX_ROW_LIMIT)
     try:
         result = db_console.run_query(engine, payload.host, port, payload.username, payload.password, payload.database, payload.sql, row_cap)
     except DbConsoleError as exc:
         # never a 500 on a bad query or unreachable host: surface the DB error text as a 400 the
         # console can display
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return DbQueryResult(**result)
+
+
+# --- saved database connections (feature/db-connect follow-on) ------------------------------
+#
+# Persistent, reusable versions of the ad-hoc console above: the connection parameters are stored,
+# the password is encrypted at rest with the same Fernet path (never echoed -- has_password says
+# whether one is stored), and `group` is a folder NAME resolved to a Folder exactly as servers and
+# clusters are grouped. The API speaks in the public_id, never the autoincrement key. All endpoints
+# require a real signed-in (non-guest) user, matching the ad-hoc /db routes.
+
+
+def _db_connection_or_404(db: Session, connection_id: str) -> DbConnection:
+    conn = db.scalar(select(DbConnection).where(DbConnection.public_id == connection_id))
+    if not conn and connection_id.isdigit():
+        conn = db.get(DbConnection, int(connection_id))
+    if not conn:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
+    return conn
+
+
+def _db_connection_group_name(db: Session, conn: DbConnection) -> str | None:
+    if conn.folder_id is None:
+        return None
+    folder = db.get(Folder, conn.folder_id)
+    return folder.name if folder else None
+
+
+def _db_connection_read(db: Session, conn: DbConnection) -> DbConnectionRead:
+    return DbConnectionRead(
+        id=conn.public_id,
+        name=conn.name,
+        engine=conn.engine,
+        host=conn.host,
+        port=conn.port,
+        username=conn.username,
+        database=conn.database,
+        group=_db_connection_group_name(db, conn),
+        has_password=bool(conn.encrypted_password),
+        created_at=conn.created_at,
+    )
+
+
+@router.get("/db/connections", response_model=list[DbConnectionRead])
+def list_db_connections(_: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbConnectionRead]:
+    conns = db.scalars(select(DbConnection).order_by(func.lower(DbConnection.name))).all()
+    return [_db_connection_read(db, conn) for conn in conns]
+
+
+@router.post("/db/connections", response_model=DbConnectionRead, status_code=status.HTTP_201_CREATED)
+def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbConnectionRead:
+    engine = _db_engine_or_400(payload.engine)
+    conn = DbConnection(
+        public_id=str(uuid.uuid4()),
+        name=payload.name.strip(),
+        engine=engine,
+        host=payload.host.strip(),
+        port=payload.port or DEFAULT_PORTS[engine],
+        username=payload.username,
+        encrypted_password=encrypt_secret(payload.password),
+        database=payload.database,
+        folder_id=_resolve_group_to_folder_id(db, payload.group),
+    )
+    db.add(conn)
+    db.commit()
+    db.refresh(conn)
+    return _db_connection_read(db, conn)
+
+
+@router.post("/db/connections/test", response_model=DbConnectionResult)
+def test_unsaved_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user_not_guest)) -> DbConnectionResult:
+    # Test the parameters as typed, without persisting anything. A bad host/credentials is an
+    # expected outcome, reported as ok=false with HTTP 200 (like the ad-hoc db_test_connection).
+    engine = _db_engine_or_400(payload.engine)
+    port = payload.port or DEFAULT_PORTS[engine]
+    try:
+        message = db_console.test_connection(engine, payload.host, port, payload.username, payload.password, payload.database)
+        return DbConnectionResult(ok=True, message=message)
+    except DbConsoleError as exc:
+        return DbConnectionResult(ok=False, message=str(exc))
+
+
+@router.get("/db/connections/{connection_id}", response_model=DbConnectionRead)
+def get_db_connection(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbConnectionRead:
+    return _db_connection_read(db, _db_connection_or_404(db, connection_id))
+
+
+@router.patch("/db/connections/{connection_id}", response_model=DbConnectionRead)
+def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbConnectionRead:
+    conn = _db_connection_or_404(db, connection_id)
+    data = payload.model_dump(exclude_unset=True)
+
+    if "engine" in data and data["engine"] is not None:
+        conn.engine = _db_engine_or_400(data["engine"])
+    if "name" in data and data["name"] is not None:
+        name = data["name"].strip()
+        if not name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connection name cannot be empty")
+        conn.name = name
+    if "host" in data and data["host"] is not None:
+        host = data["host"].strip()
+        if not host:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Host cannot be empty")
+        conn.host = host
+    if "port" in data and data["port"] is not None:
+        conn.port = data["port"]
+    if "username" in data and data["username"] is not None:
+        conn.username = data["username"]
+    if "database" in data and data["database"] is not None:
+        conn.database = data["database"]
+    # password: only overwrite when a non-empty value is supplied, so an edit that leaves the box
+    # blank keeps the stored credential instead of wiping it (mirrors the kube secret handling).
+    if data.get("password"):
+        conn.encrypted_password = encrypt_secret(data["password"])
+    if "group" in data:
+        conn.folder_id = _resolve_group_to_folder_id(db, data["group"])
+
+    db.commit()
+    db.refresh(conn)
+    return _db_connection_read(db, conn)
+
+
+@router.delete("/db/connections/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_db_connection(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> None:
+    conn = _db_connection_or_404(db, connection_id)
+    db.delete(conn)
+    db.commit()
+
+
+@router.post("/db/connections/{connection_id}/test", response_model=DbConnectionResult)
+def test_saved_db_connection(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbConnectionResult:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        message = db_console.test_connection(
+            conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database
+        )
+        return DbConnectionResult(ok=True, message=message)
+    except DbConsoleError as exc:
+        return DbConnectionResult(ok=False, message=str(exc))
+
+
+@router.get("/db/connections/{connection_id}/tables", response_model=list[DbTable])
+def list_db_connection_tables(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbTable]:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        tables = db_console.list_tables(
+            conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database
+        )
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [DbTable(**table) for table in tables]
+
+
+@router.post("/db/connections/{connection_id}/query", response_model=DbQueryResult)
+def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbQueryResult:
+    conn = _db_connection_or_404(db, connection_id)
+    row_cap = min(db_console.parse_limit(payload.sql) or _DB_DEFAULT_ROW_LIMIT, _DB_MAX_ROW_LIMIT)
+    try:
+        result = db_console.run_query(
+            conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database, payload.sql, row_cap
+        )
+    except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return DbQueryResult(**result)
 

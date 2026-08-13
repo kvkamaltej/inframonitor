@@ -345,6 +345,15 @@ class UserCreate(BaseModel):
     role: str
 
 
+class UserUpdate(BaseModel):
+    # Every field optional: a PATCH sends only what changed. Email is immutable and any email
+    # field is ignored. The password, when provided and non-empty, is validated (len>=8) and
+    # re-hashed in the route.
+    full_name: str | None = None
+    role: str | None = None
+    password: str | None = None
+
+
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8)
@@ -538,6 +547,69 @@ class DbQueryResult(BaseModel):
     # true when the result was cut to the row cap, so the UI can say "showing first N".
     truncated: bool = False
     elapsed_ms: int = 0
+
+
+# --- saved database connections (feature/db-connect follow-on) ------------------------------
+#
+# A persistent, reusable version of the ad-hoc console above: the connection parameters are
+# stored, the password is encrypted at rest (never echoed -- has_password says whether one is
+# stored), and `group` is a folder NAME resolved to a Folder exactly as servers are grouped.
+# Every id on the wire is the connection's public_id.
+
+
+class DbConnectionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    # engine is validated in the route against {"postgres","mysql"} so a bad value is a clean 400.
+    engine: str = "postgres"
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+    username: str = Field(default="", max_length=255)
+    password: str = Field(default="", max_length=1024)
+    database: str = Field(default="", max_length=255)
+    # folder name (the "group"); resolved to an existing Folder in the route, else left unassigned.
+    group: str | None = None
+
+
+class DbConnectionUpdate(BaseModel):
+    # Every field optional: a PATCH sends only what changed. The password is applied only when a
+    # non-empty value is sent, so an edit that leaves it blank keeps the stored credential.
+    name: str | None = None
+    engine: str | None = None
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None
+    database: str | None = None
+    group: str | None = None
+
+
+class DbConnectionRead(BaseModel):
+    # id is the connection's public_id (a uuid string), never the autoincrement key. The password
+    # is never present; has_password tells the UI whether one is stored.
+    id: str
+    name: str
+    engine: str
+    host: str
+    port: int
+    username: str = ""
+    database: str = ""
+    group: str | None = None
+    has_password: bool = False
+    created_at: datetime
+
+
+class DbTable(BaseModel):
+    schema: str = ""
+    name: str
+    # "table" | "view"
+    type: str = "table"
+
+
+class DbConnectionQueryRequest(BaseModel):
+    sql: str = Field(min_length=1, max_length=100_000)
+    # rows are capped at min(parse_limit(sql) or 200, 5000) in the route; this field is accepted
+    # for forward-compatibility but the effective cap is derived from the SQL's own LIMIT.
+    limit: int | None = Field(default=None, ge=1)
 
 
 class OperationRequest(BaseModel):
