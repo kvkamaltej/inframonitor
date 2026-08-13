@@ -20,6 +20,8 @@ venv/
 # PyInstaller desktop build output (desktop/inframonitor.spec)
 /build/
 /dist/
+# Inno Setup installer output (desktop/build-installer.ps1)
+/dist-installer/
 # icon preview render (the .ico itself is committed; the PNG is just for eyeballing)
 desktop/inframonitor-preview.png
 __pycache__/
