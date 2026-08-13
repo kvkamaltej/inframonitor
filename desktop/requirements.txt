@@ -9,5 +9,15 @@ pywebview>=5.0
 # Windows 10; if missing, ship the Evergreen bootstrapper alongside the installer.
 pythonnet>=3.0 ; sys_platform == "win32"
 
+# macOS: pywebview uses the native Cocoa / WKWebView backend. Its pyobjc dependencies are
+# pulled in automatically by pywebview on darwin, so nothing extra is pinned here.
+
+# Linux: pywebview needs a GTK (WebKit2GTK) or Qt (QtWebEngine) backend. We default to Qt via
+# PySide6 because it installs entirely from pip wheels (Qt libs bundled) — no system -dev
+# headers — which keeps the build reproducible in CI. The lighter, more native GTK path is
+# possible too but needs SYSTEM packages pip can't install (see desktop/README.md).
+PySide6 ; sys_platform == "linux"
+qtpy ; sys_platform == "linux"
+
 # Freezer. Only needed to build the executable, not to run from source.
 pyinstaller>=6.6

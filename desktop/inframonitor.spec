@@ -74,6 +74,17 @@ a = Analysis(
     noarchive=False,
 )
 
+# Icon format is platform-specific: Windows wants .ico, macOS wants .icns, and PyInstaller
+# ignores the icon for a Linux ELF. Pass only a format the current OS understands (and only if
+# the file exists) so the same spec builds unchanged on all three platforms.
+if sys.platform == "win32":
+    APP_ICON = os.path.join(ROOT, "desktop", "inframonitor.ico")
+elif sys.platform == "darwin":
+    _icns = os.path.join(ROOT, "desktop", "inframonitor.icns")
+    APP_ICON = _icns if os.path.exists(_icns) else None
+else:
+    APP_ICON = None
+
 pyz = PYZ(a.pure)
 
 # ONEFILE build: everything (interpreter, libs, frontend/out, backend) is packed INTO the single
@@ -96,5 +107,22 @@ exe = EXE(
     # tracebacks.
     console=False,
     disable_windowed_traceback=False,
-    icon=os.path.join(ROOT, "desktop", "inframonitor.ico"),
+    icon=APP_ICON,
 )
+
+# macOS: wrap the executable in a proper .app bundle so it launches from Finder/Dock with the
+# right name and icon (a bare Unix executable has neither). No-op on Windows/Linux.
+if sys.platform == "darwin":
+    app = BUNDLE(
+        exe,
+        name="Infra Monitor.app",
+        icon=APP_ICON,
+        bundle_identifier="com.inframonitor.desktop",
+        info_plist={
+            "CFBundleName": "Infra Monitor",
+            "CFBundleDisplayName": "Infra Monitor",
+            "NSHighResolutionCapable": True,
+            # WKWebView content is loaded from the bundled backend over http://127.0.0.1; allow it.
+            "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
+        },
+    )

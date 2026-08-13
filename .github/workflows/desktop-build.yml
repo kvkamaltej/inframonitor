@@ -1,0 +1,115 @@
+# Build the Infra Monitor desktop app for Windows, Linux and macOS in one run.
+#
+# Why CI: the three binaries are NOT cross-compilable — a PyInstaller build must run on the OS it
+# targets. This matrix produces all three from a single push/tag/manual trigger and uploads them
+# as artifacts (and attaches them to a GitHub Release when the trigger is a tag).
+#
+# Trigger it manually from the Actions tab (workflow_dispatch), or push a tag like v1.2.0.
+name: desktop-build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # needed only for the release-upload step on tags
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: InfraMonitor-windows
+            # onefile exe (desktop/inframonitor.spec)
+            path: dist/InfraMonitor.exe
+          - os: ubuntu-latest
+            artifact: InfraMonitor-linux
+            path: dist/InfraMonitor
+          - os: macos-latest
+            artifact: InfraMonitor-macos
+            # BUNDLE step in the spec produces the .app on darwin
+            path: dist/Infra Monitor.app
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Linux Qt/WebEngine runtime libraries (PySide6 wheels bundle Qt itself, but it still needs
+      # these system .so's present to load at import time, which PyInstaller's analysis triggers).
+      - name: Install Linux Qt runtime libs
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0 libgl1 libglib2.0-0 \
+            libdbus-1-3 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libasound2t64 || \
+          sudo apt-get install -y libegl1 libxkbcommon0 libgl1 libglib2.0-0 \
+            libdbus-1-3 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libasound2
+
+      - name: Build static UI
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r desktop/requirements.txt
+
+      - name: Freeze with PyInstaller
+        run: pyinstaller desktop/inframonitor.spec --noconfirm
+
+      # Smoke-test the frozen backend headlessly (no display needed): boots uvicorn, hits /health.
+      # A windowed (console=False) exe detaches from the shell and its stdout is invisible, so
+      # wait on the process and confirm via the health-file marker the launcher drops.
+      - name: Smoke-test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          INFRAMONITOR_DESKTOP_HEADLESS: "1"
+          INFRAMONITOR_DESKTOP_HEALTHFILE: health.txt
+        run: |
+          $p = Start-Process -FilePath dist/InfraMonitor.exe -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); Write-Error "backend did not exit in time"; exit 1 }
+          if (-not (Test-Path health.txt)) { Write-Error "health marker not written"; exit 1 }
+          Get-Content health.txt
+
+      - name: Smoke-test (Linux/macOS)
+        if: runner.os != 'Windows'
+        env:
+          INFRAMONITOR_DESKTOP_HEADLESS: "1"
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            "dist/Infra Monitor.app/Contents/MacOS/InfraMonitor"
+          else
+            chmod +x dist/InfraMonitor
+            ./dist/InfraMonitor
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
+          if-no-files-found: error
+
+      # On a version tag, also attach the binaries to the GitHub Release.
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.path }}

@@ -1,8 +1,8 @@
 # Build InfraMonitor.exe (Windows). Run from the repo root:
 #     powershell -ExecutionPolicy Bypass -File desktop\build.ps1
 #
-# Produces dist\InfraMonitor\InfraMonitor.exe (onedir). Requires Python 3.12 (`py -3.12`) and
-# Node (for the one-time UI build). Docker is NOT involved.
+# Produces dist\InfraMonitor.exe (onefile). Requires Python 3.12 (`py -3.12`) and Node (for the
+# one-time UI build). Docker is NOT involved.
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -34,7 +34,7 @@ $py = ".\$venv\Scripts\python.exe"
 Write-Host "Freezing with PyInstaller..." -ForegroundColor Yellow
 & $py -m PyInstaller desktop\inframonitor.spec --noconfirm
 
-$exe = Join-Path $root "dist\InfraMonitor\InfraMonitor.exe"
+$exe = Join-Path $root "dist\InfraMonitor.exe"
 if (Test-Path $exe) {
     Write-Host "`nBuilt: $exe" -ForegroundColor Green
     Write-Host "Data (DB + secret) will live in %APPDATA%\InfraMonitor on first run."

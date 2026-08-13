@@ -1,0 +1,5 @@
+# Keep shell scripts and CI YAML LF-only: CRLF breaks a bash shebang on Linux/macOS and can
+# confuse some CI runners. These are checked out with LF even on Windows.
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
