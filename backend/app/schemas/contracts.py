@@ -469,6 +469,46 @@ class SftpDeleteResult(BaseModel):
     entries_removed: int = 0
 
 
+# --- database console (feature/db-connect) -------------------------------------------------
+#
+# A standalone connection to a PostgreSQL or MySQL database, not tied to a managed server.
+# Credentials are per-request only and never stored: every field is supplied by the caller on
+# each call, the backend opens a fresh connection, runs the work, and closes it.
+
+
+class DbConnectionRequest(BaseModel):
+    # engine is validated in the route against {"postgres","mysql"} so a bad value is a clean 400
+    # rather than a driver import error.
+    engine: str
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(ge=1, le=65535)
+    username: str = Field(default="", max_length=255)
+    password: str = Field(default="", max_length=1024)
+    database: str = Field(default="", max_length=255)
+
+
+class DbQueryRequest(DbConnectionRequest):
+    sql: str = Field(min_length=1, max_length=100_000)
+    # rows are capped at min(limit or 1000, 5000) in the route; None means "use the default".
+    limit: int | None = Field(default=None, ge=1)
+
+
+class DbConnectionResult(BaseModel):
+    ok: bool
+    message: str
+
+
+class DbQueryResult(BaseModel):
+    columns: list[str] = Field(default_factory=list)
+    # rows are lists (row-major), matching the columns order; cell values are JSON-safe scalars
+    # (str/int/float/bool/None) with anything else stringified by the route.
+    rows: list[list] = Field(default_factory=list)
+    row_count: int = 0
+    # true when the result was cut to the row cap, so the UI can say "showing first N".
+    truncated: bool = False
+    elapsed_ms: int = 0
+
+
 class OperationRequest(BaseModel):
     runtime: str = "docker"
     name: str

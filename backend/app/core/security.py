@@ -92,6 +92,15 @@ def require_admin_or_developer(claims: dict = Depends(require_user)) -> dict:
     return claims
 
 
+def require_user_not_guest(claims: dict = Depends(require_user)) -> dict:
+    # The database console connects out to arbitrary DBs with operator-supplied credentials, so it
+    # must be a real signed-in account. A desktop guest is admin for operating the local machine but
+    # is not an account and is blocked here, mirroring require_admin_not_guest.
+    if claims.get("guest"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not available in guest mode. Sign in to use the database console.")
+    return claims
+
+
 def require_admin_not_guest(claims: dict = Depends(require_admin)) -> dict:
     # A desktop guest is admin for operating servers but is not an account and must not touch the
     # RBAC system (users, policies). Sign in as a real admin for those.
