@@ -18,6 +18,7 @@ MENU_ITEMS: list[str] = [
     "servers",         # Server Management (/servers)
     "databases",       # Database console (/databases) — Postgres/MySQL query tool
     "shell",           # Shell launcher flyout (host SSH sessions)
+    "kubernetes",      # Kubernetes clusters (/kubernetes) — cluster nodes/pods/deployments
     "users",           # Users (/users)
     "policies",        # Server Policies (/policies)
     "administration",  # Administration group (server-type / environment master data)
@@ -35,8 +36,8 @@ ROLE_KEYS: list[str] = ["admin", "developer", "support", "guest"]
 # Sensible defaults that reproduce the sidebar's previous hardcoded behaviour, so seeding
 # the matrix (or falling back to it) changes nothing visible until an admin edits it.
 DEFAULT_ROLE_MENUS: dict[str, list[str]] = {
-    "admin": ["dashboard", "servers", "databases", "shell", "users", "policies", "administration", "access", "vault", "appdatabase", "appearance", "profile"],
-    "developer": ["dashboard", "servers", "databases", "profile"],
+    "admin": ["dashboard", "servers", "databases", "shell", "kubernetes", "users", "policies", "administration", "access", "vault", "appdatabase", "appearance", "profile"],
+    "developer": ["dashboard", "servers", "databases", "kubernetes", "profile"],
     "support": ["dashboard", "servers", "databases", "profile"],
     # guest is login-less and local-only: no database console (require_user_not_guest blocks it).
     "guest": ["dashboard", "servers", "shell", "appearance"],

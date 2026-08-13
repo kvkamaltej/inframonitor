@@ -26,7 +26,7 @@ from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_KEYS, ROLE_MENUS
 from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, require_user_not_guest, verify_password
 from app.services.secrets import VaultError, get_vault_config, load_credentials, save_vault_config, store_credentials, test_vault
 from app.services import db_backend
-from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
+from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
     AccessPolicyRead,
@@ -47,6 +47,20 @@ from app.schemas.contracts import (
     FolderCreate,
     FolderRead,
     IntegrationStatus,
+    ActionResult,
+    KubeClusterCreate,
+    KubeClusterRead,
+    KubeClusterUpdate,
+    KubeCordonRequest,
+    KubeDeployment,
+    KubeEvent,
+    KubeHealth,
+    KubeNode,
+    KubeOverview,
+    KubePod,
+    KubePodLogs,
+    KubeScaleRequest,
+    KubeTestResult,
     LoginRequest,
     LogResponse,
     MeResponse,
@@ -90,6 +104,8 @@ from app.schemas.contracts import (
 from app.services.csv_import import CsvImportError, import_servers
 from app.services.db_console import DEFAULT_PORTS, ENGINES, DbConsoleError
 from app.services import db_console
+from app.services import kube
+from app.services.kube import KubeError
 from app.services.integrations import check_integrations
 from app.services.inventory import InventoryService, to_read
 from app.services.validation import validate_host_address
@@ -2257,3 +2273,296 @@ def db_query(payload: DbQueryRequest, _: dict = Depends(require_user_not_guest))
         # console can display
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return DbQueryResult(**result)
+
+
+# --- kubernetes clusters (feature/kubernetes) ----------------------------------------------
+#
+# A saved Kubernetes cluster is persisted much like a Server: the API speaks in its public_id, its
+# credentials (a full kubeconfig YAML, or a bearer token) are encrypted at rest with the same
+# Fernet path, and the CA certificate is a public cert stored as plain text. `group` is a folder
+# NAME, resolved to a Folder exactly as servers are grouped. Writes are admin-only; the live reads
+# (nodes/pods/...) require a real signed-in user (require_user_not_guest, mirroring the DB console);
+# the mutating actions (restart/scale/cordon/delete) require a non-guest admin.
+
+_KUBE_AUTH_METHODS = {"kubeconfig", "token"}
+
+
+def _kube_auth_or_400(value: str) -> str:
+    method = (value or "").strip().lower()
+    if method not in _KUBE_AUTH_METHODS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="auth_method must be 'kubeconfig' or 'token'")
+    return method
+
+
+def _cluster_or_404(db: Session, cluster_id: str) -> KubeCluster:
+    cluster = db.scalar(select(KubeCluster).where(KubeCluster.public_id == cluster_id))
+    if not cluster and cluster_id.isdigit():
+        cluster = db.get(KubeCluster, int(cluster_id))
+    if not cluster:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+    return cluster
+
+
+def _resolve_group_to_folder_id(db: Session, group: str | None) -> int | None:
+    # group is a folder NAME. Match an existing folder case-insensitively; create one if absent so
+    # a cluster can be grouped in a single call, mirroring how folders are otherwise named buckets.
+    name = (group or "").strip()
+    if not name:
+        return None
+    folder = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower()))
+    if not folder:
+        folder = Folder(name=name, public_id=str(uuid.uuid4()))
+        db.add(folder)
+        db.flush()
+    return folder.id
+
+
+def _cluster_group_name(db: Session, cluster: KubeCluster) -> str | None:
+    if cluster.folder_id is None:
+        return None
+    folder = db.get(Folder, cluster.folder_id)
+    return folder.name if folder else None
+
+
+def _cluster_read(db: Session, cluster: KubeCluster) -> KubeClusterRead:
+    return KubeClusterRead(
+        id=cluster.public_id,
+        name=cluster.name,
+        api_server_url=cluster.api_server_url,
+        auth_method=cluster.auth_method,
+        verify_tls=bool(cluster.verify_tls),
+        default_namespace=cluster.default_namespace,
+        group=_cluster_group_name(db, cluster),
+        has_credentials=bool(cluster.encrypted_kubeconfig or cluster.encrypted_token),
+        created_at=cluster.created_at,
+    )
+
+
+def _cluster_conn(cluster: KubeCluster) -> dict:
+    # Decrypt the stored secrets just-in-time for a single service call.
+    return {
+        "auth_method": cluster.auth_method,
+        "api_server_url": cluster.api_server_url,
+        "kubeconfig": decrypt_secret(cluster.encrypted_kubeconfig),
+        "token": decrypt_secret(cluster.encrypted_token),
+        "ca_cert": cluster.ca_cert,
+        "verify_tls": bool(cluster.verify_tls),
+    }
+
+
+def _conn_from_create(payload: KubeClusterCreate) -> dict:
+    return {
+        "auth_method": _kube_auth_or_400(payload.auth_method),
+        "api_server_url": payload.api_server_url,
+        "kubeconfig": payload.kubeconfig,
+        "token": payload.token,
+        "ca_cert": payload.ca_cert,
+        "verify_tls": payload.verify_tls,
+    }
+
+
+@router.get("/kube/clusters", response_model=list[KubeClusterRead])
+def list_kube_clusters(_: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubeClusterRead]:
+    # Cheap: reads rows only, never probes a cluster.
+    clusters = db.scalars(select(KubeCluster).order_by(func.lower(KubeCluster.name))).all()
+    return [_cluster_read(db, cluster) for cluster in clusters]
+
+
+@router.post("/kube/clusters", response_model=KubeClusterRead, status_code=status.HTTP_201_CREATED)
+def create_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> KubeClusterRead:
+    method = _kube_auth_or_400(payload.auth_method)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cluster name is required")
+    cluster = KubeCluster(
+        public_id=str(uuid.uuid4()),
+        name=name,
+        auth_method=method,
+        api_server_url=payload.api_server_url.strip(),
+        encrypted_kubeconfig=encrypt_secret(payload.kubeconfig) if method == "kubeconfig" else "",
+        encrypted_token=encrypt_secret(payload.token) if method == "token" else "",
+        ca_cert=payload.ca_cert if method == "token" else "",
+        verify_tls=payload.verify_tls,
+        default_namespace=payload.default_namespace.strip(),
+        folder_id=_resolve_group_to_folder_id(db, payload.group),
+    )
+    db.add(cluster)
+    db.commit()
+    db.refresh(cluster)
+    return _cluster_read(db, cluster)
+
+
+@router.post("/kube/clusters/test", response_model=KubeTestResult)
+def test_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_admin)) -> KubeTestResult:
+    # Test the credentials as typed, without persisting anything. An unreachable cluster or bad
+    # credentials is an expected outcome, reported as ok=false with HTTP 200 (like the DB console).
+    conn = _conn_from_create(payload)
+    try:
+        version = kube.test_connection(conn)
+        where = payload.api_server_url.strip() or "cluster"
+        return KubeTestResult(ok=True, message=f"Connected to {where}", version=version)
+    except KubeError as exc:
+        return KubeTestResult(ok=False, message=str(exc))
+
+
+@router.get("/kube/clusters/{cluster_id}", response_model=KubeClusterRead)
+def get_kube_cluster(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> KubeClusterRead:
+    return _cluster_read(db, _cluster_or_404(db, cluster_id))
+
+
+@router.patch("/kube/clusters/{cluster_id}", response_model=KubeClusterRead)
+def update_kube_cluster(cluster_id: str, payload: KubeClusterUpdate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> KubeClusterRead:
+    cluster = _cluster_or_404(db, cluster_id)
+    data = payload.model_dump(exclude_unset=True)
+
+    if "auth_method" in data and data["auth_method"] is not None:
+        cluster.auth_method = _kube_auth_or_400(data["auth_method"])
+    if "name" in data and data["name"] is not None:
+        name = data["name"].strip()
+        if not name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cluster name cannot be empty")
+        cluster.name = name
+    if "api_server_url" in data and data["api_server_url"] is not None:
+        cluster.api_server_url = data["api_server_url"].strip()
+    if "default_namespace" in data and data["default_namespace"] is not None:
+        cluster.default_namespace = data["default_namespace"].strip()
+    if "verify_tls" in data and data["verify_tls"] is not None:
+        cluster.verify_tls = bool(data["verify_tls"])
+    if "ca_cert" in data and data["ca_cert"] is not None:
+        cluster.ca_cert = data["ca_cert"]
+    # secret fields: only overwrite when a non-empty value is supplied, so an edit that leaves the
+    # box blank keeps the stored credential instead of wiping it
+    if data.get("kubeconfig"):
+        cluster.encrypted_kubeconfig = encrypt_secret(data["kubeconfig"])
+    if data.get("token"):
+        cluster.encrypted_token = encrypt_secret(data["token"])
+    if "group" in data:
+        cluster.folder_id = _resolve_group_to_folder_id(db, data["group"])
+
+    db.commit()
+    db.refresh(cluster)
+    return _cluster_read(db, cluster)
+
+
+@router.delete("/kube/clusters/{cluster_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_kube_cluster(cluster_id: str, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> None:
+    cluster = _cluster_or_404(db, cluster_id)
+    db.delete(cluster)
+    db.commit()
+
+
+def _kube_call(func, *args):
+    # Shared wrapper for the live reads/actions: a KubeError (unreachable cluster, API error, bad
+    # credentials) is an expected outcome, surfaced as a 400 with a clean message, never a 500.
+    try:
+        return func(*args)
+    except KubeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/kube/clusters/{cluster_id}/overview", response_model=KubeOverview)
+def kube_overview(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> KubeOverview:
+    cluster = _cluster_or_404(db, cluster_id)
+    return KubeOverview(**_kube_call(kube.overview, _cluster_conn(cluster)))
+
+
+@router.get("/kube/clusters/{cluster_id}/nodes", response_model=list[KubeNode])
+def kube_nodes(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubeNode]:
+    cluster = _cluster_or_404(db, cluster_id)
+    nodes = _kube_call(kube.list_nodes, _cluster_conn(cluster))
+    # Link each node to a managed Server: primary match on internal IP, fallback on name==hostname
+    # or name==alias (case-insensitive), so the UI can deep-link a node to its SSH host.
+    servers = db.scalars(select(Server)).all()
+    by_ip: dict[str, Server] = {}
+    by_name: dict[str, Server] = {}
+    for server in servers:
+        if server.ip_address:
+            by_ip.setdefault(server.ip_address.strip().lower(), server)
+        if server.hostname:
+            by_name.setdefault(server.hostname.strip().lower(), server)
+        if server.alias:
+            by_name.setdefault(server.alias.strip().lower(), server)
+    for node in nodes:
+        ip = (node.get("internal_ip") or "").strip().lower()
+        match = by_ip.get(ip) if ip else None
+        if match is None:
+            match = by_name.get((node.get("name") or "").strip().lower())
+        if match is not None:
+            node["linked_server_id"] = match.public_id
+            node["linked_server_alias"] = match.alias or match.hostname
+    return [KubeNode(**node) for node in nodes]
+
+
+@router.get("/kube/clusters/{cluster_id}/namespaces", response_model=list[str])
+def kube_namespaces(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[str]:
+    cluster = _cluster_or_404(db, cluster_id)
+    return _kube_call(kube.list_namespaces, _cluster_conn(cluster))
+
+
+@router.get("/kube/clusters/{cluster_id}/pods", response_model=list[KubePod])
+def kube_pods(cluster_id: str, namespace: str = "", _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubePod]:
+    cluster = _cluster_or_404(db, cluster_id)
+    pods = _kube_call(kube.list_pods, _cluster_conn(cluster), namespace)
+    return [KubePod(**pod) for pod in pods]
+
+
+@router.get("/kube/clusters/{cluster_id}/pods/{namespace}/{pod}/logs", response_model=KubePodLogs)
+def kube_pod_logs(cluster_id: str, namespace: str, pod: str, container: str = "", tail: int = 200, previous: bool = False, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> KubePodLogs:
+    cluster = _cluster_or_404(db, cluster_id)
+    result = _kube_call(kube.pod_logs, _cluster_conn(cluster), namespace, pod, container, tail, previous)
+    return KubePodLogs(**result)
+
+
+@router.get("/kube/clusters/{cluster_id}/deployments", response_model=list[KubeDeployment])
+def kube_deployments(cluster_id: str, namespace: str = "", _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubeDeployment]:
+    cluster = _cluster_or_404(db, cluster_id)
+    deployments = _kube_call(kube.list_deployments, _cluster_conn(cluster), namespace)
+    return [KubeDeployment(**dep) for dep in deployments]
+
+
+@router.get("/kube/clusters/{cluster_id}/health", response_model=KubeHealth)
+def kube_health(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> KubeHealth:
+    cluster = _cluster_or_404(db, cluster_id)
+    return KubeHealth(**_kube_call(kube.health, _cluster_conn(cluster)))
+
+
+@router.get("/kube/clusters/{cluster_id}/events", response_model=list[KubeEvent])
+def kube_events(cluster_id: str, namespace: str = "", _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubeEvent]:
+    cluster = _cluster_or_404(db, cluster_id)
+    events = _kube_call(kube.list_events, _cluster_conn(cluster), namespace)
+    return [KubeEvent(**ev) for ev in events]
+
+
+@router.post("/kube/clusters/{cluster_id}/pods/{namespace}/{pod}/restart", response_model=ActionResult)
+def kube_restart_pod(cluster_id: str, namespace: str, pod: str, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
+    cluster = _cluster_or_404(db, cluster_id)
+    message = _kube_call(kube.restart_pod, _cluster_conn(cluster), namespace, pod)
+    return ActionResult(ok=True, message=message)
+
+
+@router.delete("/kube/clusters/{cluster_id}/pods/{namespace}/{pod}", response_model=ActionResult)
+def kube_delete_pod(cluster_id: str, namespace: str, pod: str, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
+    cluster = _cluster_or_404(db, cluster_id)
+    message = _kube_call(kube.delete_pod, _cluster_conn(cluster), namespace, pod)
+    return ActionResult(ok=True, message=message)
+
+
+@router.post("/kube/clusters/{cluster_id}/deployments/{namespace}/{name}/scale", response_model=ActionResult)
+def kube_scale_deployment(cluster_id: str, namespace: str, name: str, payload: KubeScaleRequest, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
+    cluster = _cluster_or_404(db, cluster_id)
+    message = _kube_call(kube.scale_deployment, _cluster_conn(cluster), namespace, name, payload.replicas)
+    return ActionResult(ok=True, message=message)
+
+
+@router.post("/kube/clusters/{cluster_id}/deployments/{namespace}/{name}/restart", response_model=ActionResult)
+def kube_restart_deployment(cluster_id: str, namespace: str, name: str, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
+    cluster = _cluster_or_404(db, cluster_id)
+    message = _kube_call(kube.restart_deployment, _cluster_conn(cluster), namespace, name)
+    return ActionResult(ok=True, message=message)
+
+
+@router.post("/kube/clusters/{cluster_id}/nodes/{name}/cordon", response_model=ActionResult)
+def kube_cordon_node(cluster_id: str, name: str, payload: KubeCordonRequest, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
+    cluster = _cluster_or_404(db, cluster_id)
+    message = _kube_call(kube.cordon_node, _cluster_conn(cluster), name, payload.cordon)
+    return ActionResult(ok=True, message=message)

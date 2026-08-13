@@ -971,3 +971,262 @@ export async function deleteShellFavorite(token: string, id: number): Promise<vo
   });
   if (!response.ok) throw new ApiError(response.status, await response.text());
 }
+
+// --- kubernetes (feature/kube-clusters) ----------------------------------------------------
+// A registry of Kubernetes clusters plus a read/act API over each one. Clusters are stored with
+// their credentials (kubeconfig or a bearer token + CA) server-side; the credential material is
+// write-only, so the read shape carries `has_credentials` instead of the secret. The overview /
+// nodes / pods / logs / health endpoints proxy read-only calls to the cluster's API server, and
+// the restart/scale/cordon endpoints perform the corresponding mutations (needs an RBAC role
+// that permits them). Blocked for desktop guests (403); sign in to use them.
+
+export type KubeCluster = {
+  id: string;
+  name: string;
+  api_server_url: string;
+  auth_method: "kubeconfig" | "token";
+  verify_tls: boolean;
+  default_namespace: string;
+  group: string | null;
+  // credentials are write-only: the API never echoes the kubeconfig/token back, so the read
+  // shape reports whether any are stored rather than the values themselves
+  has_credentials: boolean;
+  created_at: string;
+};
+
+export type KubeClusterInput = {
+  name: string;
+  api_server_url?: string;
+  auth_method: "kubeconfig" | "token";
+  kubeconfig?: string;
+  token?: string;
+  ca_cert?: string;
+  verify_tls?: boolean;
+  default_namespace?: string;
+  group?: string | null;
+};
+
+export type KubeTestResult = {
+  ok: boolean;
+  message: string;
+  version?: string;
+};
+
+export type KubeNode = {
+  name: string;
+  status: string;
+  roles: string[];
+  kubelet_version: string;
+  os_image: string;
+  internal_ip: string;
+  cpu_capacity: string;
+  memory_capacity: string;
+  cpu_allocatable: string;
+  memory_allocatable: string;
+  age: string;
+  schedulable: boolean;
+  conditions: { type: string; status: string }[];
+  // when the node maps to a monitored host in the inventory, the link back to it (else null)
+  linked_server_id: string | null;
+  linked_server_alias: string | null;
+};
+
+export type KubePod = {
+  name: string;
+  namespace: string;
+  phase: string;
+  ready: string;
+  restarts: number;
+  node: string;
+  pod_ip: string;
+  age: string;
+  containers: string[];
+};
+
+export type KubePodLogs = {
+  container: string;
+  log: string;
+  tail: number;
+};
+
+export type KubeDeployment = {
+  name: string;
+  namespace: string;
+  ready: string;
+  replicas: number;
+  available: number;
+  updated: number;
+  age: string;
+};
+
+export type KubeHealth = {
+  livez_ok: boolean;
+  readyz_ok: boolean;
+  readyz: { name: string; ok: boolean }[];
+  component_statuses: { name: string; healthy: boolean; message: string }[];
+  control_plane_pods: { name: string; namespace: string; phase: string; ready: boolean; restarts: number }[];
+  addons: { name: string; healthy: boolean; detail: string }[];
+};
+
+export type KubeEvent = {
+  type: string;
+  reason: string;
+  message: string;
+  object: string;
+  namespace: string;
+  count: number;
+  last_seen: string;
+};
+
+export type KubeOverview = {
+  version: string;
+  platform: string;
+  node_count: number;
+  nodes_ready: number;
+  namespace_count: number;
+  pod_count: number;
+  pods_by_phase: { Running: number; Pending: number; Failed: number; Succeeded: number; Unknown: number };
+  cpu_capacity: string;
+  memory_capacity: string;
+  health_ok: boolean;
+  warnings: KubeEvent[];
+};
+
+// Result of a mutating action (restart/scale/cordon/delete-pod). Same shape the backend returns
+// for each, so one type covers them all.
+export type ActionResult = {
+  ok: boolean;
+  message: string;
+};
+
+export async function getKubeClusters(token: string): Promise<KubeCluster[]> {
+  return request<KubeCluster[]>("/kube/clusters", token);
+}
+
+export async function getKubeCluster(token: string, id: string): Promise<KubeCluster> {
+  return request<KubeCluster>(`/kube/clusters/${encodeURIComponent(id)}`, token);
+}
+
+export async function createKubeCluster(token: string, payload: KubeClusterInput): Promise<KubeCluster> {
+  return request<KubeCluster>("/kube/clusters", token, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function updateKubeCluster(token: string, id: string, payload: Partial<KubeClusterInput>): Promise<KubeCluster> {
+  return request<KubeCluster>(`/kube/clusters/${encodeURIComponent(id)}`, token, { method: "PATCH", body: JSON.stringify(payload) });
+}
+
+export async function deleteKubeCluster(token: string, id: string): Promise<void> {
+  // 204 No Content, so request<T> is wrong here: response.json() throws on an empty body.
+  const response = await fetch(`${API_URL}/kube/clusters/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store"
+  });
+  if (!response.ok) throw new ApiError(response.status, await response.text());
+}
+
+// Probes connectivity/auth with the form's values (kubeconfig or url+token+ca) without storing
+// anything, so the user can validate before saving. A bad config comes back ok:false (or an
+// ApiError for a 4xx), both carrying a human-readable message.
+export async function testKubeCluster(token: string, payload: KubeClusterInput): Promise<KubeTestResult> {
+  return request<KubeTestResult>("/kube/clusters/test", token, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function getKubeOverview(token: string, id: string): Promise<KubeOverview> {
+  return request<KubeOverview>(`/kube/clusters/${encodeURIComponent(id)}/overview`, token);
+}
+
+export async function getKubeNodes(token: string, id: string): Promise<KubeNode[]> {
+  return request<KubeNode[]>(`/kube/clusters/${encodeURIComponent(id)}/nodes`, token);
+}
+
+export async function getKubeNamespaces(token: string, id: string): Promise<string[]> {
+  return request<string[]>(`/kube/clusters/${encodeURIComponent(id)}/namespaces`, token);
+}
+
+// An absent/empty namespace means "all namespaces" (the backend defaults accordingly); a value
+// scopes the listing to that namespace.
+export async function getKubePods(token: string, id: string, namespace?: string): Promise<KubePod[]> {
+  const query = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+  return request<KubePod[]>(`/kube/clusters/${encodeURIComponent(id)}/pods${query}`, token);
+}
+
+export async function getKubePodLogs(
+  token: string,
+  id: string,
+  namespace: string,
+  pod: string,
+  opts?: { container?: string; tail?: number; previous?: boolean }
+): Promise<KubePodLogs> {
+  const params = new URLSearchParams();
+  if (opts?.container) params.set("container", opts.container);
+  if (opts?.tail != null) params.set("tail", String(opts.tail));
+  if (opts?.previous) params.set("previous", "true");
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<KubePodLogs>(
+    `/kube/clusters/${encodeURIComponent(id)}/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(pod)}/logs${query}`,
+    token
+  );
+}
+
+export async function getKubeDeployments(token: string, id: string, namespace?: string): Promise<KubeDeployment[]> {
+  const query = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+  return request<KubeDeployment[]>(`/kube/clusters/${encodeURIComponent(id)}/deployments${query}`, token);
+}
+
+export async function getKubeHealth(token: string, id: string): Promise<KubeHealth> {
+  return request<KubeHealth>(`/kube/clusters/${encodeURIComponent(id)}/health`, token);
+}
+
+export async function getKubeEvents(token: string, id: string, namespace?: string): Promise<KubeEvent[]> {
+  const query = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+  return request<KubeEvent[]>(`/kube/clusters/${encodeURIComponent(id)}/events${query}`, token);
+}
+
+export async function restartKubePod(token: string, id: string, namespace: string, pod: string): Promise<ActionResult> {
+  return request<ActionResult>(
+    `/kube/clusters/${encodeURIComponent(id)}/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(pod)}/restart`,
+    token,
+    { method: "POST" }
+  );
+}
+
+export async function deleteKubePod(token: string, id: string, namespace: string, pod: string): Promise<ActionResult> {
+  // Unlike the cluster delete, this endpoint returns a JSON ActionResult body, so request<T> is
+  // the right helper here.
+  return request<ActionResult>(
+    `/kube/clusters/${encodeURIComponent(id)}/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(pod)}`,
+    token,
+    { method: "DELETE" }
+  );
+}
+
+export async function scaleKubeDeployment(
+  token: string,
+  id: string,
+  namespace: string,
+  name: string,
+  replicas: number
+): Promise<ActionResult> {
+  return request<ActionResult>(
+    `/kube/clusters/${encodeURIComponent(id)}/deployments/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/scale`,
+    token,
+    { method: "POST", body: JSON.stringify({ replicas }) }
+  );
+}
+
+export async function restartKubeDeployment(token: string, id: string, namespace: string, name: string): Promise<ActionResult> {
+  return request<ActionResult>(
+    `/kube/clusters/${encodeURIComponent(id)}/deployments/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/restart`,
+    token,
+    { method: "POST" }
+  );
+}
+
+export async function cordonKubeNode(token: string, id: string, name: string, cordon: boolean): Promise<ActionResult> {
+  return request<ActionResult>(
+    `/kube/clusters/${encodeURIComponent(id)}/nodes/${encodeURIComponent(name)}/cordon`,
+    token,
+    { method: "POST", body: JSON.stringify({ cordon }) }
+  );
+}

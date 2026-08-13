@@ -50,7 +50,15 @@ hiddenimports = [
 
 hiddenimports += collect_submodules("app")
 
-for pkg in ("cryptography", "paramiko", "bcrypt", "nacl", "cffi", "pydantic", "psycopg", "pymysql", "hvac", "requests"):
+# The kubernetes client and its runtime deps are imported lazily inside app.services.kube (so
+# boot never needs them), which means PyInstaller's static analysis won't see them -- collect
+# them explicitly. yaml (kubeconfig parsing), google-auth (gcp auth-provider kubeconfigs),
+# python-dateutil/six, oauthlib/requests-oauthlib, and websocket-client (exec/attach streams)
+# are the kubernetes client's own transitive requirements.
+for pkg in (
+    "cryptography", "paramiko", "bcrypt", "nacl", "cffi", "pydantic", "psycopg", "pymysql", "hvac", "requests",
+    "kubernetes", "yaml", "google", "dateutil", "six", "oauthlib", "requests_oauthlib", "websocket",
+):
     pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
     datas += pkg_datas
     binaries += pkg_binaries

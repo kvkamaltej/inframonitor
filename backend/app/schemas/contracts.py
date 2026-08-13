@@ -591,3 +591,194 @@ class AppDbMigrateResult(BaseModel):
     tables: dict[str, int] = Field(default_factory=dict)
     # always true on success: the running process keeps using the old engine until it restarts.
     restart_required: bool = False
+
+
+# --- kubernetes (feature/kubernetes) -------------------------------------------------------
+#
+# A saved Kubernetes cluster connection plus the live read/action shapes. Credentials (kubeconfig
+# YAML or bearer token) are write-only: they are supplied on create/update and encrypted at rest,
+# and no read model ever echoes them back -- KubeClusterRead exposes has_credentials instead. The
+# CA certificate is a public cert; it is accepted here but likewise not echoed. `group` is a folder
+# NAME (resolved to a Folder, mirroring how servers are grouped); every id on the wire is a public_id.
+
+
+class KubeClusterCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    api_server_url: str = Field(default="", max_length=512)
+    # kubeconfig | token -- validated in the route so a bad value is a clean 400.
+    auth_method: str = "kubeconfig"
+    # write-only secrets: full kubeconfig YAML, or a bearer token (+ optional CA PEM).
+    kubeconfig: str = ""
+    token: str = ""
+    ca_cert: str = ""
+    verify_tls: bool = True
+    default_namespace: str = Field(default="", max_length=255)
+    # folder name (the "group"); resolved to an existing Folder in the route, else left unassigned.
+    group: str | None = None
+
+
+class KubeClusterUpdate(BaseModel):
+    # Every field optional: a PATCH sends only what changed. Secret fields (kubeconfig, token,
+    # ca_cert) are only applied when a non-empty value is sent, so an edit that leaves them blank
+    # keeps the stored credentials rather than wiping them.
+    name: str | None = None
+    api_server_url: str | None = None
+    auth_method: str | None = None
+    kubeconfig: str | None = None
+    token: str | None = None
+    ca_cert: str | None = None
+    verify_tls: bool | None = None
+    default_namespace: str | None = None
+    group: str | None = None
+
+
+class KubeClusterRead(BaseModel):
+    # id is the cluster's public_id (a uuid string), never the autoincrement primary key. Secrets
+    # are never present; has_credentials tells the UI whether a kubeconfig or token is stored.
+    id: str
+    name: str
+    api_server_url: str = ""
+    auth_method: str
+    verify_tls: bool = True
+    default_namespace: str = ""
+    group: str | None = None
+    has_credentials: bool = False
+    created_at: datetime
+
+
+class KubeTestResult(BaseModel):
+    ok: bool
+    message: str
+    version: str = ""
+
+
+class KubeNodeCondition(BaseModel):
+    type: str
+    status: str
+
+
+class KubeNode(BaseModel):
+    name: str
+    status: str = ""  # "Ready" | "NotReady" | other
+    roles: list[str] = Field(default_factory=list)
+    kubelet_version: str = ""
+    os_image: str = ""
+    internal_ip: str = ""
+    cpu_capacity: str = ""
+    memory_capacity: str = ""
+    cpu_allocatable: str = ""
+    memory_allocatable: str = ""
+    age: str = ""
+    schedulable: bool = True
+    conditions: list[KubeNodeCondition] = Field(default_factory=list)
+    # SSH linkage: when a managed Server matches this node (by internal IP, else name/alias),
+    # its public_id + display label are attached so the UI can deep-link node -> server.
+    linked_server_id: str | None = None
+    linked_server_alias: str | None = None
+
+
+class KubePod(BaseModel):
+    name: str
+    namespace: str = ""
+    phase: str = ""
+    ready: str = ""  # "1/1"
+    restarts: int = 0
+    node: str = ""
+    pod_ip: str = ""
+    age: str = ""
+    containers: list[str] = Field(default_factory=list)
+
+
+class KubePodLogs(BaseModel):
+    container: str = ""
+    log: str = ""
+    tail: int = 0
+
+
+class KubeDeployment(BaseModel):
+    name: str
+    namespace: str = ""
+    ready: str = ""  # "2/3"
+    replicas: int = 0
+    available: int = 0
+    updated: int = 0
+    age: str = ""
+
+
+class KubeReadyzCheck(BaseModel):
+    name: str
+    ok: bool
+
+
+class KubeComponentStatus(BaseModel):
+    name: str
+    healthy: bool
+    message: str = ""
+
+
+class KubeControlPlanePod(BaseModel):
+    name: str
+    namespace: str = ""
+    phase: str = ""
+    ready: bool = False
+    restarts: int = 0
+
+
+class KubeAddon(BaseModel):
+    name: str
+    healthy: bool
+    detail: str = ""
+
+
+class KubeHealth(BaseModel):
+    livez_ok: bool = False
+    readyz_ok: bool = False
+    readyz: list[KubeReadyzCheck] = Field(default_factory=list)
+    component_statuses: list[KubeComponentStatus] = Field(default_factory=list)
+    control_plane_pods: list[KubeControlPlanePod] = Field(default_factory=list)
+    addons: list[KubeAddon] = Field(default_factory=list)
+
+
+class KubeEvent(BaseModel):
+    type: str = ""  # "Normal" | "Warning"
+    reason: str = ""
+    message: str = ""
+    object: str = ""
+    namespace: str = ""
+    count: int = 0
+    last_seen: str = ""
+
+
+class KubePodsByPhase(BaseModel):
+    Running: int = 0
+    Pending: int = 0
+    Failed: int = 0
+    Succeeded: int = 0
+    Unknown: int = 0
+
+
+class KubeOverview(BaseModel):
+    version: str = ""
+    platform: str = ""
+    node_count: int = 0
+    nodes_ready: int = 0
+    namespace_count: int = 0
+    pod_count: int = 0
+    pods_by_phase: KubePodsByPhase = Field(default_factory=KubePodsByPhase)
+    cpu_capacity: str = ""
+    memory_capacity: str = ""
+    health_ok: bool = False
+    warnings: list[KubeEvent] = Field(default_factory=list)
+
+
+class KubeScaleRequest(BaseModel):
+    replicas: int = Field(ge=0, le=1000)
+
+
+class KubeCordonRequest(BaseModel):
+    cordon: bool = True
+
+
+class ActionResult(BaseModel):
+    ok: bool
+    message: str

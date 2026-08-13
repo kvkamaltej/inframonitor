@@ -18,6 +18,10 @@ hvac==2.3.0
 psycopg[binary]==3.2.3
 # Database console (feature/db-connect): MySQL driver. psycopg above already covers PostgreSQL.
 pymysql==1.1.1
+# Kubernetes clusters (feature/kubernetes): official client for the live cluster reads/actions.
+# Imported lazily inside app/services/kube.py, so the lite profile only needs it when the feature
+# is used; PyYAML (already pulled in) parses pasted kubeconfig YAML.
+kubernetes==31.0.0
 prometheus-client==0.21.1
 python-multipart==0.0.20
 pytest==8.3.4

@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import DateTime, Enum as SqlEnum, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -186,6 +186,31 @@ class UserPolicyAssignment(Base):
 
     user: Mapped[User] = relationship(back_populates="policy_assignments")
     policy: Mapped[AccessPolicy] = relationship(back_populates="assignments")
+
+
+class KubeCluster(Base):
+    # A saved Kubernetes cluster connection. Like Server, the API and every URL speak in the
+    # public_id (a uuid string), never the autoincrement id. Credentials are encrypted at rest
+    # with the same Fernet path the Server model uses (app.core.crypto); the CA certificate is a
+    # PUBLIC cert and is stored as plain text. A cluster may sit in a Folder (the "group"), exactly
+    # like a server, or be unassigned (folder_id NULL).
+    __tablename__ = "kube_clusters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    public_id: Mapped[str] = mapped_column(String(36), unique=True, index=True, default="")
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    # kubeconfig | token -- how the client authenticates. With "kubeconfig" the pasted YAML holds
+    # the server URL and credentials; with "token" the api_server_url + bearer token + CA are used.
+    auth_method: Mapped[str] = mapped_column(String(32), default="kubeconfig")
+    api_server_url: Mapped[str] = mapped_column(String(512), default="")
+    encrypted_kubeconfig: Mapped[str] = mapped_column(Text, default="")
+    encrypted_token: Mapped[str] = mapped_column(Text, default="")
+    # PEM CA bundle -- a public certificate, so stored verbatim (not encrypted).
+    ca_cert: Mapped[str] = mapped_column(Text, default="")
+    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
+    default_namespace: Mapped[str] = mapped_column(String(255), default="")
+    folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ShellFavorite(Base):

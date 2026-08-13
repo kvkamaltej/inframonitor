@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, SlidersHorizontal, Sun, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
+import { Boxes, ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, SlidersHorizontal, Sun, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getFolders, getServers, Folder as FolderType, Server as ServerRow } from "@/lib/api";
@@ -13,7 +13,7 @@ import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT, resolveInitialTheme, themeMeta
 // and appearance but no account pages, and developer/support get the read-only pages.
 function fallbackMenus(role?: string, guest?: boolean): string[] {
   if (guest) return ["dashboard", "servers", "shell", "appearance"];
-  if (role === "admin") return ["dashboard", "servers", "shell", "users", "policies", "administration", "access", "appdatabase", "appearance", "profile"];
+  if (role === "admin") return ["dashboard", "servers", "shell", "kubernetes", "users", "policies", "administration", "access", "appdatabase", "appearance", "profile"];
   return ["dashboard", "servers", "profile"];
 }
 
@@ -177,6 +177,9 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
           {/* Database console (feature/db-connect): gated through the role->menu matrix; the
               backend also blocks guests (require_user_not_guest -> 403). */}
           {allowed.has("databases") && <NavItem href="/databases" icon={Database} label="Databases" />}
+          {/* Kubernetes clusters (feature/kube-clusters): gated through the role->menu matrix; the
+              backend also blocks guests (require_user_not_guest -> 403). */}
+          {allowed.has("kubernetes") && <NavItem href="/kubernetes" icon={Boxes} label="Kubernetes" />}
           {/* EXPERIMENTAL (feature/server-folders): the Shell launcher. It is a button, not a
               route — it opens a flyout of hosts grouped by folder. Collapsing the sidebar first
               would hide the flyout's anchor, so opening it also opens the rail. */}
