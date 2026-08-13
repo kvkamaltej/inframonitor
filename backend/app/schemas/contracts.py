@@ -394,6 +394,29 @@ class RoleMenusUpdate(BaseModel):
     menus: dict[str, list[str]] = Field(default_factory=dict)
 
 
+class VaultConfigRead(BaseModel):
+    # The token is never echoed back; token_set tells the UI whether one is stored.
+    enabled: bool
+    address: str
+    kv_mount: str
+    path_prefix: str
+    token_set: bool
+
+
+class VaultConfigWrite(BaseModel):
+    enabled: bool = False
+    address: str = ""
+    kv_mount: str = "secret"
+    path_prefix: str = "inframonitor"
+    # Write-only. Omitted or empty -> keep the stored token; a non-empty value replaces it.
+    token: str = ""
+
+
+class VaultTestResult(BaseModel):
+    ok: bool
+    message: str
+
+
 class ShellFavoriteRead(BaseModel):
     id: int
     name: str

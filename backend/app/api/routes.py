@@ -24,6 +24,7 @@ from app.core.database import SessionLocal, get_db
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_KEYS, ROLE_MENUS_KEY, menus_for_role
 from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, require_user_not_guest, verify_password
+from app.services.secrets import VaultError, get_vault_config, load_credentials, save_vault_config, store_credentials, test_vault
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
@@ -75,6 +76,9 @@ from app.schemas.contracts import (
     UserCreate,
     UserRead,
     UserServerAccessRead,
+    VaultConfigRead,
+    VaultConfigWrite,
+    VaultTestResult,
     WarDeployResult,
 )
 from app.services.csv_import import CsvImportError, import_servers
@@ -516,6 +520,62 @@ def remove_application_type(value: str, _: dict = Depends(require_admin), db: Se
     return get_options(_, db)
 
 
+# --- Vault secrets backend (feature/vault-secrets) -----------------------------------------
+#
+# Admin-only configuration for using HashiCorp Vault as the store for SSH credentials. All three
+# endpoints are require_admin_not_guest: a desktop guest operates the local machine's DB but is
+# not an account and must not touch a shared secrets backend. The token is sensitive, so GET
+# never echoes it back (it returns token_set instead) and PUT only overwrites it when a non-empty
+# token is supplied. When Vault stays disabled (the default) credentials keep using local Fernet.
+
+
+def _vault_config_read(cfg) -> VaultConfigRead:
+    return VaultConfigRead(
+        enabled=cfg.enabled,
+        address=cfg.address,
+        kv_mount=cfg.kv_mount,
+        path_prefix=cfg.path_prefix,
+        token_set=cfg.token_set,
+    )
+
+
+@router.get("/settings/vault", response_model=VaultConfigRead)
+def get_vault_settings(_: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> VaultConfigRead:
+    return _vault_config_read(get_vault_config(db))
+
+
+@router.put("/settings/vault", response_model=VaultConfigRead)
+def update_vault_settings(payload: VaultConfigWrite, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> VaultConfigRead:
+    cfg = save_vault_config(
+        db,
+        enabled=payload.enabled,
+        address=payload.address,
+        kv_mount=payload.kv_mount,
+        path_prefix=payload.path_prefix,
+        # empty string -> keep the stored token; save_vault_config treats falsy as "unchanged"
+        token=payload.token,
+    )
+    return _vault_config_read(cfg)
+
+
+@router.post("/settings/vault/test", response_model=VaultTestResult)
+def test_vault_settings(payload: VaultConfigWrite, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> VaultTestResult:
+    # Test the config as typed in the form without persisting it: use the posted fields, but fall
+    # back to the stored token when the form's token box was left blank (the UI never re-shows it).
+    stored = get_vault_config(db)
+    from app.services.secrets import VaultConfig
+
+    candidate = VaultConfig(
+        enabled=payload.enabled,
+        address=(payload.address or "").strip(),
+        token=payload.token or stored.token,
+        kv_mount=(payload.kv_mount or "").strip() or "secret",
+        path_prefix=((payload.path_prefix or "").strip().strip("/") or "inframonitor"),
+    )
+    ok, message = test_vault(candidate)
+    return VaultTestResult(ok=ok, message=message)
+
+
 # --- folders (EXPERIMENTAL: feature/server-folders) ----------------------------------------
 #
 # A folder is an optional, flat grouping over servers -- "BH", "MH", "EMS" and the like. There
@@ -647,12 +707,12 @@ def create_server(payload: ServerCreate, _: dict = Depends(require_admin), db: S
     created = InventoryService(db).create_server(payload)
     server = db.scalar(select(Server).where(Server.public_id == created.id))
     if server and (payload.password or payload.private_key):
-        _save_credentials(server, CredentialPayload(password=payload.password, private_key=payload.private_key))
+        _save_credentials(db, server,CredentialPayload(password=payload.password, private_key=payload.private_key))
         db.commit()
     if payload.password or payload.private_key:
         if server:
             try:
-                _apply_discovery(db, server, _credentials_for(server, CredentialPayload()))
+                _apply_discovery(db, server, _credentials_for(db, server,CredentialPayload()))
             except SshOperationError as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Server saved, but discovery failed: {exc}") from exc
             db.refresh(server)
@@ -674,18 +734,23 @@ def get_server(server_id: str, claims: dict = Depends(require_user), db: Session
     return to_read(server)
 
 
-def _save_credentials(server: Server, credentials: CredentialPayload) -> None:
-    if credentials.password:
-        server.encrypted_password = encrypt_secret(credentials.password)
-    if credentials.private_key:
-        server.encrypted_private_key = encrypt_secret(credentials.private_key)
+def _save_credentials(db: Session, server: Server, credentials: CredentialPayload) -> None:
+    # Routes through the secrets abstraction: Vault when enabled+reachable, else the local
+    # Fernet path (the default, unchanged). A Vault outage raises VaultError before any DB
+    # column is touched, so it surfaces as a clear error instead of corrupting stored data.
+    try:
+        store_credentials(db, server, credentials.password, credentials.private_key)
+    except VaultError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Vault error: {exc}") from exc
 
 
-def _credentials_for(server: Server, provided: CredentialPayload | None) -> CredentialPayload:
+def _credentials_for(db: Session, server: Server, provided: CredentialPayload | None) -> CredentialPayload:
     if provided and (provided.password or provided.private_key):
         return provided
-    password = decrypt_secret(server.encrypted_password)
-    private_key = decrypt_secret(server.encrypted_private_key)
+    try:
+        password, private_key = load_credentials(db, server)
+    except VaultError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Vault error: {exc}") from exc
     if not password and not private_key:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No stored credentials for this server. Ask an admin to save credentials.")
     return CredentialPayload(password=password, private_key=private_key, tail=provided.tail if provided else 200)
@@ -963,7 +1028,7 @@ def update_server(server_id: str, payload: ServerUpdate, _: dict = Depends(requi
 @router.put("/servers/{server_id}/credentials", response_model=ConnectionResult)
 def update_credentials(server_id: str, credentials: CredentialPayload, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> ConnectionResult:
     server = _server_or_404(db, server_id)
-    _save_credentials(server, credentials)
+    _save_credentials(db, server,credentials)
     db.commit()
     return ConnectionResult(ok=True, message="Credentials saved encrypted")
 
@@ -983,9 +1048,9 @@ def discover(server_id: str, credentials: CredentialPayload, _: dict = Depends(r
     server = _server_or_404(db, server_id)
     try:
         if credentials.password or credentials.private_key:
-            _save_credentials(server, credentials)
+            _save_credentials(db, server,credentials)
             db.commit()
-        _apply_discovery(db, server, _credentials_for(server, credentials))
+        _apply_discovery(db, server, _credentials_for(db, server,credentials))
         return ConnectionResult(ok=True, message="Discovery completed")
     except SshOperationError as exc:
         return ConnectionResult(ok=False, message=str(exc))
@@ -997,7 +1062,7 @@ def containers(server_id: str, runtime: str, credentials: CredentialPayload, cla
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Runtime must be docker or podman")
     server = _server_or_404(db, server_id, claims)
     try:
-        return list_containers_with_ports(server, _credentials_for(server, credentials), runtime)
+        return list_containers_with_ports(server, _credentials_for(db, server,credentials), runtime)
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1008,7 +1073,7 @@ def logs(server_id: str, runtime: str, container: str, credentials: CredentialPa
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Runtime must be docker or podman")
     server = _server_or_404(db, server_id, claims)
     try:
-        effective = _credentials_for(server, credentials)
+        effective = _credentials_for(db, server,credentials)
         return LogResponse(runtime=runtime, container=container, lines=container_logs(server, effective, runtime, container, effective.tail))
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -1020,7 +1085,7 @@ def container_env(server_id: str, runtime: str, container: str, credentials: Cre
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Runtime must be docker or podman")
     server = _server_or_404(db, server_id, claims)
     try:
-        lines = container_env_file(server, _credentials_for(server, credentials), runtime, container)
+        lines = container_env_file(server, _credentials_for(db, server,credentials), runtime, container)
         return LogResponse(runtime=runtime, container=container, lines=lines)
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -1031,7 +1096,7 @@ def service_log(server_id: str, payload: ServiceLogRequest, claims: dict = Depen
     server = _server_or_404(db, server_id, claims)
     target = _validated_log_target(server, payload.source, payload.name_or_path)
     try:
-        effective = _credentials_for(server, CredentialPayload())
+        effective = _credentials_for(db, server,CredentialPayload())
         return LogResponse(runtime=payload.source, container=target, lines=service_logs(server, effective, payload.source, target, payload.tail))
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -1041,7 +1106,7 @@ def service_log(server_id: str, payload: ServiceLogRequest, claims: dict = Depen
 def tomcat_instances(server_id: str, credentials: CredentialPayload, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[TomcatInstance]:
     server = _server_or_404(db, server_id, claims)
     try:
-        instances = discover_tomcat(server, _credentials_for(server, credentials))
+        instances = discover_tomcat(server, _credentials_for(db, server,credentials))
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     server.tomcat_json = json.dumps(instances)
@@ -1054,7 +1119,7 @@ def tomcat_log(server_id: str, payload: TomcatLogRequest, claims: dict = Depends
     server = _server_or_404(db, server_id, claims)
     target = _validated_log_target(server, "file", payload.log_file)
     try:
-        effective = _credentials_for(server, CredentialPayload())
+        effective = _credentials_for(db, server,CredentialPayload())
         return LogResponse(runtime="tomcat", container=target, lines=tomcat_logs(server, effective, target, payload.tail))
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -1070,7 +1135,7 @@ def tomcat_action_api(server_id: str, payload: TomcatActionRequest, claims: dict
     if not instance:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tomcat instance is required")
     try:
-        output = tomcat_action(server, _credentials_for(server, CredentialPayload()), instance, action, payload.sudo_password)
+        output = tomcat_action(server, _credentials_for(db, server,CredentialPayload()), instance, action, payload.sudo_password)
     except SudoPasswordRequired:
         return _sudo_prompt(server)
     except SshOperationError as exc:
@@ -1134,7 +1199,7 @@ def _tomcat_instance_or_404(db: Session, server: Server, instance: str) -> dict:
     if match is None:
         # nothing persisted for this instance yet -- probe once, then it is a genuine 404
         try:
-            instances = discover_tomcat(server, _credentials_for(server, CredentialPayload()))
+            instances = discover_tomcat(server, _credentials_for(db, server,CredentialPayload()))
         except SshOperationError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         # only persist a probe that actually saw something: overwriting with an empty list would
@@ -1231,7 +1296,7 @@ def tomcat_deploy_war(
             detail="Uploaded file is not a WAR: it does not start with the ZIP magic PK\\x03\\x04",
         )
 
-    credentials = _credentials_for(server, CredentialPayload())
+    credentials = _credentials_for(db, server,CredentialPayload())
     try:
         result = deploy_war(server, credentials, target_dir, war_name, data, sudo_password)
     except SudoPasswordRequired:
@@ -1286,7 +1351,7 @@ def tomcat_deploy_war(
 def restart_container_api(server_id: str, payload: OperationRequest, claims: dict = Depends(require_admin_or_developer), db: Session = Depends(get_db)) -> ConnectionResult:
     server = _server_or_404(db, server_id, claims)
     try:
-        result = restart_container(server, _credentials_for(server, CredentialPayload()), payload.runtime, payload.name)
+        result = restart_container(server, _credentials_for(db, server,CredentialPayload()), payload.runtime, payload.name)
         return ConnectionResult(ok=True, message=f"Restarted {result or payload.name}")
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -1296,7 +1361,7 @@ def restart_container_api(server_id: str, payload: OperationRequest, claims: dic
 def restart_service_api(server_id: str, payload: ServiceRestartRequest, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> PrivilegedOperationResult:
     server = _server_or_404(db, server_id)
     try:
-        result = restart_service(server, _credentials_for(server, CredentialPayload()), payload.name, payload.sudo_password)
+        result = restart_service(server, _credentials_for(db, server,CredentialPayload()), payload.name, payload.sudo_password)
     except SudoPasswordRequired:
         return _sudo_prompt(server)
     except SshOperationError as exc:
@@ -1446,7 +1511,7 @@ def recent_alerts(_: dict = Depends(require_user)) -> AlertBufferResponse:
 def refresh_vitals(server_id: str, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> ServerRead:
     server = _server_or_404(db, server_id, claims)
     try:
-        _apply_vitals(server, probe_vitals(server, _credentials_for(server, CredentialPayload())))
+        _apply_vitals(server, probe_vitals(server, _credentials_for(db, server,CredentialPayload())))
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     db.commit()
@@ -1588,7 +1653,7 @@ async def server_shell(websocket: WebSocket, server_id: str) -> None:
     try:
         try:
             server = _server_or_404(db, server_id, claims)
-            credentials = _credentials_for(server, CredentialPayload())
+            credentials = _credentials_for(db, server,CredentialPayload())
         except HTTPException as exc:
             await websocket.close(code=4404, reason=str(exc.detail)[:110])
             return
@@ -1826,7 +1891,7 @@ def sftp_list_api(
     server = _server_or_404(db, server_id, claims)
     target = _sftp_path(path, required=False)
     try:
-        listing = sftp_list(server, _credentials_for(server, CredentialPayload()), target)
+        listing = sftp_list(server, _credentials_for(db, server,CredentialPayload()), target)
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     # deliberately not audited: a listing moves no data off the host, and a row per navigation
@@ -1844,7 +1909,7 @@ def sftp_download_api(
     server = _server_or_404(db, server_id, claims)
     target = _sftp_path(path, required=True)
     limit = _max_download_bytes()
-    credentials = _credentials_for(server, CredentialPayload())
+    credentials = _credentials_for(db, server,CredentialPayload())
     try:
         info = sftp_stat(server, credentials, target)
     except SshOperationError as exc:
@@ -1900,7 +1965,7 @@ def sftp_upload_api(
     if not data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
     try:
-        result = sftp_upload(server, _credentials_for(server, CredentialPayload()), target_dir, name, data)
+        result = sftp_upload(server, _credentials_for(db, server,CredentialPayload()), target_dir, name, data)
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     written = _deploy_int(result, "bytes_written", len(data))
@@ -1933,7 +1998,7 @@ def sftp_delete_api(
     server = _server_or_404(db, server_id, claims)
     target = _sftp_path(payload.path, required=True)
     try:
-        result = sftp_delete(server, _credentials_for(server, CredentialPayload()), target, recursive=payload.recursive)
+        result = sftp_delete(server, _credentials_for(db, server,CredentialPayload()), target, recursive=payload.recursive)
     except SshOperationError as exc:
         # 400 with the message intact, never a rewritten one. Everything ssh_ops refuses arrives
         # this way -- a directory without recursive=True, a shallow recursive target like /etc,

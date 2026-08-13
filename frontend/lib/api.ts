@@ -247,6 +247,31 @@ export type OptionList = {
   application_types: string[];
 };
 
+// Vault secrets backend config. The token is write-only: the API never echoes it back, so the
+// read shape carries a `token_set` boolean instead of the value. On save, an empty `token` keeps
+// whatever is already stored (the UI never re-shows the token, so a blank box means "unchanged").
+export type VaultConfig = {
+  enabled: boolean;
+  address: string;
+  kv_mount: string;
+  path_prefix: string;
+  token_set: boolean;
+};
+
+export type VaultConfigWrite = {
+  enabled: boolean;
+  address: string;
+  kv_mount: string;
+  path_prefix: string;
+  // omit or leave empty to keep the stored token; a non-empty value replaces it
+  token?: string;
+};
+
+export type VaultTestResult = {
+  ok: boolean;
+  message: string;
+};
+
 export type SftpEntryType = "file" | "dir" | "link";
 
 export type SftpEntry = {
@@ -420,6 +445,24 @@ export async function removeServerType(token: string, value: string): Promise<Op
 
 export async function removeApplicationType(token: string, value: string): Promise<OptionList> {
   return request<OptionList>(`/settings/application-types/${encodeURIComponent(value)}`, token, { method: "DELETE" });
+}
+
+// --- Vault secrets backend (feature/vault-secrets) -----------------------------------------
+// Admin-only (require_admin_not_guest on the backend). getVaultConfig never carries the token;
+// saveVaultConfig only replaces the token when a non-empty one is supplied; testVault probes
+// connectivity/auth with the form's values (falling back to the stored token when the box is
+// left blank) without persisting anything.
+
+export async function getVaultConfig(token: string): Promise<VaultConfig> {
+  return request<VaultConfig>("/settings/vault", token);
+}
+
+export async function saveVaultConfig(token: string, payload: VaultConfigWrite): Promise<VaultConfig> {
+  return request<VaultConfig>("/settings/vault", token, { method: "PUT", body: JSON.stringify(payload) });
+}
+
+export async function testVault(token: string, payload: VaultConfigWrite): Promise<VaultTestResult> {
+  return request<VaultTestResult>("/settings/vault/test", token, { method: "POST", body: JSON.stringify(payload) });
 }
 
 export async function createUser(token: string, payload: unknown): Promise<UserAccount> {
