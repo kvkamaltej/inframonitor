@@ -206,6 +206,8 @@ export type Me = {
   email: string;
   role: "admin" | "developer" | "support" | string;
   using_default_password: boolean;
+  // desktop guest session (no login). The UI shows a "Guest" state and a Sign-in affordance.
+  guest?: boolean;
 };
 
 export type UserAccount = {

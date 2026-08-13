@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { KeyRound, LogOut, ShieldCheck, X } from "lucide-react";
+import { KeyRound, LogIn, LogOut, ShieldCheck, UserRound, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { LoginPanel } from "@/components/login-panel";
@@ -115,18 +115,26 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
   const [me, setMe] = useState<Me | null>(null);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
+  // Guest signed in? -> show the login form over the app, with a way back to guest.
+  const [showLogin, setShowLogin] = useState(false);
 
   async function load(activeToken = token) {
-    if (!activeToken) {
-      setLoading(false);
-      return;
-    }
     try {
+      // An empty token is a guest attempt: the desktop backend answers with a guest identity
+      // (loopback only); the server backend 401s, which falls through to the login gate below.
       setMe(await getMe(activeToken));
       setMessage("");
+      setShowLogin(false);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Unable to load session");
-      logout();
+      // A real token that stopped working: drop it and surface why. A failed guest attempt
+      // (server mode, no token) is not an error — just fall through to the login gate quietly.
+      if (activeToken) {
+        localStorage.removeItem("inframonitor-token");
+        clearDefaultPasswordDismissal();
+        setToken("");
+        setMessage(error instanceof Error ? error.message : "Unable to load session");
+      }
+      setMe(null);
     } finally {
       setLoading(false);
     }
@@ -138,21 +146,30 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
     // byte-identical JWT, so the fingerprint alone would not notice the new session.
     clearDefaultPasswordDismissal();
     setToken("");
-    setMe(null);
+    // Desktop lands back in guest mode; the server shows the login gate. Reloading with an empty
+    // token lets the backend decide which.
+    setLoading(true);
+    void load("");
+  }
+
+  function handleLogin(nextToken: string) {
+    setToken(nextToken);
+    setLoading(true);
+    void load(nextToken);
   }
 
   useEffect(() => {
     const saved = localStorage.getItem("inframonitor-token") ?? "";
     setToken(saved);
-    if (saved) {
-      void load(saved);
-    } else {
-      setLoading(false);
-    }
+    // Always attempt a load, even with no token, so desktop guest mode is entered automatically.
+    void load(saved);
   }, []);
 
   if (loading) return <div className="flex min-h-screen items-center justify-center bg-page"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
-  if (!token || !me) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); setLoading(true); void load(nextToken); }} />;
+  // Not signed in and guest not available (server deployment) -> login gate.
+  if (!me) return <LoginPanel onLogin={handleLogin} />;
+  // A guest chose to sign in -> login form with a "Continue as guest" escape.
+  if (showLogin) return <LoginPanel onLogin={handleLogin} onCancel={() => setShowLogin(false)} />;
 
   return (
     <main className="flex min-h-screen">
@@ -167,13 +184,27 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
               {subtitle ? <p className="text-xs font-medium text-muted">{subtitle}</p> : null}
             </div>
             <div className="flex items-center gap-4 text-sm font-medium text-slate-700 dark:text-slate-200">
-              <div className="flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 dark:bg-slate-800">
-                <ShieldCheck size={16} className="text-accent" />
-                <span className="capitalize">{me.role}</span>
-              </div>
-              <button onClick={logout} className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700" title="Sign out">
-                <LogOut size={16} />
-              </button>
+              {me.guest ? (
+                <>
+                  <div className="flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 dark:bg-slate-800" title="Local guest session — sign in to see servers assigned to you">
+                    <UserRound size={16} className="text-accent" />
+                    <span>Guest</span>
+                  </div>
+                  <button onClick={() => setShowLogin(true)} className="inline-flex h-9 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80" title="Sign in to your account">
+                    <LogIn size={16} /> Sign in
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 dark:bg-slate-800">
+                    <ShieldCheck size={16} className="text-accent" />
+                    <span className="capitalize">{me.role}</span>
+                  </div>
+                  <button onClick={logout} className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700" title="Sign out">
+                    <LogOut size={16} />
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </header>

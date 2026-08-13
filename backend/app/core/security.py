@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt
 from passlib.context import CryptContext
@@ -11,6 +11,26 @@ from app.core.config import get_settings
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 ALGORITHM = "HS256"
 bearer_scheme = HTTPBearer(auto_error=False)
+
+# Loopback hosts that qualify for desktop guest access. A network client can never present one
+# of these as its source address, so guest access can never leak onto the LAN.
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def is_loopback_client(host: str | None) -> bool:
+    return (host or "") in _LOOPBACK_HOSTS
+
+
+def guest_claims() -> dict:
+    # A local desktop guest is given admin so every feature works on the machine's own DB; the
+    # `guest` marker lets the UI show a "Guest" state and offer sign-in. Never minted for a
+    # network client (see the loopback gate in the callers).
+    return {"sub": "guest@localhost", "role": "admin", "guest": True}
+
+
+def _guest_allowed(request: Request) -> bool:
+    settings = get_settings()
+    return settings.desktop_mode and is_loopback_client(request.client.host if request.client else None)
 
 
 def hash_password(password: str) -> str:
@@ -39,11 +59,16 @@ def decode_token(token: str) -> dict | None:
         return None
 
 
-def require_user(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> dict:
-    if credentials is None:
+def require_user(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> dict:
+    # An empty/whitespace token counts as "no token": the desktop UI sends `Bearer ` (empty) in
+    # guest mode, and that must take the guest path, not fail token decoding.
+    token = credentials.credentials.strip() if credentials else ""
+    if not token:
+        if _guest_allowed(request):
+            return guest_claims()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing access token")
     try:
-        return jwt.decode(credentials.credentials, get_settings().jwt_secret, algorithms=[ALGORITHM])
+        return jwt.decode(token, get_settings().jwt_secret, algorithms=[ALGORITHM])
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token") from exc
 

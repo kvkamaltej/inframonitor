@@ -142,6 +142,10 @@ def _configure_env(data_dir: Path, base_dir: Path) -> None:
     os.environ["STATIC_DIR"] = str(base_dir / "frontend" / "out")
     # A single-machine desktop app has nothing to scrape it and nothing to link to.
     os.environ.setdefault("METRICS_ENABLED", "false")
+    # Enable local guest access: on your own machine the app is usable without logging in. The
+    # backend still only honours this for loopback requests, and the server deployment never sets
+    # it, so network access always requires login. Signing in remains available for RBAC.
+    os.environ["DESKTOP_MODE"] = "1"
     # In a dev checkout the backend package is not on sys.path; add it. When frozen it is
     # baked into the executable (pathex in the .spec) and this is a no-op.
     backend = base_dir / "backend"

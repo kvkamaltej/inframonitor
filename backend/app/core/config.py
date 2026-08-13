@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     # sets METRICS_ENABLED=true so Prometheus has something to scrape
     metrics_enabled: bool = False
 
+    # Desktop app only: when true, an unauthenticated request FROM LOOPBACK is served as a
+    # full-access local "guest" (no login wall on your own machine). The desktop launcher sets
+    # DESKTOP_MODE=1; the server deployment never does, so network access always requires login.
+    # The loopback check in security.py is a second gate: even if this were mistakenly set on a
+    # 0.0.0.0-bound instance, a request arriving via a LAN IP still gets no guest access.
+    desktop_mode: bool = False
+
     # first-boot admin seed. Overridable so an operator can avoid the shipped default
     # entirely; while the default password is still in force the app prints a banner
     # on every boot (see app.main._warn_if_default_admin_password)

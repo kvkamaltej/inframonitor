@@ -154,24 +154,23 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   }
 
   async function load(activeToken = token) {
-    if (!activeToken) return;
+    // An empty token is a guest attempt: the desktop backend returns data from loopback; the
+    // server backend 401s (caught below) and the login gate is shown.
     try {
       const [nextServer, nextMe] = await Promise.all([getServer(activeToken, serverId), getMe(activeToken)]);
       setServer(nextServer);
       setMe(nextMe);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Unable to load server", "error");
+      if (activeToken) notify(error instanceof Error ? error.message : "Unable to load server", "error");
+      setMe(null);
     }
   }
 
   useEffect(() => {
     const saved = window.localStorage.getItem("inframonitor-token") ?? "";
     setToken(saved);
-    if (saved) {
-      void load(saved).finally(() => setInitializing(false));
-    } else {
-      setInitializing(false);
-    }
+    // Always attempt a load (even with no token) so desktop guest mode is entered automatically.
+    void load(saved).finally(() => setInitializing(false));
   }, [serverId]);
 
   // Deep-links fired once after server + me load:
@@ -194,12 +193,15 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   // select, so fetch them once the role is known. A failure is non-fatal — the select simply
   // offers "Unassigned" only.
   useEffect(() => {
-    if (!token || me?.role !== "admin") return;
+    // role, not token: a desktop guest is admin with an empty token, and getFolders("") is
+    // served from loopback.
+    if (me?.role !== "admin") return;
     getFolders(token).then(setFolders).catch(() => undefined);
   }, [token, me?.role]);
 
   if (initializing) return <div className="flex min-h-screen items-center justify-center bg-page"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
-  if (!token) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); void load(nextToken); }} />;
+  // Guest mode sets `me` with an empty token; only fall to the login gate when there's no session.
+  if (!me) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); void load(nextToken); }} />;
 
   async function copyLogs() {
     if (logs.length === 0) return;

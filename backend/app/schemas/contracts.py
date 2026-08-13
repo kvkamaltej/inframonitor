@@ -19,6 +19,8 @@ class MeResponse(BaseModel):
     # true while this account's password still matches ADMIN_PASSWORD (the seeded default),
     # so the UI can show a persistent "change your password" banner
     using_default_password: bool = False
+    # desktop guest session (no login): the UI shows a "Guest" state and a Sign-in affordance.
+    guest: bool = False
 
 
 class ServerCreate(BaseModel):

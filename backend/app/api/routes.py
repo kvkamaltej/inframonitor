@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
 from app.core.crypto import decrypt_secret, encrypt_secret
-from app.core.security import create_access_token, decode_token, hash_password, require_admin, require_admin_or_developer, require_user, verify_password
+from app.core.security import create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_or_developer, require_user, verify_password
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
@@ -226,6 +226,10 @@ def _hash_matches_default(password_hash: str, default_password: str) -> bool:
 
 @router.get("/auth/me", response_model=MeResponse)
 def me(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> MeResponse:
+    # Desktop guest: no backing user row to load, so answer directly. Full-access (admin) but
+    # flagged guest so the UI can show the Sign-in option.
+    if claims.get("guest"):
+        return MeResponse(email="Guest", role="admin", using_default_password=False, guest=True)
     role = claims.get("role")
     # this used to echo the token only; it now loads the user because the default-password
     # warning has to compare against the stored hash
@@ -1479,10 +1483,16 @@ async def server_shell(websocket: WebSocket, server_id: str) -> None:
         await websocket.close(code=4401, reason="Handshake required")
         return
 
-    claims = decode_token(str(hello.get("token") or ""))
+    token = str(hello.get("token") or "").strip()
+    claims = decode_token(token) if token else None
     if not claims:
-        await websocket.close(code=4401, reason="Invalid access token")
-        return
+        # Desktop guest: an empty token from a loopback client in desktop mode opens a guest
+        # session (same double gate as the HTTP path). A *present but invalid* token is still 4401.
+        if not token and get_settings().desktop_mode and is_loopback_client(websocket.client.host if websocket.client else None):
+            claims = guest_claims()
+        else:
+            await websocket.close(code=4401, reason="Invalid access token")
+            return
     if claims.get("role") not in {"admin", "administrator"}:
         await websocket.close(code=4403, reason="Admin role required")
         return

@@ -4,7 +4,7 @@ import { LockKeyhole } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { login } from "@/lib/api";
 
-export function LoginPanel({ onLogin }: { onLogin: (token: string) => void }) {
+export function LoginPanel({ onLogin, onCancel }: { onLogin: (token: string) => void; onCancel?: () => void }) {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -43,6 +43,11 @@ export function LoginPanel({ onLogin }: { onLogin: (token: string) => void }) {
             {loading ? "Signing in..." : "Sign in"}
           </button>
           {message ? <p className="mt-2 text-center text-sm font-medium text-red-600 dark:text-red-400">{message}</p> : null}
+          {onCancel ? (
+            <button type="button" onClick={onCancel} className="mt-1 text-center text-sm font-medium text-muted transition-colors hover:text-accent">
+              Continue as guest
+            </button>
+          ) : null}
         </div>
       </form>
     </main>
