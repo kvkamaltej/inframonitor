@@ -349,13 +349,39 @@ export type ShellFavorite = {
 // from a 403 -- the SFTP pane shows a different remedy for each -- would otherwise have to
 // pattern-match the response body, which silently misclassifies the moment a `detail`
 // string is reworded.
+//
+// `message` is the human-readable reason: FastAPI errors arrive as `{"detail": "..."}` (or a
+// validation array), so we unwrap that for display instead of showing the caller the raw JSON.
+// The unparsed `body` is kept for anything that still needs it; `status` stays the way to
+// classify an error.
 export class ApiError extends Error {
   readonly status: number;
+  readonly body: string;
 
   constructor(status: number, body: string) {
-    super(body || `Request failed with status ${status}`);
+    super(ApiError.humanMessage(status, body));
     this.name = "ApiError";
     this.status = status;
+    this.body = body;
+  }
+
+  private static humanMessage(status: number, body: string): string {
+    const text = (body ?? "").trim();
+    if (!text) return `Request failed with status ${status}`;
+    try {
+      const parsed = JSON.parse(text);
+      const detail = parsed?.detail;
+      if (typeof detail === "string" && detail.trim()) return detail;
+      // FastAPI request-validation errors put an array of {msg, loc} in `detail`.
+      if (Array.isArray(detail)) {
+        const msgs = detail.map((d) => (d && typeof d.msg === "string" ? d.msg : "")).filter(Boolean);
+        if (msgs.length) return msgs.join("; ");
+      }
+      if (typeof parsed?.message === "string" && parsed.message.trim()) return parsed.message;
+    } catch {
+      // not JSON — the body is already a plain string, fall through
+    }
+    return text;
   }
 }
 

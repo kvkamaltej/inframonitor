@@ -47,19 +47,22 @@ def _clean_message(exc: Exception) -> str:
 def _has_multiple_statements(sql: str) -> bool:
     """True if `sql` contains more than one statement.
 
-    Scans for a `;` that sits outside a string literal or quoted identifier and is followed by
-    further non-whitespace text, so a single trailing semicolon (or a semicolon inside 'a;b') does
-    not count. Comment handling is intentionally omitted -- this is a best-effort guard, not a SQL
-    parser.
+    Scans for a `;` that sits outside a string literal, quoted identifier, or comment and is
+    followed by further non-comment/non-whitespace text, so a single trailing semicolon (or a
+    semicolon inside 'a;b', inside a `-- ...`/`/* ... */` comment, or followed only by a trailing
+    comment) does not count. Comments are skipped rather than parsed -- still best-effort, not a
+    full SQL parser, but it no longer trips over the semicolons and comments that appear in
+    ordinary single queries.
     """
     in_single = in_double = in_backtick = False
     length = len(sql)
     i = 0
     while i < length:
         ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < length else ""
         if in_single:
             if ch == "'":
-                if i + 1 < length and sql[i + 1] == "'":  # escaped '' inside a literal
+                if nxt == "'":  # escaped '' inside a literal
                     i += 2
                     continue
                 in_single = False
@@ -69,6 +72,19 @@ def _has_multiple_statements(sql: str) -> bool:
         elif in_backtick:
             if ch == "`":
                 in_backtick = False
+        # comments (only recognised outside string/identifier quoting)
+        elif ch == "-" and nxt == "-":  # line comment: skip to end of line
+            end = sql.find("\n", i + 2)
+            if end == -1:
+                break  # comment runs to the end of the input
+            i = end + 1
+            continue
+        elif ch == "/" and nxt == "*":  # block comment: skip to the closing */
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                break  # unterminated block comment runs to the end
+            i = end + 2
+            continue
         elif ch == "'":
             in_single = True
         elif ch == '"':
@@ -76,10 +92,37 @@ def _has_multiple_statements(sql: str) -> bool:
         elif ch == "`":
             in_backtick = True
         elif ch == ";":
-            # anything other than whitespace after this semicolon means a second statement
-            if sql[i + 1 :].strip():
+            # a second statement only if real code (not just whitespace/comments) follows
+            if _significant_after(sql, i + 1):
                 return True
         i += 1
+    return False
+
+
+def _significant_after(sql: str, start: int) -> bool:
+    """True if `sql[start:]` holds anything other than whitespace and SQL comments.
+
+    Used after a `;` so a trailing comment or blank space does not read as a second statement.
+    """
+    i = start
+    length = len(sql)
+    while i < length:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < length else ""
+        if ch.isspace():
+            i += 1
+        elif ch == "-" and nxt == "-":
+            end = sql.find("\n", i + 2)
+            if end == -1:
+                return False
+            i = end + 1
+        elif ch == "/" and nxt == "*":
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                return False
+            i = end + 2
+        else:
+            return True
     return False
 
 
@@ -172,6 +215,13 @@ def test_connection(engine: str, host: str, port: int, username: str, password: 
     conn = None
     try:
         conn = _connect(engine, host, port, username, password, database)
+        # Actually run a query. Opening the socket + authenticating is not enough: a green
+        # "Connected" must mean queries work, otherwise a session that connects but cannot
+        # execute (read-only routing, permissions, timeouts) reports success and then every
+        # query in the console fails -- exactly the confusing case this avoids.
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
         version = _server_version(engine, conn)
         label = "PostgreSQL" if engine == "postgres" else "MySQL"
         where = f"{host}:{port}"

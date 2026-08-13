@@ -30,7 +30,11 @@ def test_startup_seeds_admin_and_no_demo_server() -> None:
         pass
     with engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM users WHERE email = 'admin@inframonitor.local'")).scalar() == 1
-        assert conn.execute(text("SELECT count(*) FROM app_settings")).scalar() == 3
+        # the default seed set: the three master lists plus the RBAC menu matrix and its
+        # provisioning marker. Assert the keys, not a bare count, so adding a setting fails
+        # loudly and legibly rather than as "N != M".
+        seeded = {row[0] for row in conn.execute(text("SELECT key FROM app_settings"))}
+        assert seeded == {"application_types", "environments", "server_types", "role_menus", "role_menus_provisioned"}
         assert conn.execute(text("SELECT count(*) FROM servers")).scalar() == 0
 
 
