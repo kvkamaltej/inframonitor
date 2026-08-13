@@ -25,10 +25,15 @@ from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_KEYS, ROLE_MENUS_KEY, menus_for_role
 from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, require_user_not_guest, verify_password
 from app.services.secrets import VaultError, get_vault_config, load_credentials, save_vault_config, store_credentials, test_vault
+from app.services import db_backend
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, Folder, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
     AccessPolicyRead,
+    AppDbConfigRead,
+    AppDbConnectionRequest,
+    AppDbMigrateResult,
+    AppDbTestResult,
     AlertBufferResponse,
     AlertRecord,
     AlertWebhookResult,
@@ -589,6 +594,84 @@ def test_vault_settings(payload: VaultConfigWrite, _: dict = Depends(require_adm
     )
     ok, message = test_vault(candidate)
     return VaultTestResult(ok=ok, message=message)
+
+
+# --- app database backend switch (feature/app-db-backend) ----------------------------------
+#
+# Switch Infra Monitor's OWN backing database from the built-in SQLite to an external PostgreSQL
+# (primary) or MySQL. The engine is a process-level singleton built at import, so the switch cannot
+# be applied live: migrate COPIES all data into the target and writes an override file that the
+# NEXT start reads. All four endpoints are require_admin_not_guest -- a desktop guest runs against
+# the local machine's DB and must not repoint the whole install at a shared database. The migrate
+# copy is never a move: on any failure the override file is not written and the source SQLite is
+# left intact.
+
+
+def _app_db_target_url(payload: AppDbConnectionRequest) -> str:
+    """Resolve the request into a SQLAlchemy URL: an explicit `url`, else the discrete fields.
+
+    Raises HTTP 400 on a bad engine or missing host, so the driver layer never sees garbage.
+    """
+    if payload.url.strip():
+        return payload.url.strip()
+    engine_kind = (payload.engine or "").strip().lower()
+    if engine_kind not in ("postgres", "mysql"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="engine must be 'postgres' or 'mysql'")
+    if not payload.host.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="host is required")
+    try:
+        return db_backend.build_url(
+            engine_kind,
+            payload.host.strip(),
+            payload.port,
+            payload.username,
+            payload.password,
+            payload.database.strip(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/settings/database", response_model=AppDbConfigRead)
+def get_app_database(_: dict = Depends(require_admin_not_guest)) -> AppDbConfigRead:
+    cfg = db_backend.current_config()
+    return AppDbConfigRead(backend=cfg["backend"], url_masked=cfg["url_masked"], is_override=cfg["is_override"])
+
+
+@router.post("/settings/database/test", response_model=AppDbTestResult)
+def test_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_admin_not_guest)) -> AppDbTestResult:
+    target_url = _app_db_target_url(payload)
+    ok, message = db_backend.test_url(target_url)
+    return AppDbTestResult(ok=ok, message=message)
+
+
+@router.post("/settings/database/migrate", response_model=AppDbMigrateResult)
+def migrate_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_admin_not_guest)) -> AppDbMigrateResult:
+    target_url = _app_db_target_url(payload)
+    # Guard: writing the override needs a SQLite base configuration to anchor the file. Fail here
+    # with a clear message rather than after a full (wasted) copy that could not be persisted.
+    if db_backend.override_path() is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This install is not running on the default SQLite backend, so the database cannot be switched from here.",
+        )
+    result = db_backend.migrate_to(target_url)
+    if not result["ok"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
+    # only persist the override once the copy has fully succeeded
+    db_backend.write_override(target_url)
+    return AppDbMigrateResult(ok=True, message=result["message"], tables=result["tables"], restart_required=True)
+
+
+@router.post("/settings/database/reset", response_model=AppDbMigrateResult)
+def reset_app_database(_: dict = Depends(require_admin_not_guest)) -> AppDbMigrateResult:
+    removed = db_backend.clear_override()
+    message = (
+        "Reverted to the built-in SQLite database. Restart the app to apply."
+        if removed
+        else "Already using the built-in SQLite database; nothing to reset."
+    )
+    return AppDbMigrateResult(ok=True, message=message, tables={}, restart_required=removed)
 
 
 # --- folders (EXPERIMENTAL: feature/server-folders) ----------------------------------------

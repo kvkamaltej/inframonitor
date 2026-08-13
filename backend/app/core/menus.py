@@ -23,6 +23,7 @@ MENU_ITEMS: list[str] = [
     "administration",  # Administration group (server-type / environment master data)
     "access",          # Access Control (/access) — this matrix editor itself
     "vault",           # Vault config (/vault) — HashiCorp Vault secrets backend
+    "appdatabase",     # App Database (/app-database) — switch the app's own DB to Postgres/MySQL
     "appearance",      # Appearance / theme (/appearance)
     "profile",         # Profile (/profile)
 ]
@@ -34,7 +35,7 @@ ROLE_KEYS: list[str] = ["admin", "developer", "support", "guest"]
 # Sensible defaults that reproduce the sidebar's previous hardcoded behaviour, so seeding
 # the matrix (or falling back to it) changes nothing visible until an admin edits it.
 DEFAULT_ROLE_MENUS: dict[str, list[str]] = {
-    "admin": ["dashboard", "servers", "databases", "shell", "users", "policies", "administration", "access", "vault", "appearance", "profile"],
+    "admin": ["dashboard", "servers", "databases", "shell", "users", "policies", "administration", "access", "vault", "appdatabase", "appearance", "profile"],
     "developer": ["dashboard", "servers", "databases", "profile"],
     "support": ["dashboard", "servers", "databases", "profile"],
     # guest is login-less and local-only: no database console (require_user_not_guest blocks it).

@@ -472,6 +472,57 @@ export async function testVault(token: string, payload: VaultConfigWrite): Promi
   return request<VaultTestResult>("/settings/vault/test", token, { method: "POST", body: JSON.stringify(payload) });
 }
 
+// --- app database backend switch (feature/app-db-backend) ----------------------------------
+// Admin-only (require_admin_not_guest). Switches Infra Monitor's OWN backing database from the
+// built-in SQLite to an external PostgreSQL/MySQL. migrate COPIES all data across and writes an
+// override the app reads on its NEXT start; nothing swaps live. The password is only ever sent
+// (never returned): getAppDatabase reports the active backend with the password masked.
+
+export type AppDbConfig = {
+  // "SQLite" | "PostgreSQL" | "MySQL"
+  backend: string;
+  url_masked: string;
+  // true when an override file is in force (i.e. running on a migrated external DB)
+  is_override: boolean;
+};
+
+export type AppDbConnectionRequest = {
+  engine: "postgres" | "mysql";
+  host: string;
+  port?: number | null;
+  username: string;
+  password: string;
+  database: string;
+};
+
+export type AppDbTestResult = {
+  ok: boolean;
+  message: string;
+};
+
+export type AppDbMigrateResult = {
+  ok: boolean;
+  message: string;
+  tables: Record<string, number>;
+  restart_required: boolean;
+};
+
+export async function getAppDatabase(token: string): Promise<AppDbConfig> {
+  return request<AppDbConfig>("/settings/database", token);
+}
+
+export async function testAppDatabase(token: string, payload: AppDbConnectionRequest): Promise<AppDbTestResult> {
+  return request<AppDbTestResult>("/settings/database/test", token, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function migrateAppDatabase(token: string, payload: AppDbConnectionRequest): Promise<AppDbMigrateResult> {
+  return request<AppDbMigrateResult>("/settings/database/migrate", token, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function resetAppDatabase(token: string): Promise<AppDbMigrateResult> {
+  return request<AppDbMigrateResult>("/settings/database/reset", token, { method: "POST", body: JSON.stringify({}) });
+}
+
 export async function createUser(token: string, payload: unknown): Promise<UserAccount> {
   return request<UserAccount>("/users", token, { method: "POST", body: JSON.stringify(payload) });
 }

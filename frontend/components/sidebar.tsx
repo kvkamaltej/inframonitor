@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronDown, ChevronRight, Database, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, SlidersHorizontal, Sun, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Server, Settings, Shield, SlidersHorizontal, Sun, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getFolders, getServers, Folder as FolderType, Server as ServerRow } from "@/lib/api";
@@ -13,7 +13,7 @@ import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT, resolveInitialTheme, themeMeta
 // and appearance but no account pages, and developer/support get the read-only pages.
 function fallbackMenus(role?: string, guest?: boolean): string[] {
   if (guest) return ["dashboard", "servers", "shell", "appearance"];
-  if (role === "admin") return ["dashboard", "servers", "shell", "users", "policies", "administration", "access", "appearance", "profile"];
+  if (role === "admin") return ["dashboard", "servers", "shell", "users", "policies", "administration", "access", "appdatabase", "appearance", "profile"];
   return ["dashboard", "servers", "profile"];
 }
 
@@ -197,6 +197,9 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
           {/* feature/vault-secrets: Vault config, gated through the role->menu matrix; the backend
               endpoints stay require_admin_not_guest. */}
           {allowed.has("vault") && <NavItem href="/vault" icon={Vault} label="Vault" />}
+          {/* feature/app-db-backend: switch the app's OWN database (SQLite -> Postgres/MySQL).
+              Admin-only; backend endpoints are require_admin_not_guest. */}
+          {allowed.has("appdatabase") && <NavItem href="/app-database" icon={DatabaseZap} label="App Database" />}
           {allowed.has("administration") && (
             <div className="mt-2">
               <button onClick={() => { if (!open) toggle(); setAdminOpen(!adminOpen); }} className="flex h-12 w-full items-center justify-between rounded-full px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800" title={!open ? "Administration" : undefined}>

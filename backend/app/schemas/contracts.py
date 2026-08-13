@@ -548,3 +548,46 @@ class OperationRequest(BaseModel):
 class ServiceRestartRequest(BaseModel):
     name: str
     sudo_password: str = ""
+
+
+# --- app database backend switch (feature/app-db-backend) ----------------------------------
+#
+# Switching Infra Monitor's OWN backing database from SQLite to an external PostgreSQL/MySQL.
+# The credentials here are for the target database and are only used to build the connection
+# URL and, on migrate, written to the override file next to the SQLite database; they are not
+# echoed back by any GET.
+
+
+class AppDbConfigRead(BaseModel):
+    # Friendly backend name ("SQLite" / "PostgreSQL" / "MySQL"), the connection URL with the
+    # password masked, and whether an override file is currently in force.
+    backend: str
+    url_masked: str
+    is_override: bool
+
+
+class AppDbConnectionRequest(BaseModel):
+    # Either a fully-formed SQLAlchemy `url`, or the discrete fields the route assembles into one.
+    # engine is validated in the route against {"postgres","mysql"}.
+    engine: str = "postgres"
+    host: str = Field(default="", max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    username: str = Field(default="", max_length=255)
+    password: str = Field(default="", max_length=1024)
+    database: str = Field(default="", max_length=255)
+    # When provided, takes precedence over the discrete fields above.
+    url: str = Field(default="", max_length=2048)
+
+
+class AppDbTestResult(BaseModel):
+    ok: bool
+    message: str
+
+
+class AppDbMigrateResult(BaseModel):
+    ok: bool
+    message: str
+    # table name -> number of rows copied
+    tables: dict[str, int] = Field(default_factory=dict)
+    # always true on success: the running process keeps using the old engine until it restarts.
+    restart_required: bool = False
