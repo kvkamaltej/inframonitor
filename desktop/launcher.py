@@ -31,6 +31,46 @@ import urllib.request
 from pathlib import Path
 
 
+# Shown the instant the window can render, while the backend finishes booting and WebView2
+# warms up. Self-contained (no network, no external assets) and dark by default so there is no
+# white flash before the app — matches the app's "Comfortable Dark" palette.
+_SPLASH_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  html,body{margin:0;height:100%;background:#1a1b26;color:#c0caf5;
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;}
+  .wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;}
+  .spinner{width:40px;height:40px;border:4px solid #2f3549;border-top-color:#2dd4bf;
+    border-radius:50%;animation:spin .9s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .logo{font-size:22px;font-weight:600;letter-spacing:.3px;}
+  .logo b{color:#2dd4bf;font-weight:600;}
+  .sub{font-size:13px;color:#8b95bd;}
+</style></head>
+<body><div class="wrap">
+  <div class="spinner"></div>
+  <div class="logo">Infra <b>Monitor</b></div>
+  <div class="sub">Starting up…</div>
+</div></body></html>"""
+
+# Shown only if the backend never becomes healthy — points at the log the launcher now writes.
+_ERROR_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  html,body{margin:0;height:100%;background:#1a1b26;color:#c0caf5;
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;}
+  .wrap{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:14px;text-align:center;padding:0 40px;}
+  .title{font-size:18px;font-weight:600;color:#f7768e;}
+  .sub{font-size:13px;color:#8b95bd;max-width:560px;line-height:1.5;}
+  code{background:#24283b;padding:2px 6px;border-radius:6px;color:#c0caf5;}
+</style></head>
+<body><div class="wrap">
+  <div class="title">Infra Monitor could not start</div>
+  <div class="sub">The backend did not become ready. See
+    <code>%APPDATA%\\InfraMonitor\\runtime.log</code> and
+    <code>startup-error.log</code> for details, then reopen the app.</div>
+</div></body></html>"""
+
+
 def _is_frozen() -> bool:
     # PyInstaller sets both of these on the frozen executable.
     return getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
@@ -176,15 +216,13 @@ def main() -> int:
 
     port = int(os.environ.get("INFRAMONITOR_DESKTOP_PORT") or _free_port())
     threading.Thread(target=_run_server, args=(port,), daemon=True).start()
-
-    if not _wait_healthy(port):
-        print("Infra Monitor backend did not become healthy in time.", file=sys.stderr)
-        return 1
-
     url = f"http://127.0.0.1:{port}/"
 
     # Headless: prove the backend boots (CI / smoke test) without a display or pywebview.
     if os.environ.get("INFRAMONITOR_DESKTOP_HEADLESS") == "1":
+        if not _wait_healthy(port):
+            print("Infra Monitor backend did not become healthy in time.", file=sys.stderr)
+            return 1
         message = f"HEADLESS OK: serving {url}  (data dir: {data_dir})"
         print(message)
         # A windowed (console=False) frozen build has no visible stdout, so also drop a
@@ -201,16 +239,28 @@ def main() -> int:
     # webview runtime installed.
     import webview
 
-    webview.create_window(
+    # Show the splash straight away (inline HTML, no wait), THEN swap to the app once the
+    # backend is healthy. Previously the window was created only after health passed, so the
+    # user stared at nothing during the backend boot + WebView2 cold-start.
+    window = webview.create_window(
         "Infra Monitor",
-        url,
+        html=_SPLASH_HTML,
         width=1400,
         height=900,
         min_size=(940, 600),
     )
+
+    def _load_app_when_ready() -> None:
+        # Runs on a pywebview worker thread once the GUI loop is up; its load_* calls are
+        # marshalled back onto the UI thread by pywebview.
+        if _wait_healthy(port):
+            window.load_url(url)
+        else:
+            window.load_html(_ERROR_HTML)
+
     # Blocks on the main thread until the window is closed; the daemon server thread then dies
     # with the process.
-    webview.start()
+    webview.start(_load_app_when_ready)
     return 0
 
 
