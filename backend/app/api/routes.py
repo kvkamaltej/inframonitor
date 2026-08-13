@@ -663,6 +663,23 @@ def migrate_app_database(payload: AppDbConnectionRequest, _: dict = Depends(requ
     return AppDbMigrateResult(ok=True, message=result["message"], tables=result["tables"], restart_required=True)
 
 
+@router.post("/settings/database/use", response_model=AppDbMigrateResult)
+def use_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_admin_not_guest)) -> AppDbMigrateResult:
+    # Point at an EXISTING database without copying anything -- for a target that already holds
+    # Infra Monitor's data (a prior migration, or a shared/pre-provisioned DB). Startup will
+    # create_all/seed against it, so an empty target is initialised and a populated one is kept.
+    target_url = _app_db_target_url(payload)
+    if db_backend.override_path() is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This install is not running on the default SQLite backend, so the database cannot be switched from here.",
+        )
+    result = db_backend.use_existing(target_url)
+    if not result["ok"]:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["message"])
+    return AppDbMigrateResult(ok=True, message=result["message"], tables={}, restart_required=True)
+
+
 @router.post("/settings/database/reset", response_model=AppDbMigrateResult)
 def reset_app_database(_: dict = Depends(require_admin_not_guest)) -> AppDbMigrateResult:
     removed = db_backend.clear_override()

@@ -229,6 +229,24 @@ def write_override(url: str) -> str:
     return path
 
 
+def use_existing(url: str) -> dict:
+    """Point the app at an EXISTING external database WITHOUT copying anything.
+
+    For a database that is already Infra Monitor's (a prior migration, or a shared/pre-provisioned
+    Postgres): just verify connectivity and write the override, so the next start uses it as-is.
+    Normal startup (create_all + column migration + seed-if-missing) runs against it on that boot,
+    so an empty target is initialised and a populated one is left intact -- nothing is overwritten.
+    """
+    ok, message = test_url(url)
+    if not ok:
+        return {"ok": False, "message": message}
+    try:
+        write_override(url)
+    except RuntimeError as exc:
+        return {"ok": False, "message": str(exc)}
+    return {"ok": True, "message": f"Configured to use {mask_url(url)} on next start. No data was copied."}
+
+
 def clear_override() -> bool:
     """Remove the override file so the NEXT start reverts to the configured SQLite. Idempotent."""
     path = override_path()

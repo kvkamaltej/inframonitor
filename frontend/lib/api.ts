@@ -519,6 +519,11 @@ export async function migrateAppDatabase(token: string, payload: AppDbConnection
   return request<AppDbMigrateResult>("/settings/database/migrate", token, { method: "POST", body: JSON.stringify(payload) });
 }
 
+// Point at an existing database without copying anything (target already has the data).
+export async function useAppDatabase(token: string, payload: AppDbConnectionRequest): Promise<AppDbMigrateResult> {
+  return request<AppDbMigrateResult>("/settings/database/use", token, { method: "POST", body: JSON.stringify(payload) });
+}
+
 export async function resetAppDatabase(token: string): Promise<AppDbMigrateResult> {
   return request<AppDbMigrateResult>("/settings/database/reset", token, { method: "POST", body: JSON.stringify({}) });
 }

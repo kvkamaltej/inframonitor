@@ -9,6 +9,7 @@ import {
   migrateAppDatabase,
   resetAppDatabase,
   testAppDatabase,
+  useAppDatabase,
 } from "@/lib/api";
 import { useConfirm } from "@/components/confirm-dialog";
 
@@ -31,6 +32,7 @@ export function AppDatabaseSettings({ token }: { token: string }) {
 
   const [testing, setTesting] = useState(false);
   const [migrating, setMigrating] = useState(false);
+  const [using, setUsing] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   // Set after a successful migrate/reset: the running process keeps the old engine until restart.
@@ -121,6 +123,38 @@ export function AppDatabaseSettings({ token }: { token: string }) {
     }
   }
 
+  async function useExisting() {
+    if (!host.trim()) {
+      setMessage({ ok: false, text: "Host is required." });
+      return;
+    }
+    const target = engine === "postgres" ? "PostgreSQL" : "MySQL";
+    const ok = await confirm({
+      title: `Use the existing ${target} database?`,
+      message:
+        `Point the app at ${host.trim()}:${port.trim() || DEFAULT_PORTS[engine]} WITHOUT copying anything.\n\n` +
+        "Use this when the target already holds Infra Monitor's data (a previous migration or a shared database). " +
+        "Its existing data is kept; nothing is overwritten. Takes effect on the NEXT restart.",
+      confirmLabel: "Use this database",
+      cancelLabel: "Cancel",
+    });
+    if (!ok) return;
+    setUsing(true);
+    setMessage(null);
+    setRestartNotice(null);
+    try {
+      const result = await useAppDatabase(token, payload());
+      setMessage({ ok: true, text: result.message });
+      setRestartNotice("Configured. Restart the app to start using this database.");
+      setPassword("");
+      await load();
+    } catch (error) {
+      setMessage({ ok: false, text: error instanceof Error ? error.message : "Unable to switch database" });
+    } finally {
+      setUsing(false);
+    }
+  }
+
   async function reset() {
     const ok = await confirm({
       title: "Revert to built-in SQLite?",
@@ -152,7 +186,7 @@ export function AppDatabaseSettings({ token }: { token: string }) {
   const inputClass =
     "h-12 w-full rounded-xl border-none bg-slate-100 px-4 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100";
   const labelClass = "mb-1.5 block text-sm font-medium text-muted";
-  const busy = testing || migrating || resetting;
+  const busy = testing || migrating || using || resetting;
 
   if (loading) {
     return (
@@ -276,6 +310,15 @@ export function AppDatabaseSettings({ token }: { token: string }) {
               className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-accent px-6 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-60"
             >
               {migrating ? <Loader2 size={16} className="animate-spin" /> : <DatabaseZap size={16} />} Migrate &amp; switch
+            </button>
+            <button
+              type="button"
+              onClick={() => void useExisting()}
+              disabled={busy}
+              title="Point at a database that already holds Infra Monitor's data — no copy"
+              className="inline-flex h-12 items-center justify-center gap-2 rounded-full border border-accent px-6 text-sm font-semibold text-accent transition-colors hover:bg-accent/10 disabled:opacity-60"
+            >
+              {using ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />} Use existing (no migrate)
             </button>
             <button
               type="button"
