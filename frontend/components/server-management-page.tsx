@@ -53,6 +53,32 @@ function ramPercent(server: Server): number {
   return Math.round((server.ram_used_mb / server.ram_mb) * 100);
 }
 
+// Disk usage from discovered storage: prefer the root ("/") filesystem, else the first mount.
+function rootDisk(server: Server): Record<string, string> | undefined {
+  const rows = server.storage ?? [];
+  return rows.find((r) => r.mount === "/") ?? rows.find((r) => (r.mount ?? "").length > 0) ?? rows[0];
+}
+
+function diskLabel(server: Server): string {
+  const r = rootDisk(server);
+  const toGb = (bytesStr?: string) => {
+    const b = Number(bytesStr);
+    return Number.isFinite(b) && b > 0 ? b / 1024 ** 3 : NaN;
+  };
+  if (r) {
+    const used = toGb(r.used_bytes);
+    const total = toGb(r.size_bytes);
+    if (Number.isFinite(used) && Number.isFinite(total)) return `${used.toFixed(1)} / ${total.toFixed(0)} GB`;
+  }
+  return server.disk_gb ? `${server.disk_gb} GB` : "-";
+}
+
+function diskPercent(server: Server): number {
+  const r = rootDisk(server);
+  const n = r ? Number(r.used_percent_num) : NaN;
+  return Number.isFinite(n) ? Math.round(n) : -1;
+}
+
 // -1 means never sampled, which must not render as a healthy 0%
 function usageTone(percent: number): string {
   if (percent < 0) return "text-slate-400 dark:text-slate-500";
@@ -298,6 +324,8 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   const [folders, setFolders] = useState<Folder[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  // The inventory toolbar keeps only Add Server visible; everything else lives behind a ⋮ menu.
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [shellFor, setShellFor] = useState<Server | null>(null);
@@ -557,7 +585,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
       <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{uptimeLabel(server.uptime_seconds)}{server.load_average ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">load {server.load_average}</div> : null}</td>
       <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(server.cpu_percent)}`}>{server.cpu_percent < 0 ? "-" : `${server.cpu_percent}%`}{server.cpu ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.cpu} cores</div> : null}</td>
       <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(ramPercent(server))}`}>{ramLabel(server)}{ramPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{ramPercent(server)}% used</div> : null}</td>
-      <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{server.process_count || "-"}</td>
+      <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(diskPercent(server))}`}>{diskLabel(server)}{diskPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{diskPercent(server)}% used</div> : null}</td>
       <td className="px-6 py-4">
         <div className="flex flex-col items-start gap-1">
           {server.server_type ? <Chip label={server.server_type} tone="accent" /> : null}
@@ -596,7 +624,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
             <th className="whitespace-nowrap px-6 py-4 font-semibold">Uptime</th>
             <th className="whitespace-nowrap px-6 py-4 font-semibold">CPU</th>
             <th className="whitespace-nowrap px-6 py-4 font-semibold">RAM</th>
-            <th className="whitespace-nowrap px-6 py-4 font-semibold">Procs</th>
+            <th className="whitespace-nowrap px-6 py-4 font-semibold">Disk</th>
             <th className="whitespace-nowrap px-6 py-4 font-semibold">Type / Env</th>
             <th className="px-6 py-4 font-semibold">Status</th>
             {isAdmin ? <th className="px-6 py-4 font-semibold">Actions</th> : null}
@@ -657,27 +685,41 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
             <h2 className="text-base font-semibold">Server Inventory</h2>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button disabled={refreshing || visibleServers.length === 0} onClick={() => void refreshAllVitals()} title={filtersActive ? "Probe the servers matching the current filters" : "Probe every server in the inventory"} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
-              <Activity size={16} className={refreshing ? "animate-pulse" : ""} /> {refreshing ? "Probing…" : `Refresh vitals${filtersActive && visibleServers.length ? ` (${visibleServers.length})` : ""}`}
-            </button>
-            {/* The view toggle is available to every role: grouping is a read affordance, not an
-                admin one. Grouped is the default the feature ships with. */}
-            <button onClick={() => setGrouped((value) => !value)} title={grouped ? "Switch to a single flat list of all servers" : "Group the inventory by group"} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
-              {grouped ? <><List size={16} /> All servers</> : <><FolderTree size={16} /> Group view</>}
-            </button>
             {role === "admin" && (
-              <>
-                <button onClick={() => setShowFolderManager((value) => !value)} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
-                  {showFolderManager ? <><X size={16} /> Close groups</> : <><FolderIcon size={16} /> Manage groups</>}
-                </button>
-                <button onClick={() => { setShowImport(!showImport); setShowAddForm(false); }} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
-                  {showImport ? <><X size={16} /> Cancel</> : <><FileUp size={16} /> Import from CSV</>}
-                </button>
-                <button onClick={() => { setShowAddForm(!showAddForm); setShowImport(false); }} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80">
-                  {showAddForm ? <><X size={16} /> Cancel</> : <><Plus size={16} /> Add Server</>}
-                </button>
-              </>
+              <button onClick={() => { setShowAddForm(!showAddForm); setShowImport(false); }} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80">
+                {showAddForm ? <><X size={16} /> Cancel</> : <><Plus size={16} /> Add Server</>}
+              </button>
             )}
+            {/* Everything else is tucked into a ⋮ menu to keep the inventory header minimal. */}
+            <div className="relative">
+              <button onClick={() => setActionsMenuOpen((v) => !v)} aria-label="Inventory actions" aria-expanded={actionsMenuOpen} title="Actions" className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
+                <MoreVertical size={18} />
+              </button>
+              {actionsMenuOpen && (
+                <>
+                  <button aria-label="Close menu" onClick={() => setActionsMenuOpen(false)} className="fixed inset-0 z-30 cursor-default" />
+                  <div className="absolute right-0 z-40 mt-2 w-56 overflow-hidden rounded-2xl bg-white py-1 text-slate-700 shadow-xl ring-1 ring-slate-200 dark:bg-[#1e1e1e] dark:text-slate-200 dark:ring-slate-800">
+                    <button disabled={refreshing || visibleServers.length === 0} onClick={() => { setActionsMenuOpen(false); void refreshAllVitals(); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-slate-100 disabled:opacity-50 dark:hover:bg-slate-800">
+                      <Activity size={16} className={refreshing ? "animate-pulse text-accent" : "text-accent"} /> {refreshing ? "Probing…" : `Refresh vitals${filtersActive && visibleServers.length ? ` (${visibleServers.length})` : ""}`}
+                    </button>
+                    <button onClick={() => { setGrouped((value) => !value); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-slate-100 dark:hover:bg-slate-800">
+                      {grouped ? <><List size={16} className="text-slate-400" /> Show all (flat)</> : <><FolderTree size={16} className="text-slate-400" /> Group view</>}
+                    </button>
+                    {role === "admin" && (
+                      <>
+                        <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
+                        <button onClick={() => { setShowFolderManager((value) => !value); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-slate-100 dark:hover:bg-slate-800">
+                          <FolderIcon size={16} className="text-slate-400" /> {showFolderManager ? "Close groups" : "Manage groups"}
+                        </button>
+                        <button onClick={() => { setShowImport(!showImport); setShowAddForm(false); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-slate-100 dark:hover:bg-slate-800">
+                          <FileUp size={16} className="text-slate-400" /> {showImport ? "Cancel import" : "Import from CSV"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </div>
 

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Activity, AlertTriangle, Database, Gauge, Server as ServerIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
@@ -92,13 +93,13 @@ function DashboardContent({ token }: { token: string }) {
           <div className="border-b border-slate-100 bg-white px-6 py-5 font-semibold text-slate-900 dark:border-slate-800 dark:bg-[#1e1e1e] dark:text-slate-100">Recent Servers</div>
           <div className="divide-y divide-slate-100 dark:divide-slate-800/50">
             {servers.slice(0, 8).map((server) => (
-              <div key={server.id} className="flex items-center justify-between px-6 py-4 text-sm transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50">
+              <Link key={server.id} href={`/server/?id=${encodeURIComponent(server.id)}`} className="flex items-center justify-between px-6 py-4 text-sm transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50">
                 <div>
                   <div className="font-semibold text-slate-900 dark:text-slate-200">{server.hostname}</div>
                   <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.ip_address} / {server.server_type}</div>
                 </div>
                 <StatusPill status={server.status} />
-              </div>
+              </Link>
             ))}
           </div>
         </div>
