@@ -566,6 +566,9 @@ class DbConnectionCreate(BaseModel):
     username: str = Field(default="", max_length=255)
     password: str = Field(default="", max_length=1024)
     database: str = Field(default="", max_length=255)
+    # deployment environment tag: "dev" | "qa" | "uat" | "prod" | "" (unspecified). Free-form and
+    # not validated so a new value can be introduced without a code change.
+    environment: str = Field(default="", max_length=32)
     # folder name (the "group"); resolved to an existing Folder in the route, else left unassigned.
     group: str | None = None
 
@@ -580,6 +583,7 @@ class DbConnectionUpdate(BaseModel):
     username: str | None = None
     password: str | None = None
     database: str | None = None
+    environment: str | None = Field(default=None, max_length=32)
     group: str | None = None
 
 
@@ -593,6 +597,7 @@ class DbConnectionRead(BaseModel):
     port: int
     username: str = ""
     database: str = ""
+    environment: str = ""
     group: str | None = None
     has_password: bool = False
     created_at: datetime
@@ -610,6 +615,90 @@ class DbConnectionQueryRequest(BaseModel):
     # rows are capped at min(parse_limit(sql) or 200, 5000) in the route; this field is accepted
     # for forward-compatibility but the effective cap is derived from the SQL's own LIMIT.
     limit: int | None = Field(default=None, ge=1)
+
+
+# --- database metadata / catalog browsing (DBeaver-style) -----------------------------------
+#
+# Read-only introspection shapes for the schema tree and the object-detail panes. Every one of
+# these is produced by app.services.db_metadata from information_schema / system catalogs; nothing
+# here is client-supplied on write except the generate-sql request.
+
+
+class DbSchema(BaseModel):
+    name: str
+
+
+class DbRoutine(BaseModel):
+    schema: str = ""
+    name: str
+    # "function" | "procedure"
+    kind: str = "function"
+
+
+class DbColumn(BaseModel):
+    name: str
+    data_type: str = ""
+    nullable: bool = True
+    default: str = ""
+    is_primary_key: bool = False
+    ordinal: int = 0
+
+
+class DbIndex(BaseModel):
+    name: str
+    columns: list[str] = Field(default_factory=list)
+    unique: bool = False
+    primary: bool = False
+
+
+class DbConstraint(BaseModel):
+    name: str
+    # PRIMARY KEY | UNIQUE | CHECK | FOREIGN KEY
+    type: str = ""
+    # engine DDL text where available (PostgreSQL); "" on MySQL
+    definition: str = ""
+
+
+class DbForeignKey(BaseModel):
+    name: str
+    columns: list[str] = Field(default_factory=list)
+    ref_schema: str = ""
+    ref_table: str = ""
+    ref_columns: list[str] = Field(default_factory=list)
+
+
+class DbGenerateSqlRequest(BaseModel):
+    schema: str = Field(default="", max_length=255)
+    table: str = Field(min_length=1, max_length=255)
+    # select | insert | update | delete | create -- validated in db_metadata.generate_sql
+    kind: str = "select"
+
+
+class DbGenerateSqlResult(BaseModel):
+    sql: str
+
+
+# --- database query history (feature/db-connect follow-on) ----------------------------------
+#
+# One row per query run through a saved connection's console. The connection identity is snapshotted
+# so the record survives the connection being deleted; nothing secret is stored (only SQL + outcome).
+
+
+class DbQueryHistoryRead(BaseModel):
+    id: int
+    # the DbConnection.id it ran against, or null once that connection is gone
+    connection_id: int | None = None
+    connection_name: str = ""
+    engine: str = ""
+    database: str = ""
+    user_email: str = ""
+    sql: str = ""
+    # "success" | "error"
+    status: str = "success"
+    error: str = ""
+    row_count: int = 0
+    elapsed_ms: int = 0
+    created_at: datetime
 
 
 class OperationRequest(BaseModel):

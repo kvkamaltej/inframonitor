@@ -19,7 +19,7 @@ from app.core.config import Settings, get_settings
 from app.core.database import Base, SessionLocal, engine
 from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_MENUS_KEY
 from app.core.security import SEEDED_GUEST_EMAIL, hash_password, verify_password
-from app.models.entities import AppSetting, Role, Server, User
+from app.models.entities import AppSetting, DbConnection, Role, Server, User
 
 
 settings = get_settings()
@@ -84,6 +84,23 @@ def _migrate_server_columns() -> None:
             conn.execute(
                 text(f"ALTER TABLE servers ADD COLUMN {name} {_column_ddl_type(name)} DEFAULT {default}")
             )
+
+
+def _migrate_db_connection_columns() -> None:
+    # db_connections is created by create_all() on a fresh install (with the environment column
+    # already present), but a database whose db_connections table predates the column needs it
+    # ALTERed in. Same compile-the-type-from-the-ORM approach as _migrate_server_columns so the
+    # DDL is correct on SQLite and PostgreSQL alike. A no-op once the column exists.
+    inspector = inspect(engine)
+    if "db_connections" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("db_connections")}
+    if "environment" in existing:
+        return
+    column = DbConnection.__table__.columns.get("environment")
+    ddl_type = column.type.compile(dialect=engine.dialect) if column is not None else "VARCHAR(32)"
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE db_connections ADD COLUMN environment {ddl_type} DEFAULT ''"))
 
 
 def _ensure_shell_favorites_unique() -> None:
@@ -264,6 +281,7 @@ def _warn_if_default_admin_password() -> None:
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
     _migrate_server_columns()
+    _migrate_db_connection_columns()
     _ensure_shell_favorites_unique()
     _backfill_public_ids()
     _seed_defaults()

@@ -963,6 +963,10 @@ export type DbConnection = {
   username: string;
   database: string;
   group: string | null;
+  // deployment tier for this connection ("", "dev", "qa", "uat", "prod"). Drives the env badge and
+  // the production-safety guardrails in the workspace: a "prod" connection warns before executing
+  // and requires a typed database-name confirmation for destructive statements.
+  environment: string;
   has_password: boolean;
   created_at: string;
 };
@@ -977,12 +981,56 @@ export type DbConnectionInput = {
   password?: string;
   database?: string;
   group?: string | null;
+  environment?: string;
 };
 
 export type DbTable = {
   schema: string;
   name: string;
   type: string;
+};
+
+// --- database metadata (feature/db-workspace) ----------------------------------------------
+// The lazy-tree navigator drills schema -> tables/views/routines -> columns/indexes/constraints/
+// foreign-keys. Each level is its own endpoint so a big database's tree only fetches what the user
+// actually expands. All are scoped to a stored connection and use its saved credentials.
+
+export type DbSchema = { name: string };
+export type DbObject = { schema: string; name: string; type: string };
+export type DbRoutine = { schema: string; name: string; kind: string };
+export type DbColumn = {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+  default: string;
+  is_primary_key: boolean;
+  ordinal: number;
+};
+export type DbIndex = { name: string; columns: string[]; unique: boolean; primary: boolean };
+export type DbConstraint = { name: string; type: string; definition: string };
+export type DbForeignKey = {
+  name: string;
+  columns: string[];
+  ref_schema: string;
+  ref_table: string;
+  ref_columns: string[];
+};
+
+// A row in the per-user query-history log. connection_id is null when the connection it ran against
+// has since been deleted (connection_name still holds the name it had at the time).
+export type DbQueryHistory = {
+  id: number;
+  connection_id: number | null;
+  connection_name: string;
+  engine: string;
+  database: string;
+  user_email: string;
+  sql: string;
+  status: string;
+  error: string;
+  row_count: number;
+  elapsed_ms: number;
+  created_at: string;
 };
 
 export async function getDbConnections(token: string): Promise<DbConnection[]> {
@@ -1026,6 +1074,87 @@ export async function runConnectionQuery(token: string, id: string, sql: string,
     method: "POST",
     body: JSON.stringify({ sql, limit })
   });
+}
+
+// --- database metadata + query history (feature/db-workspace) ------------------------------
+// The navigator's lazy tree. Every path segment is encoded because schema/table names can carry
+// characters (dots, spaces, slashes) that would otherwise corrupt the URL.
+
+export async function getDbSchemas(token: string, id: string): Promise<DbSchema[]> {
+  return request<DbSchema[]>(`/db/connections/${encodeURIComponent(id)}/schemas`, token);
+}
+
+export async function getDbSchemaTables(token: string, id: string, schema: string): Promise<DbObject[]> {
+  return request<DbObject[]>(`/db/connections/${encodeURIComponent(id)}/schemas/${encodeURIComponent(schema)}/tables`, token);
+}
+
+export async function getDbSchemaRoutines(token: string, id: string, schema: string): Promise<DbRoutine[]> {
+  return request<DbRoutine[]>(`/db/connections/${encodeURIComponent(id)}/schemas/${encodeURIComponent(schema)}/routines`, token);
+}
+
+export async function getDbColumns(token: string, id: string, schema: string, table: string): Promise<DbColumn[]> {
+  return request<DbColumn[]>(
+    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/columns`,
+    token
+  );
+}
+
+export async function getDbIndexes(token: string, id: string, schema: string, table: string): Promise<DbIndex[]> {
+  return request<DbIndex[]>(
+    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/indexes`,
+    token
+  );
+}
+
+export async function getDbConstraints(token: string, id: string, schema: string, table: string): Promise<DbConstraint[]> {
+  return request<DbConstraint[]>(
+    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/constraints`,
+    token
+  );
+}
+
+export async function getDbForeignKeys(token: string, id: string, schema: string, table: string): Promise<DbForeignKey[]> {
+  return request<DbForeignKey[]>(
+    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/foreign-keys`,
+    token
+  );
+}
+
+// Server-side SQL generation for a table: SELECT/INSERT/UPDATE/DELETE/CREATE. Returns the text the
+// workspace drops into a new editor tab (write kinds are never auto-run).
+export async function generateDbSql(
+  token: string,
+  id: string,
+  payload: { schema: string; table: string; kind: string }
+): Promise<{ sql: string }> {
+  return request<{ sql: string }>(`/db/connections/${encodeURIComponent(id)}/generate-sql`, token, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+// The signed-in user's query history, most-recent first. Optional filters narrow by connection,
+// status ("ok"/"error"), or a free-text search over the SQL.
+export async function getDbQueryHistory(
+  token: string,
+  opts?: { connection_id?: number; status?: string; search?: string }
+): Promise<DbQueryHistory[]> {
+  const params = new URLSearchParams();
+  if (opts?.connection_id != null) params.set("connection_id", String(opts.connection_id));
+  if (opts?.status) params.set("status", opts.status);
+  if (opts?.search) params.set("search", opts.search);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return request<DbQueryHistory[]>(`/db/query-history${query}`, token);
+}
+
+export async function clearDbQueryHistory(token: string): Promise<void> {
+  // 204 No Content on success, so request<T> is wrong here: response.json() throws on an empty body.
+  const response = await fetch(`${API_URL}/db/query-history`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store"
+  });
+  if (!response.ok) throw new ApiError(response.status, await response.text());
 }
 
 // Edit a user's details (admin-only). full_name/role update the row; a non-empty password resets

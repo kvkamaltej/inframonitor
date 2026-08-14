@@ -26,7 +26,7 @@ from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_KEYS, ROLE_MENUS
 from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, require_user_not_guest, verify_password
 from app.services.secrets import VaultError, get_vault_config, load_credentials, save_vault_config, store_credentials, test_vault
 from app.services import db_backend
-from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, Folder, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
+from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, DbQueryHistory, Folder, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
     AccessPolicyRead,
@@ -46,8 +46,17 @@ from app.schemas.contracts import (
     DbConnectionRequest,
     DbConnectionResult,
     DbConnectionUpdate,
+    DbColumn,
+    DbConstraint,
+    DbForeignKey,
+    DbGenerateSqlRequest,
+    DbGenerateSqlResult,
+    DbIndex,
+    DbQueryHistoryRead,
     DbQueryRequest,
     DbQueryResult,
+    DbRoutine,
+    DbSchema,
     DbTable,
     FolderCreate,
     FolderRead,
@@ -110,6 +119,7 @@ from app.schemas.contracts import (
 from app.services.csv_import import CsvImportError, import_servers
 from app.services.db_console import DEFAULT_PORTS, ENGINES, DbConsoleError
 from app.services import db_console
+from app.services import db_metadata
 from app.services import kube
 from app.services.kube import KubeError
 from app.services.integrations import check_integrations
@@ -2351,6 +2361,7 @@ def _db_connection_read(db: Session, conn: DbConnection) -> DbConnectionRead:
         port=conn.port,
         username=conn.username,
         database=conn.database,
+        environment=conn.environment or "",
         group=_db_connection_group_name(db, conn),
         has_password=bool(conn.encrypted_password),
         created_at=conn.created_at,
@@ -2375,6 +2386,7 @@ def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_
         username=payload.username,
         encrypted_password=encrypt_secret(payload.password),
         database=payload.database,
+        environment=(payload.environment or "").strip(),
         folder_id=_resolve_group_to_folder_id(db, payload.group),
     )
     db.add(conn)
@@ -2424,6 +2436,8 @@ def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dic
         conn.username = data["username"]
     if "database" in data and data["database"] is not None:
         conn.database = data["database"]
+    if "environment" in data and data["environment"] is not None:
+        conn.environment = data["environment"].strip()
     # password: only overwrite when a non-empty value is supplied, so an edit that leaves the box
     # blank keeps the stored credential instead of wiping it (mirrors the kube secret handling).
     if data.get("password"):
@@ -2467,17 +2481,204 @@ def list_db_connection_tables(connection_id: str, _: dict = Depends(require_user
     return [DbTable(**table) for table in tables]
 
 
+def _record_db_query_history(db: Session, conn: DbConnection, user_email: str, sql: str, *, status_: str, error: str, row_count: int, elapsed_ms: int) -> None:
+    """Insert one DbQueryHistory row, snapshotting the connection's identity.
+
+    Best-effort: a failure to record history must never turn a successful (or already-failed)
+    query into an HTTP 500, so any exception is swallowed after rolling the session back.
+    """
+    try:
+        db.add(DbQueryHistory(
+            connection_id=conn.id,
+            connection_name=conn.name,
+            engine=conn.engine,
+            database=conn.database or "",
+            user_email=user_email or "",
+            sql=sql,
+            status=status_,
+            error=error,
+            row_count=row_count,
+            elapsed_ms=elapsed_ms,
+        ))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 @router.post("/db/connections/{connection_id}/query", response_model=DbQueryResult)
-def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbQueryResult:
+def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, claims: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbQueryResult:
     conn = _db_connection_or_404(db, connection_id)
+    user_email = claims.get("sub", "")
     row_cap = min(db_console.parse_limit(payload.sql) or _DB_DEFAULT_ROW_LIMIT, _DB_MAX_ROW_LIMIT)
     try:
         result = db_console.run_query(
             conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database, payload.sql, row_cap
         )
     except DbConsoleError as exc:
+        _record_db_query_history(
+            db, conn, user_email, payload.sql,
+            status_="error", error=str(exc), row_count=0, elapsed_ms=0,
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    _record_db_query_history(
+        db, conn, user_email, payload.sql,
+        status_="success", error="", row_count=int(result.get("row_count", 0)), elapsed_ms=int(result.get("elapsed_ms", 0)),
+    )
     return DbQueryResult(**result)
+
+
+# --- database metadata / catalog browsing (DBeaver-style) -----------------------------------
+#
+# Read-only introspection over a saved connection: the schema tree (schemas -> tables/views/
+# routines) and the per-table detail panes (columns/indexes/constraints/foreign-keys), plus a
+# generate-SQL helper that builds boilerplate from a table's real columns. Every call decrypts the
+# stored password, runs one short introspection query via db_metadata, and surfaces a DbConsoleError
+# as a clean HTTP 400. Same auth as the rest of the /db routes (require_user_not_guest).
+
+
+def _db_meta_args(conn: DbConnection) -> tuple:
+    """The leading (engine, host, port, username, password, database) argument tuple every
+    db_metadata function takes, with the stored password decrypted."""
+    return (conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database)
+
+
+@router.get("/db/connections/{connection_id}/schemas", response_model=list[DbSchema])
+def list_db_connection_schemas(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbSchema]:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        rows = db_metadata.list_schemas(*_db_meta_args(conn))
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [DbSchema(**row) for row in rows]
+
+
+@router.get("/db/connections/{connection_id}/schemas/{schema}/tables", response_model=list[DbTable])
+def list_db_connection_schema_tables(connection_id: str, schema: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbTable]:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        rows = db_metadata.list_tables_in_schema(*_db_meta_args(conn), schema)
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [DbTable(**row) for row in rows]
+
+
+@router.get("/db/connections/{connection_id}/schemas/{schema}/routines", response_model=list[DbRoutine])
+def list_db_connection_schema_routines(connection_id: str, schema: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbRoutine]:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        rows = db_metadata.list_routines(*_db_meta_args(conn), schema)
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [DbRoutine(**row) for row in rows]
+
+
+@router.get("/db/connections/{connection_id}/tables/{schema}/{table}/columns", response_model=list[DbColumn])
+def list_db_connection_table_columns(connection_id: str, schema: str, table: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbColumn]:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        rows = db_metadata.list_columns(*_db_meta_args(conn), schema, table)
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [DbColumn(**row) for row in rows]
+
+
+@router.get("/db/connections/{connection_id}/tables/{schema}/{table}/indexes", response_model=list[DbIndex])
+def list_db_connection_table_indexes(connection_id: str, schema: str, table: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbIndex]:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        rows = db_metadata.list_indexes(*_db_meta_args(conn), schema, table)
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [DbIndex(**row) for row in rows]
+
+
+@router.get("/db/connections/{connection_id}/tables/{schema}/{table}/constraints", response_model=list[DbConstraint])
+def list_db_connection_table_constraints(connection_id: str, schema: str, table: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbConstraint]:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        rows = db_metadata.list_constraints(*_db_meta_args(conn), schema, table)
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [DbConstraint(**row) for row in rows]
+
+
+@router.get("/db/connections/{connection_id}/tables/{schema}/{table}/foreign-keys", response_model=list[DbForeignKey])
+def list_db_connection_table_foreign_keys(connection_id: str, schema: str, table: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbForeignKey]:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        rows = db_metadata.list_foreign_keys(*_db_meta_args(conn), schema, table)
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [DbForeignKey(**row) for row in rows]
+
+
+@router.post("/db/connections/{connection_id}/generate-sql", response_model=DbGenerateSqlResult)
+def generate_db_connection_sql(connection_id: str, payload: DbGenerateSqlRequest, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbGenerateSqlResult:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        sql = db_metadata.generate_sql(*_db_meta_args(conn), payload.schema, payload.table, payload.kind)
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return DbGenerateSqlResult(sql=sql)
+
+
+# --- database query history (feature/db-connect follow-on) ----------------------------------
+#
+# A per-user log of queries run through the saved-connection console (recorded by the query route
+# above). Reads are scoped to the caller; DELETE clears only the caller's own rows. Nothing secret
+# is stored -- only the SQL text and its outcome.
+
+_DB_HISTORY_DEFAULT_LIMIT = 100
+_DB_HISTORY_MAX_LIMIT = 500
+
+
+def _db_query_history_read(row: DbQueryHistory) -> DbQueryHistoryRead:
+    return DbQueryHistoryRead(
+        id=row.id,
+        connection_id=row.connection_id,
+        connection_name=row.connection_name,
+        engine=row.engine,
+        database=row.database,
+        user_email=row.user_email,
+        sql=row.sql,
+        status=row.status,
+        error=row.error,
+        row_count=row.row_count,
+        elapsed_ms=row.elapsed_ms,
+        created_at=row.created_at,
+    )
+
+
+@router.get("/db/query-history", response_model=list[DbQueryHistoryRead])
+def list_db_query_history(
+    connection_id: int | None = None,
+    status: str | None = None,
+    search: str | None = None,
+    limit: int = _DB_HISTORY_DEFAULT_LIMIT,
+    claims: dict = Depends(require_user_not_guest),
+    db: Session = Depends(get_db),
+) -> list[DbQueryHistoryRead]:
+    # scoped to the caller: history is a personal record, not a shared audit log
+    stmt = select(DbQueryHistory).where(DbQueryHistory.user_email == claims.get("sub", ""))
+    if connection_id is not None:
+        stmt = stmt.where(DbQueryHistory.connection_id == connection_id)
+    if status:
+        stmt = stmt.where(DbQueryHistory.status == status.strip().lower())
+    if search:
+        stmt = stmt.where(func.lower(DbQueryHistory.sql).like(f"%{search.strip().lower()}%"))
+    capped = max(1, min(limit or _DB_HISTORY_DEFAULT_LIMIT, _DB_HISTORY_MAX_LIMIT))
+    stmt = stmt.order_by(DbQueryHistory.id.desc()).limit(capped)
+    return [_db_query_history_read(row) for row in db.scalars(stmt).all()]
+
+
+@router.delete("/db/query-history", status_code=status.HTTP_204_NO_CONTENT)
+def clear_db_query_history(claims: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> None:
+    # clear only the caller's own history
+    db.execute(delete(DbQueryHistory).where(DbQueryHistory.user_email == claims.get("sub", "")))
+    db.commit()
 
 
 # --- kubernetes clusters (feature/kubernetes) ----------------------------------------------

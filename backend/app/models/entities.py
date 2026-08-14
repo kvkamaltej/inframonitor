@@ -231,7 +231,36 @@ class DbConnection(Base):
     username: Mapped[str] = mapped_column(String(255), default="")
     encrypted_password: Mapped[str] = mapped_column(Text, default="")
     database: Mapped[str] = mapped_column(String(255), default="")
+    # free-form environment tag ("dev" | "qa" | "uat" | "prod" | ""), so the UI can badge and
+    # group saved connections the way servers are tagged. "" means unspecified.
+    environment: Mapped[str] = mapped_column(String(32), default="")
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DbQueryHistory(Base):
+    # A record of one query run through a saved DbConnection's console. Kept independent of the
+    # DbConnection row: connection_id is a plain nullable int (not an FK with a cascade), and the
+    # connection_name/engine/database are snapshotted at run time, so the history survives even
+    # after the underlying connection is deleted. Nothing here is secret -- only the SQL text and
+    # its outcome are stored, never credentials.
+    __tablename__ = "db_query_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # the DbConnection.id this ran against, or NULL once that connection is gone. No FK on purpose:
+    # deleting a connection must not delete or block on its history rows.
+    connection_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    connection_name: Mapped[str] = mapped_column(String(255), default="")
+    engine: Mapped[str] = mapped_column(String(32), default="")
+    database: Mapped[str] = mapped_column(String(255), default="")
+    # the signed-in user (JWT sub) who ran it, so history reads/clears can be scoped per caller.
+    user_email: Mapped[str] = mapped_column(String(255), default="", index=True)
+    sql: Mapped[str] = mapped_column(Text, default="")
+    # "success" | "error"
+    status: Mapped[str] = mapped_column(String(16), default="success")
+    error: Mapped[str] = mapped_column(Text, default="")
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
