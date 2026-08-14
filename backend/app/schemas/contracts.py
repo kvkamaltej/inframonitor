@@ -48,6 +48,9 @@ class ServerCreate(BaseModel):
     support_contact: str = ""
     password: str = ""
     private_key: str = ""
+    # optional group (folder public_id) to create the server directly into; "" / None means the
+    # "Unassigned" bucket. Hostname uniqueness is scoped to this group.
+    folder_id: str | None = None
 
 
 class ServerUpdate(BaseModel):
@@ -559,10 +562,13 @@ class DbQueryResult(BaseModel):
 
 class DbConnectionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
-    # engine is validated in the route against {"postgres","mysql"} so a bad value is a clean 400.
+    # engine is validated in the route against {"postgres","mysql","sqlite"} so a bad value is a
+    # clean 400.
     engine: str = "postgres"
-    host: str = Field(min_length=1, max_length=255)
-    port: int = Field(ge=1, le=65535)
+    # host is required for the networked engines (enforced in the route) but blank for sqlite, whose
+    # `database` is a local file path; port has no meaning for sqlite, so both carry defaults.
+    host: str = Field(default="", max_length=255)
+    port: int = Field(default=0, ge=0, le=65535)
     username: str = Field(default="", max_length=255)
     password: str = Field(default="", max_length=1024)
     database: str = Field(default="", max_length=255)
@@ -622,6 +628,10 @@ class DbConnectionQueryRequest(BaseModel):
 # Read-only introspection shapes for the schema tree and the object-detail panes. Every one of
 # these is produced by app.services.db_metadata from information_schema / system catalogs; nothing
 # here is client-supplied on write except the generate-sql request.
+
+
+class DbDatabase(BaseModel):
+    name: str
 
 
 class DbSchema(BaseModel):

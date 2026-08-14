@@ -1,7 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, History, Play, PlayCircle, Plus, Sparkles, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Database,
+  History,
+  Maximize2,
+  Minimize2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Play,
+  PlayCircle,
+  Plus,
+  Sparkles,
+  X
+} from "lucide-react";
 import {
   clearDbQueryHistory,
   generateDbSql,
@@ -77,6 +90,8 @@ function analyzeDanger(sql: string): { dangerous: boolean; reason: string } {
 
 const MIN_LEFT = 220;
 const MAX_LEFT = 520;
+const MIN_EDITOR = 120;
+const MAX_EDITOR = 720;
 
 export function DbWorkspace({ token }: { token: string }) {
   const [connections, setConnections] = useState<DbConnection[]>([]);
@@ -84,6 +99,14 @@ export function DbWorkspace({ token }: { token: string }) {
   const [activeId, setActiveId] = useState<string>("");
   const [leftWidth, setLeftWidth] = useState(300);
   const [dragging, setDragging] = useState(false);
+  // left navigator pane collapsed to a thin strip
+  const [navCollapsed, setNavCollapsed] = useState(false);
+  // vertical split between the SQL editor and the result grid
+  const [editorHeight, setEditorHeight] = useState(260);
+  const [vDragging, setVDragging] = useState(false);
+  const vDragRef = useRef<{ startY: number; startH: number } | null>(null);
+  // fullscreen (focus) mode: the workspace covers the app sidebar + header as a fixed overlay
+  const [fullscreen, setFullscreen] = useState(false);
   // bump to force the navigator to reload its connection list (kept in sync when we reload ours)
   const [navRefreshKey] = useState(0);
 
@@ -247,7 +270,13 @@ export function DbWorkspace({ token }: { token: string }) {
         sql: `-- generating ${kind}…`
       });
       try {
-        const { sql } = await generateDbSql(token, ctx.connectionId, { schema: ctx.schema, table: ctx.table, kind });
+        const { sql } = await generateDbSql(token, ctx.connectionId, {
+          schema: ctx.schema,
+          table: ctx.table,
+          kind,
+          // when browsing a non-default database via "Show all databases", target that database
+          database: ctx.database
+        });
         // Write kinds are never auto-run; the user reviews and runs them by hand.
         patchTab(id, { sql });
       } catch (e) {
@@ -363,7 +392,7 @@ export function DbWorkspace({ token }: { token: string }) {
     });
   }
 
-  // --- resize divider ---
+  // --- left navigator resize divider ---
   useEffect(() => {
     if (!dragging) return;
     function onMove(e: MouseEvent) {
@@ -380,6 +409,56 @@ export function DbWorkspace({ token }: { token: string }) {
     };
   }, [dragging]);
 
+  // --- editor/result vertical resize divider ---
+  useEffect(() => {
+    if (!vDragging) return;
+    function onMove(e: MouseEvent) {
+      const start = vDragRef.current;
+      if (!start) return;
+      const next = start.startH + (e.clientY - start.startY);
+      setEditorHeight(Math.max(MIN_EDITOR, Math.min(MAX_EDITOR, next)));
+    }
+    function onUp() {
+      setVDragging(false);
+      vDragRef.current = null;
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [vDragging]);
+
+  // Escape leaves fullscreen (focus) mode.
+  useEffect(() => {
+    if (!fullscreen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setFullscreen(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullscreen]);
+
+  // "Fetch all rows": re-run the active tab's last query at the server's max limit (5000). Keeps the
+  // current result visible until the larger set arrives so the grid + footer don't flicker away.
+  const fetchAll = useCallback(
+    async (tabId: string) => {
+      const tab = tabsRef.current.find((t) => t.id === tabId);
+      if (!tab || !tab.connectionId || !tab.sql.trim()) return;
+      patchTab(tabId, { running: true, error: "" });
+      try {
+        const res = await runConnectionQuery(token, tab.connectionId, tab.sql, 5000);
+        patchTab(tabId, { running: false, result: res, error: "" });
+      } catch (e) {
+        patchTab(tabId, { running: false, error: e instanceof Error ? e.message : "Query failed" });
+      } finally {
+        void loadHistory();
+      }
+    },
+    [token, patchTab, loadHistory]
+  );
+
   // "Run selection" toolbar button: reads the live DOM selection so it works with CodeMirror
   // without needing a ref into the editor; falls back to the whole buffer when nothing is selected.
   function runSelection() {
@@ -391,24 +470,55 @@ export function DbWorkspace({ token }: { token: string }) {
   const prodGateValid = prodGate ? prodTyped.trim() === (prodGate.database || "").trim() && !!prodGate.database : false;
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] w-full overflow-hidden bg-page">
-      {/* LEFT: navigator */}
-      <div style={{ width: leftWidth }} className="h-full shrink-0 overflow-hidden bg-elevated">
-        <DbNavigator
-          token={token}
-          onOpenEditor={onOpenEditor}
-          onViewData={onViewData}
-          onGenerate={onGenerate}
-          refreshKey={navRefreshKey}
-        />
-      </div>
+    <div
+      className={
+        fullscreen
+          ? "fixed inset-0 z-50 flex h-screen w-screen overflow-hidden bg-page"
+          : "flex h-[calc(100vh-4rem)] w-full overflow-hidden bg-page"
+      }
+    >
+      {navCollapsed ? (
+        /* collapsed: thin strip with an expand affordance */
+        <div className="flex h-full w-10 shrink-0 flex-col items-center gap-3 border-r border-edge bg-elevated py-3">
+          <button
+            type="button"
+            onClick={() => setNavCollapsed(false)}
+            title="Show connections"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-fg"
+          >
+            <PanelLeftOpen size={16} />
+          </button>
+          <Database size={16} className="text-accent" />
+        </div>
+      ) : (
+        <>
+          {/* LEFT: navigator */}
+          <div style={{ width: leftWidth }} className="relative h-full shrink-0 overflow-hidden bg-elevated">
+            <button
+              type="button"
+              onClick={() => setNavCollapsed(true)}
+              title="Collapse connections"
+              className="absolute bottom-2 right-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-lg bg-surface text-muted ring-1 ring-edge transition-colors hover:text-fg"
+            >
+              <PanelLeftClose size={15} />
+            </button>
+            <DbNavigator
+              token={token}
+              onOpenEditor={onOpenEditor}
+              onViewData={onViewData}
+              onGenerate={onGenerate}
+              refreshKey={navRefreshKey}
+            />
+          </div>
 
-      {/* divider */}
-      <div
-        onMouseDown={() => setDragging(true)}
-        className={`h-full w-1 shrink-0 cursor-col-resize bg-edge transition-colors hover:bg-accent ${dragging ? "bg-accent" : ""}`}
-        title="Drag to resize"
-      />
+          {/* divider */}
+          <div
+            onMouseDown={() => setDragging(true)}
+            className={`h-full w-1 shrink-0 cursor-col-resize bg-edge transition-colors hover:bg-accent ${dragging ? "bg-accent" : ""}`}
+            title="Drag to resize"
+          />
+        </>
+      )}
 
       {/* RIGHT: editor + results + history */}
       <div className="flex h-full min-w-0 flex-1">
@@ -457,6 +567,17 @@ export function DbWorkspace({ token }: { token: string }) {
             >
               <History size={14} /> History
             </button>
+            <button
+              type="button"
+              onClick={() => setFullscreen((v) => !v)}
+              title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors ${
+                fullscreen ? "bg-accent text-white" : "text-muted ring-1 ring-edge hover:text-fg"
+              }`}
+            >
+              {fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              {fullscreen ? "Exit" : "Fullscreen"}
+            </button>
           </div>
 
           {!activeTab ? (
@@ -471,9 +592,9 @@ export function DbWorkspace({ token }: { token: string }) {
               </button>
             </div>
           ) : (
-            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3">
+            <div className="flex min-h-0 flex-1 flex-col p-3">
               {/* toolbar */}
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 pb-3">
                 <button
                   type="button"
                   onClick={() => runTab(activeTab.id, activeTab.sql)}
@@ -548,16 +669,37 @@ export function DbWorkspace({ token }: { token: string }) {
               </div>
 
               {/* editor */}
-              <DbSqlEditor
-                value={activeTab.sql}
-                onChange={(v) => patchTab(activeTab.id, { sql: v })}
-                onRun={(sqlText) => runTab(activeTab.id, sqlText)}
-                engine={activeTab.engine}
-                height="260px"
+              <div style={{ height: editorHeight }} className="min-h-0 shrink-0 overflow-hidden">
+                <DbSqlEditor
+                  value={activeTab.sql}
+                  onChange={(v) => patchTab(activeTab.id, { sql: v })}
+                  onRun={(sqlText) => runTab(activeTab.id, sqlText)}
+                  engine={activeTab.engine}
+                  height={`${editorHeight}px`}
+                />
+              </div>
+
+              {/* horizontal divider: drag to grow/shrink the editor vs the results */}
+              <div
+                onMouseDown={(e) => {
+                  vDragRef.current = { startY: e.clientY, startH: editorHeight };
+                  setVDragging(true);
+                }}
+                className={`my-1.5 h-1.5 shrink-0 cursor-row-resize rounded bg-edge transition-colors hover:bg-accent ${
+                  vDragging ? "bg-accent" : ""
+                }`}
+                title="Drag to resize editor / results"
               />
 
               {/* results */}
-              <DbResultGrid result={activeTab.result} error={activeTab.error} />
+              <div className="min-h-0 flex-1 overflow-auto">
+                <DbResultGrid
+                  result={activeTab.result}
+                  error={activeTab.error}
+                  onFetchAll={() => fetchAll(activeTab.id)}
+                  fetching={activeTab.running}
+                />
+              </div>
             </div>
           )}
         </div>

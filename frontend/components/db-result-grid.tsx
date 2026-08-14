@@ -1,16 +1,35 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
-import { AlertTriangle, ArrowDown, ArrowUp, Braces, Check, Copy, Table2 } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  Braces,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  DownloadCloud,
+  Loader2,
+  Table2
+} from "lucide-react";
 import { downloadTextFile } from "@/lib/download";
 import type { DbQueryResult } from "@/lib/api";
 
 type DbResultGridProps = {
   result: DbQueryResult | null;
   error?: string;
+  // re-runs the current tab's query at the server's max limit (5000). Absent => button hidden.
+  onFetchAll?: () => void;
+  // true while a (re-)fetch is in flight; disables the fetch-all button and shows a spinner.
+  fetching?: boolean;
 };
 
 type SortDir = "asc" | "desc" | null;
+
+// Client-side page sizes. "all" shows every fetched row in one page.
+type PageSize = "50" | "100" | "500" | "all";
 
 // Render any cell value as a string; null/undefined stay null so the grid can style them.
 function cellText(value: unknown): string {
@@ -104,10 +123,12 @@ function ToolbarButton({
   );
 }
 
-export function DbResultGrid({ result, error }: DbResultGridProps) {
+export function DbResultGrid({ result, error, onFetchAll, fetching }: DbResultGridProps) {
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>(null);
   const [copied, setCopied] = useState(false);
+  const [pageSize, setPageSize] = useState<PageSize>("100");
+  const [page, setPage] = useState(0);
 
   const columns = result?.columns ?? [];
   const rows = result?.rows ?? [];
@@ -132,6 +153,19 @@ export function DbResultGrid({ result, error }: DbResultGridProps) {
     });
     return copy;
   }, [rows, sortCol, sortDir]);
+
+  // --- client-side pagination over the fetched (and sorted) rows ---
+  const perPage = pageSize === "all" ? sortedRows.length || 1 : Number(pageSize);
+  const totalPages = pageSize === "all" ? 1 : Math.max(1, Math.ceil(sortedRows.length / perPage));
+  const clampedPage = Math.min(page, totalPages - 1);
+  const startIdx = pageSize === "all" ? 0 : clampedPage * perPage;
+  const endIdx = pageSize === "all" ? sortedRows.length : Math.min(startIdx + perPage, sortedRows.length);
+  const pageRows = pageSize === "all" ? sortedRows : sortedRows.slice(startIdx, endIdx);
+
+  // A new result set, a page-size change, or a re-sort resets to the first page.
+  useEffect(() => {
+    setPage(0);
+  }, [result, pageSize, sortCol, sortDir]);
 
   function toggleSort(index: number) {
     if (sortCol !== index) {
@@ -225,8 +259,8 @@ export function DbResultGrid({ result, error }: DbResultGridProps) {
             </tr>
           </thead>
           <tbody>
-            {sortedRows.map((row, rIndex) => (
-              <tr key={rIndex} className="odd:bg-elevated/40 hover:bg-elevated">
+            {pageRows.map((row, rIndex) => (
+              <tr key={startIdx + rIndex} className="odd:bg-elevated/40 hover:bg-elevated">
                 {columns.map((_, cIndex) => {
                   const value = row[cIndex];
                   if (isNull(value)) {
@@ -253,13 +287,70 @@ export function DbResultGrid({ result, error }: DbResultGridProps) {
         </table>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 border-t border-edge px-3 py-2 text-xs text-muted">
-        <span>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-edge px-3 py-2 text-xs text-muted">
+        <span className="font-medium text-fg">
           {result.row_count} rows • {result.elapsed_ms} ms
         </span>
-        {result.truncated ? (
-          <span className="text-danger">• results truncated — refine the query to see everything</span>
+        {sortedRows.length > 0 ? (
+          <span>
+            showing {startIdx + 1}–{endIdx} of {sortedRows.length}
+          </span>
         ) : null}
+        {result.truncated ? (
+          <span className="text-danger">• truncated at the server row cap</span>
+        ) : null}
+
+        {onFetchAll ? (
+          <button
+            type="button"
+            onClick={onFetchAll}
+            disabled={fetching}
+            title="Re-run this query at the server's maximum of 5000 rows"
+            className="inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 font-semibold text-fg ring-1 ring-edge transition-colors hover:bg-elevated disabled:opacity-50"
+          >
+            {fetching ? <Loader2 size={13} className="animate-spin" /> : <DownloadCloud size={13} />}
+            Fetch all (up to 5000)
+          </button>
+        ) : null}
+
+        <div className="ml-auto flex items-center gap-2">
+          <label className="flex items-center gap-1.5">
+            <span>Rows</span>
+            <select
+              value={pageSize}
+              onChange={(e) => setPageSize(e.target.value as PageSize)}
+              className="h-7 rounded-lg border-none bg-elevated px-2 text-xs font-medium text-fg outline-none ring-1 ring-edge focus:ring-2 focus:ring-accent"
+            >
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="500">500</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={clampedPage <= 0}
+              title="Previous page"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted ring-1 ring-edge transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40"
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <span className="min-w-[4.5rem] text-center tabular-nums">
+              {clampedPage + 1} / {totalPages}
+            </span>
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={clampedPage >= totalPages - 1}
+              title="Next page"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted ring-1 ring-edge transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -299,4 +299,4 @@ def test_route_query_error_is_400_with_clean_detail(client, monkeypatch):
 def test_route_query_bad_engine_is_400(client):
     r = client.post("/api/db/query", json={"engine": "oracle", "host": "h", "port": 1521, "sql": "SELECT 1"})
     assert r.status_code == 400
-    assert "postgres or mysql" in r.json()["detail"]
+    assert "sqlite" in r.json()["detail"]

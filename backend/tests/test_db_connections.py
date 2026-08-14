@@ -125,7 +125,7 @@ def test_get_missing_is_404(client):
 def test_create_rejects_bad_engine(client):
     r = client.post("/api/db/connections", json={"name": "x", "engine": "oracle", "host": "h", "port": 1521})
     assert r.status_code == 400
-    assert "postgres or mysql" in r.json()["detail"]
+    assert "sqlite" in r.json()["detail"]
 
 
 # --- /test (unsaved + saved) -----------------------------------------------------------------

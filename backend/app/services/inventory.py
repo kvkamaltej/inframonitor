@@ -90,7 +90,7 @@ class InventoryService:
         servers = self.db.scalars(query).all()
         return [to_read(server) for server in servers]
 
-    def create_server(self, payload: ServerCreate) -> ServerRead:
+    def create_server(self, payload: ServerCreate, folder_id: int | None = None) -> ServerRead:
         now = datetime.now(timezone.utc)
         server = Server(
             hostname=payload.hostname,
@@ -107,6 +107,7 @@ class InventoryService:
             status=ServerStatus.unknown,
             health_score=0,
             last_health_check=now,
+            folder_id=folder_id,
         )
         self.db.add(server)
         self.db.commit()

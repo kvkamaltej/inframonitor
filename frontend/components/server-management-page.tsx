@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, TerminalSquare, Trash2, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, CircleDot, Cpu, ExternalLink, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, HardDrive, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, Server as ServerIcon, TerminalSquare, Trash2, X } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AddServerForm } from "@/components/add-server-form";
 import { AppShell } from "@/components/app-shell";
@@ -29,6 +30,22 @@ function osLabel(server: Server): string {
   const distro = server.os_distro ? server.os_distro.charAt(0).toUpperCase() + server.os_distro.slice(1) : "";
   const flavour = [distro, server.os_version].filter(Boolean).join(" ");
   return flavour || server.operating_system || "Unknown";
+}
+
+// The family/package-manager detail (e.g. "debian / apt") now lives in the OS cell's hover
+// tooltip rather than a second line. Empty when neither is known, so no bare " / " leaks out.
+function osDetail(server: Server): string {
+  return [server.os_family, server.package_manager].filter(Boolean).join(" / ");
+}
+
+// lucide has no distro logos, so map the OS family to a sensible generic glyph. Anything
+// unrecognised (or missing) falls back to a plain server icon.
+function osIcon(server: Server): LucideIcon {
+  const family = `${server.os_family || server.os_distro || ""}`.toLowerCase();
+  if (/(ubuntu|debian|mint)/.test(family)) return CircleDot;
+  if (/(rhel|centos|fedora|rocky|alma|red\s*hat|suse)/.test(family)) return ServerIcon;
+  if (/(alpine|arch|gentoo)/.test(family)) return Cpu;
+  return HardDrive;
 }
 
 function uptimeLabel(seconds: number): string {
@@ -152,7 +169,7 @@ function SortHeader({ label, column, sortKey, sortDir, onSort, className }: { la
   const active = sortKey === column;
   const Icon = active ? (sortDir === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
   return (
-    <th className={`px-6 py-4 font-semibold ${className ?? ""}`}>
+    <th className={`px-3 py-3 font-semibold ${className ?? ""}`}>
       <button
         onClick={() => onSort(column)}
         title={`Sort by ${label.toLowerCase()}`}
@@ -194,12 +211,17 @@ function RowActions({ server, canShell, vitalsBusy, onShell, onRefreshVitals, on
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const btnRef = useRef<HTMLButtonElement | null>(null);
   const WIDTH = 224;
+  // Approx. height of the five items + divider; only used to decide whether to flip upward.
+  const EST_HEIGHT = 236;
 
   function openMenu() {
     const box = btnRef.current?.getBoundingClientRect();
     if (!box) return;
     const x = Math.max(8, Math.min(box.right - WIDTH, window.innerWidth - WIDTH - 8));
-    setPos({ x, y: box.bottom + 4 });
+    // Flip the menu above the button when there isn't room below it in the viewport.
+    const openUp = box.bottom + 4 + EST_HEIGHT > window.innerHeight && box.top - 4 - EST_HEIGHT > 0;
+    const y = openUp ? Math.max(8, box.top - 4 - EST_HEIGHT) : box.bottom + 4;
+    setPos({ x, y });
   }
 
   useEffect(() => {
@@ -577,25 +599,35 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
 
   // One row renderer shared by the grouped and flat views, so the columns can never drift apart
   // between the two. Admin-only controls (Shell, folder assignment) live in the trailing cell.
-  const renderRow = (server: Server) => (
+  const renderRow = (server: Server) => {
+    const OsGlyph = osIcon(server);
+    return (
     <tr key={server.id} className="transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50">
-      <td className="px-6 py-4"><Link href={`/server/?id=${encodeURIComponent(server.id)}`} className="font-semibold text-accent">{server.hostname}</Link><div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.tags.join(", ")}</div></td>
-      <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{server.ip_address}</td>
-      <td className="px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{osLabel(server)}<div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{[server.os_family, server.package_manager].filter(Boolean).join(" / ")}</div></td>
-      <td className="whitespace-nowrap px-6 py-4 font-medium text-slate-700 dark:text-slate-300">{uptimeLabel(server.uptime_seconds)}{server.load_average ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">load {server.load_average}</div> : null}</td>
-      <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(server.cpu_percent)}`}>{server.cpu_percent < 0 ? "-" : `${server.cpu_percent}%`}{server.cpu ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.cpu} cores</div> : null}</td>
-      <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(ramPercent(server))}`}>{ramLabel(server)}{ramPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{ramPercent(server)}% used</div> : null}</td>
-      <td className={`whitespace-nowrap px-6 py-4 font-medium ${usageTone(diskPercent(server))}`}>{diskLabel(server)}{diskPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{diskPercent(server)}% used</div> : null}</td>
-      <td className="px-6 py-4">
+      <td className="px-3 py-3 align-top">
+        <Link href={`/server/?id=${encodeURIComponent(server.id)}`} className="block truncate font-semibold text-accent" title={server.hostname}>{server.hostname}</Link>
+        {server.tags.length ? <div className="mt-0.5 truncate text-xs font-medium text-slate-500 dark:text-slate-400" title={server.tags.join(", ")}>{server.tags.join(", ")}</div> : null}
+      </td>
+      <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-slate-700 dark:text-slate-300">{server.ip_address}</td>
+      <td className="px-3 py-3 align-top font-medium text-slate-700 dark:text-slate-300" title={osDetail(server) || undefined}>
+        <span className="flex items-center gap-1.5">
+          <OsGlyph size={14} className="shrink-0 text-slate-400 dark:text-slate-500" />
+          <span className="truncate">{osLabel(server)}</span>
+        </span>
+      </td>
+      <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-slate-700 dark:text-slate-300">{uptimeLabel(server.uptime_seconds)}</td>
+      <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(server.cpu_percent)}`}>{server.cpu_percent < 0 ? "-" : `${server.cpu_percent}%`}{server.cpu ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.cpu} cores</div> : null}</td>
+      <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(ramPercent(server))}`}>{ramLabel(server)}{ramPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{ramPercent(server)}% used</div> : null}</td>
+      <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(diskPercent(server))}`}>{diskLabel(server)}{diskPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{diskPercent(server)}% used</div> : null}</td>
+      <td className="px-3 py-3 align-top">
         <div className="flex flex-col items-start gap-1">
           {server.server_type ? <Chip label={server.server_type} tone="accent" /> : null}
           {server.environment ? <Chip label={server.environment} tone="slate" /> : null}
           {!server.server_type && !server.environment ? <span className="font-medium text-slate-400 dark:text-slate-500">-</span> : null}
         </div>
       </td>
-      <td className="px-6 py-4"><StatusPill status={server.status} /></td>
+      <td className="px-3 py-3 align-top"><StatusPill status={server.status} /></td>
       {isAdmin ? (
-        <td className="px-6 py-4">
+        <td className="px-3 py-3 align-top">
           <RowActions
             server={server}
             canShell={server.has_credentials}
@@ -607,7 +639,8 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
         </td>
       ) : null}
     </tr>
-  );
+    );
+  };
 
   // A full column-headed table for one set of rows, with its own sort context. Used once in the
   // flat view (global sort) and once per section in the grouped view (each section's own sort),
@@ -615,19 +648,31 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // independently of the others.
   const serverTable = (rows: Server[], sKey: SortKey | null, sDir: SortDir, onSort: (column: SortKey) => void) => (
     <div className="overflow-x-auto">
-      <table className="w-full text-left text-sm">
+      <table className="w-full table-fixed text-left text-sm">
+        <colgroup>
+          <col className="w-[16%]" />
+          <col className="w-[11%]" />
+          <col className="w-[13%]" />
+          <col className="w-[8%]" />
+          <col className="w-[8%]" />
+          <col className="w-[12%]" />
+          <col className="w-[12%]" />
+          <col className="w-[11%]" />
+          <col className="w-[9%]" />
+          {isAdmin ? <col className="w-[6%]" /> : null}
+        </colgroup>
         <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
           <tr>
             <SortHeader label="Host" column="hostname" sortKey={sKey} sortDir={sDir} onSort={onSort} />
             <SortHeader label="IP" column="ip" sortKey={sKey} sortDir={sDir} onSort={onSort} />
-            <th className="px-6 py-4 font-semibold">OS</th>
-            <th className="whitespace-nowrap px-6 py-4 font-semibold">Uptime</th>
-            <th className="whitespace-nowrap px-6 py-4 font-semibold">CPU</th>
-            <th className="whitespace-nowrap px-6 py-4 font-semibold">RAM</th>
-            <th className="whitespace-nowrap px-6 py-4 font-semibold">Disk</th>
-            <th className="whitespace-nowrap px-6 py-4 font-semibold">Type / Env</th>
-            <th className="px-6 py-4 font-semibold">Status</th>
-            {isAdmin ? <th className="px-6 py-4 font-semibold">Actions</th> : null}
+            <th className="px-3 py-3 font-semibold">OS</th>
+            <th className="px-3 py-3 font-semibold">Uptime</th>
+            <th className="px-3 py-3 font-semibold">CPU</th>
+            <th className="px-3 py-3 font-semibold">RAM</th>
+            <th className="px-3 py-3 font-semibold">Disk</th>
+            <th className="px-3 py-3 font-semibold">Type / Env</th>
+            <th className="px-3 py-3 font-semibold">Status</th>
+            {isAdmin ? <th className="px-3 py-3 font-semibold">Actions</th> : null}
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">

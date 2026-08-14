@@ -48,6 +48,7 @@ from app.schemas.contracts import (
     DbConnectionUpdate,
     DbColumn,
     DbConstraint,
+    DbDatabase,
     DbForeignKey,
     DbGenerateSqlRequest,
     DbGenerateSqlResult,
@@ -869,14 +870,19 @@ def _validate_address_or_400(value: str) -> None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-def _reject_duplicate(db: Session, *, hostname: str = "", ip_address: str = "", exclude_id: int | None = None) -> None:
+def _reject_duplicate(db: Session, *, hostname: str = "", ip_address: str = "", folder_id: int | None = None, exclude_id: int | None = None) -> None:
     # hostname/ip are not DB-unique, but CSV import refuses collisions, so a rename matches that
     # stance: changing a server's hostname or IP to one another server already holds is a 409.
     # exclude_id excludes the server being edited, so a no-op save is not a self-collision.
+    #
+    # Hostname uniqueness is scoped to the GROUP (folder_id): the same hostname may live in
+    # different groups (BH and MH can each have a "dev" host), so a clash is only a clash within the
+    # same folder_id. NULL/unassigned is its own bucket. IP addresses stay globally unique.
     if hostname:
-        clash = db.scalar(select(Server).where(func.lower(Server.hostname) == hostname.strip().lower()))
+        folder_predicate = Server.folder_id.is_(None) if folder_id is None else Server.folder_id == folder_id
+        clash = db.scalar(select(Server).where(func.lower(Server.hostname) == hostname.strip().lower(), folder_predicate))
         if clash and clash.id != exclude_id:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Another server already uses hostname {hostname}")
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"A server named {hostname} already exists in this group")
     if ip_address:
         clash = db.scalar(select(Server).where(func.lower(Server.ip_address) == ip_address.strip().lower()))
         if clash and clash.id != exclude_id:
@@ -886,7 +892,11 @@ def _reject_duplicate(db: Session, *, hostname: str = "", ip_address: str = "", 
 @router.post("/servers", response_model=ServerRead, status_code=status.HTTP_201_CREATED)
 def create_server(payload: ServerCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> ServerRead:
     _validate_address_or_400(payload.ip_address)
-    created = InventoryService(db).create_server(payload)
+    # resolve the optional group (folder public_id) and enforce hostname uniqueness WITHIN it:
+    # the same hostname may exist in different groups, so a clash is only rejected inside one folder.
+    folder_id = _folder_or_404(db, payload.folder_id.strip()).id if (payload.folder_id or "").strip() else None
+    _reject_duplicate(db, hostname=(payload.hostname or "").strip(), folder_id=folder_id)
+    created = InventoryService(db).create_server(payload, folder_id=folder_id)
     server = db.scalar(select(Server).where(Server.public_id == created.id))
     if server and (payload.password or payload.private_key):
         _save_credentials(db, server,CredentialPayload(password=payload.password, private_key=payload.private_key))
@@ -1191,6 +1201,8 @@ def update_server(server_id: str, payload: ServerUpdate, _: dict = Depends(requi
         db,
         hostname=data["hostname"].strip() if data.get("hostname") else "",
         ip_address=data["ip_address"].strip() if data.get("ip_address") else "",
+        # a hostname clash is scoped to the server's current group; a rename doesn't move groups
+        folder_id=server.folder_id,
         exclude_id=server.id,
     )
 
@@ -2296,14 +2308,14 @@ _DB_MAX_ROW_LIMIT = 5000
 def _db_engine_or_400(engine: str) -> str:
     normalized = (engine or "").strip().lower()
     if normalized not in ENGINES:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Engine must be postgres or mysql")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Engine must be postgres, mysql, or sqlite")
     return normalized
 
 
 @router.post("/db/test-connection", response_model=DbConnectionResult)
 def db_test_connection(payload: DbConnectionRequest, _: dict = Depends(require_user_not_guest)) -> DbConnectionResult:
     engine = _db_engine_or_400(payload.engine)
-    port = payload.port or DEFAULT_PORTS[engine]
+    port = payload.port or DEFAULT_PORTS.get(engine, 0)
     try:
         message = db_console.test_connection(engine, payload.host, port, payload.username, payload.password, payload.database)
         return DbConnectionResult(ok=True, message=message)
@@ -2316,7 +2328,7 @@ def db_test_connection(payload: DbConnectionRequest, _: dict = Depends(require_u
 @router.post("/db/query", response_model=DbQueryResult)
 def db_query(payload: DbQueryRequest, _: dict = Depends(require_user_not_guest)) -> DbQueryResult:
     engine = _db_engine_or_400(payload.engine)
-    port = payload.port or DEFAULT_PORTS[engine]
+    port = payload.port or DEFAULT_PORTS.get(engine, 0)
     row_cap = min(db_console.parse_limit(payload.sql) or _DB_DEFAULT_ROW_LIMIT, _DB_MAX_ROW_LIMIT)
     try:
         result = db_console.run_query(engine, payload.host, port, payload.username, payload.password, payload.database, payload.sql, row_cap)
@@ -2374,15 +2386,26 @@ def list_db_connections(_: dict = Depends(require_user_not_guest), db: Session =
     return [_db_connection_read(db, conn) for conn in conns]
 
 
+def _validate_db_connection_target(engine: str, host: str, database: str) -> None:
+    """Engine-specific required-field check: sqlite needs a database file path (host is ignored);
+    the networked engines need a host. Raises HTTP 400 on a missing value."""
+    if engine == "sqlite":
+        if not (database or "").strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="SQLite requires a database file path")
+    elif not (host or "").strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Host is required")
+
+
 @router.post("/db/connections", response_model=DbConnectionRead, status_code=status.HTTP_201_CREATED)
 def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbConnectionRead:
     engine = _db_engine_or_400(payload.engine)
+    _validate_db_connection_target(engine, payload.host, payload.database)
     conn = DbConnection(
         public_id=str(uuid.uuid4()),
         name=payload.name.strip(),
         engine=engine,
         host=payload.host.strip(),
-        port=payload.port or DEFAULT_PORTS[engine],
+        port=payload.port or DEFAULT_PORTS.get(engine, 0),
         username=payload.username,
         encrypted_password=encrypt_secret(payload.password),
         database=payload.database,
@@ -2400,7 +2423,7 @@ def test_unsaved_db_connection(payload: DbConnectionCreate, _: dict = Depends(re
     # Test the parameters as typed, without persisting anything. A bad host/credentials is an
     # expected outcome, reported as ok=false with HTTP 200 (like the ad-hoc db_test_connection).
     engine = _db_engine_or_400(payload.engine)
-    port = payload.port or DEFAULT_PORTS[engine]
+    port = payload.port or DEFAULT_PORTS.get(engine, 0)
     try:
         message = db_console.test_connection(engine, payload.host, port, payload.username, payload.password, payload.database)
         return DbConnectionResult(ok=True, message=message)
@@ -2427,7 +2450,9 @@ def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dic
         conn.name = name
     if "host" in data and data["host"] is not None:
         host = data["host"].strip()
-        if not host:
+        # sqlite has no host (its `database` is a local file path), so an empty host is valid there;
+        # the networked engines still require one.
+        if not host and conn.engine != "sqlite":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Host cannot be empty")
         conn.host = host
     if "port" in data and data["port"] is not None:
@@ -2509,13 +2534,16 @@ def _record_db_query_history(db: Session, conn: DbConnection, user_email: str, s
 
 
 @router.post("/db/connections/{connection_id}/query", response_model=DbQueryResult)
-def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, claims: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbQueryResult:
+def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, database: str | None = None, claims: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbQueryResult:
     conn = _db_connection_or_404(db, connection_id)
     user_email = claims.get("sub", "")
+    # Optional ?database= override lets the caller run the query against a different database on the
+    # same server without editing the saved connection; blank/None keeps the stored database.
+    effective_database = database or conn.database
     row_cap = min(db_console.parse_limit(payload.sql) or _DB_DEFAULT_ROW_LIMIT, _DB_MAX_ROW_LIMIT)
     try:
         result = db_console.run_query(
-            conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database, payload.sql, row_cap
+            conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), effective_database, payload.sql, row_cap
         )
     except DbConsoleError as exc:
         _record_db_query_history(
@@ -2539,87 +2567,103 @@ def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, c
 # as a clean HTTP 400. Same auth as the rest of the /db routes (require_user_not_guest).
 
 
-def _db_meta_args(conn: DbConnection) -> tuple:
+def _db_meta_args(conn: DbConnection, database: str | None = None) -> tuple:
     """The leading (engine, host, port, username, password, database) argument tuple every
-    db_metadata function takes, with the stored password decrypted."""
-    return (conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database)
+    db_metadata function takes, with the stored password decrypted.
+
+    `database` is an optional override so the caller can browse a DIFFERENT database on the same
+    server (postgres has separate schemas per database; mysql treats database == schema; sqlite
+    ignores it) without editing the saved connection. Blank/None falls back to the stored database.
+    """
+    effective_database = database or conn.database
+    return (conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), effective_database)
+
+
+@router.get("/db/connections/{connection_id}/databases", response_model=list[DbDatabase])
+def list_db_connection_databases(connection_id: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbDatabase]:
+    conn = _db_connection_or_404(db, connection_id)
+    try:
+        rows = db_metadata.list_databases(*_db_meta_args(conn, database))
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [DbDatabase(**row) for row in rows]
 
 
 @router.get("/db/connections/{connection_id}/schemas", response_model=list[DbSchema])
-def list_db_connection_schemas(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbSchema]:
+def list_db_connection_schemas(connection_id: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbSchema]:
     conn = _db_connection_or_404(db, connection_id)
     try:
-        rows = db_metadata.list_schemas(*_db_meta_args(conn))
+        rows = db_metadata.list_schemas(*_db_meta_args(conn, database))
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return [DbSchema(**row) for row in rows]
 
 
 @router.get("/db/connections/{connection_id}/schemas/{schema}/tables", response_model=list[DbTable])
-def list_db_connection_schema_tables(connection_id: str, schema: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbTable]:
+def list_db_connection_schema_tables(connection_id: str, schema: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbTable]:
     conn = _db_connection_or_404(db, connection_id)
     try:
-        rows = db_metadata.list_tables_in_schema(*_db_meta_args(conn), schema)
+        rows = db_metadata.list_tables_in_schema(*_db_meta_args(conn, database), schema)
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return [DbTable(**row) for row in rows]
 
 
 @router.get("/db/connections/{connection_id}/schemas/{schema}/routines", response_model=list[DbRoutine])
-def list_db_connection_schema_routines(connection_id: str, schema: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbRoutine]:
+def list_db_connection_schema_routines(connection_id: str, schema: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbRoutine]:
     conn = _db_connection_or_404(db, connection_id)
     try:
-        rows = db_metadata.list_routines(*_db_meta_args(conn), schema)
+        rows = db_metadata.list_routines(*_db_meta_args(conn, database), schema)
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return [DbRoutine(**row) for row in rows]
 
 
 @router.get("/db/connections/{connection_id}/tables/{schema}/{table}/columns", response_model=list[DbColumn])
-def list_db_connection_table_columns(connection_id: str, schema: str, table: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbColumn]:
+def list_db_connection_table_columns(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbColumn]:
     conn = _db_connection_or_404(db, connection_id)
     try:
-        rows = db_metadata.list_columns(*_db_meta_args(conn), schema, table)
+        rows = db_metadata.list_columns(*_db_meta_args(conn, database), schema, table)
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return [DbColumn(**row) for row in rows]
 
 
 @router.get("/db/connections/{connection_id}/tables/{schema}/{table}/indexes", response_model=list[DbIndex])
-def list_db_connection_table_indexes(connection_id: str, schema: str, table: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbIndex]:
+def list_db_connection_table_indexes(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbIndex]:
     conn = _db_connection_or_404(db, connection_id)
     try:
-        rows = db_metadata.list_indexes(*_db_meta_args(conn), schema, table)
+        rows = db_metadata.list_indexes(*_db_meta_args(conn, database), schema, table)
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return [DbIndex(**row) for row in rows]
 
 
 @router.get("/db/connections/{connection_id}/tables/{schema}/{table}/constraints", response_model=list[DbConstraint])
-def list_db_connection_table_constraints(connection_id: str, schema: str, table: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbConstraint]:
+def list_db_connection_table_constraints(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbConstraint]:
     conn = _db_connection_or_404(db, connection_id)
     try:
-        rows = db_metadata.list_constraints(*_db_meta_args(conn), schema, table)
+        rows = db_metadata.list_constraints(*_db_meta_args(conn, database), schema, table)
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return [DbConstraint(**row) for row in rows]
 
 
 @router.get("/db/connections/{connection_id}/tables/{schema}/{table}/foreign-keys", response_model=list[DbForeignKey])
-def list_db_connection_table_foreign_keys(connection_id: str, schema: str, table: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbForeignKey]:
+def list_db_connection_table_foreign_keys(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbForeignKey]:
     conn = _db_connection_or_404(db, connection_id)
     try:
-        rows = db_metadata.list_foreign_keys(*_db_meta_args(conn), schema, table)
+        rows = db_metadata.list_foreign_keys(*_db_meta_args(conn, database), schema, table)
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return [DbForeignKey(**row) for row in rows]
 
 
 @router.post("/db/connections/{connection_id}/generate-sql", response_model=DbGenerateSqlResult)
-def generate_db_connection_sql(connection_id: str, payload: DbGenerateSqlRequest, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbGenerateSqlResult:
+def generate_db_connection_sql(connection_id: str, payload: DbGenerateSqlRequest, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbGenerateSqlResult:
     conn = _db_connection_or_404(db, connection_id)
     try:
-        sql = db_metadata.generate_sql(*_db_meta_args(conn), payload.schema, payload.table, payload.kind)
+        sql = db_metadata.generate_sql(*_db_meta_args(conn, database), payload.schema, payload.table, payload.kind)
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return DbGenerateSqlResult(sql=sql)

@@ -23,7 +23,8 @@ CONNECT_TIMEOUT_SECONDS = 8
 STATEMENT_TIMEOUT_MS = 30_000
 STATEMENT_TIMEOUT_SECONDS = 30
 
-ENGINES = ("postgres", "mysql")
+ENGINES = ("postgres", "mysql", "sqlite")
+# SQLite is a local file, not a networked server, so it has no default port; callers fall back to 0.
 DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306}
 
 # JSON-safe scalar types that can go straight into the response; everything else (datetime,
@@ -286,16 +287,64 @@ def _mysql_connect(host: str, port: int, username: str, password: str, database:
     return conn
 
 
+# --- SQLite (stdlib sqlite3) ----------------------------------------------------------------
+#
+# The `database` argument is a FILE PATH on the server host; host/port/username/password are
+# ignored. NOTE: opening an arbitrary SQLite path reads (and, for a missing path, creates) a file
+# on the SERVER host -- the same level of trust as running arbitrary SQL, which is why every /db
+# route that reaches this code is guarded by require_user_not_guest. sqlite3 cursors are not context
+# managers, so a thin adapter wraps the connection to give the same `with conn.cursor() as cur:`
+# shape the psycopg / pymysql paths use.
+
+
+class _SqliteCursorContext:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def __enter__(self):
+        return self._cursor
+
+    def __exit__(self, *exc):
+        try:
+            self._cursor.close()
+        except Exception:
+            pass
+        return False
+
+
+class _SqliteConnection:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return _SqliteCursorContext(self._conn.cursor())
+
+    def close(self):
+        self._conn.close()
+
+
+def _sqlite_connect(database: str):
+    import sqlite3
+
+    if not (database or "").strip():
+        raise DbConsoleError("SQLite requires a database file path")
+    conn = sqlite3.connect(database, timeout=CONNECT_TIMEOUT_SECONDS)
+    return _SqliteConnection(conn)
+
+
 def _connect(engine: str, host: str, port: int, username: str, password: str, database: str):
     if engine == "postgres":
         return _pg_connect(host, port, username, password, database)
+    if engine == "sqlite":
+        return _sqlite_connect(database)
     return _mysql_connect(host, port, username, password, database)
 
 
 def _server_version(engine: str, conn) -> str:
+    version_sql = "SELECT sqlite_version()" if engine == "sqlite" else "SELECT version()"
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT version()")
+            cur.execute(version_sql)
             row = cur.fetchone()
         if row and row[0]:
             return str(row[0]).split("\n")[0][:200]
@@ -320,8 +369,12 @@ def test_connection(engine: str, host: str, port: int, username: str, password: 
             cur.execute("SELECT 1")
             cur.fetchone()
         version = _server_version(engine, conn)
-        label = "PostgreSQL" if engine == "postgres" else "MySQL"
-        where = f"{host}:{port}"
+        if engine == "sqlite":
+            label, where = "SQLite", (database or "")
+        elif engine == "postgres":
+            label, where = "PostgreSQL", f"{host}:{port}"
+        else:
+            label, where = "MySQL", f"{host}:{port}"
         return f"Connected to {label} at {where}" + (f" — {version}" if version else "")
     except DbConsoleError:
         raise
@@ -398,6 +451,11 @@ _LIST_TABLES_SQL = {
         "SELECT table_schema, table_name, table_type FROM information_schema.tables "
         "WHERE table_schema = DATABASE() ORDER BY table_name"
     ),
+    # SQLite is single-file with one user namespace; sqlite_master is its catalog.
+    "sqlite": (
+        "SELECT '' AS table_schema, name AS table_name, type AS table_type "
+        "FROM sqlite_master WHERE type IN ('table','view') ORDER BY name"
+    ),
 }
 
 
@@ -407,7 +465,7 @@ def list_tables(engine: str, host: str, port: int, username: str, password: str,
     Returns `[{"schema", "name", "type"}, ...]` sorted by (schema, name), where type is "view"
     when the catalog reports a VIEW and "table" otherwise. Raises DbConsoleError on failure.
     """
-    sql = _LIST_TABLES_SQL["postgres"] if engine == "postgres" else _LIST_TABLES_SQL["mysql"]
+    sql = _LIST_TABLES_SQL.get(engine, _LIST_TABLES_SQL["mysql"])
     conn = None
     try:
         conn = _connect(engine, host, port, username, password, database)

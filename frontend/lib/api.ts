@@ -915,6 +915,11 @@ export async function sftpDownload(token: string, serverId: string, path: string
 
 export type DbEngine = "postgres" | "mysql";
 
+// Stored connections additionally support file-backed SQLite (its `database` field carries a FILE
+// PATH; host/port/username/password are unused). Kept separate from DbEngine so the ad-hoc console,
+// which only opens postgres/mysql, is unaffected.
+export type DbConnEngine = "postgres" | "mysql" | "sqlite";
+
 export type DbConnectionParams = {
   engine: DbEngine;
   host: string;
@@ -973,7 +978,7 @@ export type DbConnection = {
 
 export type DbConnectionInput = {
   name: string;
-  engine: DbEngine;
+  engine: DbConnEngine;
   host: string;
   port: number;
   username?: string;
@@ -995,6 +1000,7 @@ export type DbTable = {
 // foreign-keys. Each level is its own endpoint so a big database's tree only fetches what the user
 // actually expands. All are scoped to a stored connection and use its saved credentials.
 
+export type DbDatabase = { name: string };
 export type DbSchema = { name: string };
 export type DbObject = { schema: string; name: string; type: string };
 export type DbRoutine = { schema: string; name: string; kind: string };
@@ -1080,42 +1086,61 @@ export async function runConnectionQuery(token: string, id: string, sql: string,
 // The navigator's lazy tree. Every path segment is encoded because schema/table names can carry
 // characters (dots, spaces, slashes) that would otherwise corrupt the URL.
 
-export async function getDbSchemas(token: string, id: string): Promise<DbSchema[]> {
-  return request<DbSchema[]>(`/db/connections/${encodeURIComponent(id)}/schemas`, token);
+// Builds an optional `?database=<db>` suffix. When present it tells the backend to browse a
+// DIFFERENT database on the same connection than the connection's stored default; omitted, the
+// stored database is used. Kept as `?...` since these metadata routes carry no other query args.
+function dbQuerySuffix(database?: string): string {
+  return database ? `?database=${encodeURIComponent(database)}` : "";
 }
 
-export async function getDbSchemaTables(token: string, id: string, schema: string): Promise<DbObject[]> {
-  return request<DbObject[]>(`/db/connections/${encodeURIComponent(id)}/schemas/${encodeURIComponent(schema)}/tables`, token);
+// Lists the databases available on a connection's server, for the navigator's "Show all databases"
+// mode. Returns an empty-ish list for engines with a single database (e.g. sqlite).
+export async function getDbDatabases(token: string, id: string): Promise<DbDatabase[]> {
+  return request<DbDatabase[]>(`/db/connections/${encodeURIComponent(id)}/databases`, token);
 }
 
-export async function getDbSchemaRoutines(token: string, id: string, schema: string): Promise<DbRoutine[]> {
-  return request<DbRoutine[]>(`/db/connections/${encodeURIComponent(id)}/schemas/${encodeURIComponent(schema)}/routines`, token);
+export async function getDbSchemas(token: string, id: string, database?: string): Promise<DbSchema[]> {
+  return request<DbSchema[]>(`/db/connections/${encodeURIComponent(id)}/schemas${dbQuerySuffix(database)}`, token);
 }
 
-export async function getDbColumns(token: string, id: string, schema: string, table: string): Promise<DbColumn[]> {
+export async function getDbSchemaTables(token: string, id: string, schema: string, database?: string): Promise<DbObject[]> {
+  return request<DbObject[]>(
+    `/db/connections/${encodeURIComponent(id)}/schemas/${encodeURIComponent(schema)}/tables${dbQuerySuffix(database)}`,
+    token
+  );
+}
+
+export async function getDbSchemaRoutines(token: string, id: string, schema: string, database?: string): Promise<DbRoutine[]> {
+  return request<DbRoutine[]>(
+    `/db/connections/${encodeURIComponent(id)}/schemas/${encodeURIComponent(schema)}/routines${dbQuerySuffix(database)}`,
+    token
+  );
+}
+
+export async function getDbColumns(token: string, id: string, schema: string, table: string, database?: string): Promise<DbColumn[]> {
   return request<DbColumn[]>(
-    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/columns`,
+    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/columns${dbQuerySuffix(database)}`,
     token
   );
 }
 
-export async function getDbIndexes(token: string, id: string, schema: string, table: string): Promise<DbIndex[]> {
+export async function getDbIndexes(token: string, id: string, schema: string, table: string, database?: string): Promise<DbIndex[]> {
   return request<DbIndex[]>(
-    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/indexes`,
+    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/indexes${dbQuerySuffix(database)}`,
     token
   );
 }
 
-export async function getDbConstraints(token: string, id: string, schema: string, table: string): Promise<DbConstraint[]> {
+export async function getDbConstraints(token: string, id: string, schema: string, table: string, database?: string): Promise<DbConstraint[]> {
   return request<DbConstraint[]>(
-    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/constraints`,
+    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/constraints${dbQuerySuffix(database)}`,
     token
   );
 }
 
-export async function getDbForeignKeys(token: string, id: string, schema: string, table: string): Promise<DbForeignKey[]> {
+export async function getDbForeignKeys(token: string, id: string, schema: string, table: string, database?: string): Promise<DbForeignKey[]> {
   return request<DbForeignKey[]>(
-    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/foreign-keys`,
+    `/db/connections/${encodeURIComponent(id)}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/foreign-keys${dbQuerySuffix(database)}`,
     token
   );
 }
@@ -1125,7 +1150,7 @@ export async function getDbForeignKeys(token: string, id: string, schema: string
 export async function generateDbSql(
   token: string,
   id: string,
-  payload: { schema: string; table: string; kind: string }
+  payload: { schema: string; table: string; kind: string; database?: string }
 ): Promise<{ sql: string }> {
   return request<{ sql: string }>(`/db/connections/${encodeURIComponent(id)}/generate-sql`, token, {
     method: "POST",

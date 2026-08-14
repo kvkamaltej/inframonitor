@@ -28,6 +28,8 @@ import {
   PlugZap,
   Plus,
   RefreshCw,
+  Search,
+  Server,
   Table2
 } from "lucide-react";
 import {
@@ -36,6 +38,7 @@ import {
   getDbColumns,
   getDbConnections,
   getDbConstraints,
+  getDbDatabases,
   getDbForeignKeys,
   getDbIndexes,
   getDbSchemas,
@@ -46,7 +49,7 @@ import {
   updateDbConnection,
   type DbConnection,
   type DbConnectionInput,
-  type DbEngine
+  type DbConnEngine
 } from "@/lib/api";
 import { useConfirm } from "@/components/confirm-dialog";
 
@@ -57,6 +60,9 @@ export type DbNavigatorCtx = {
   connectionName: string;
   engine: string;
   environment: string;
+  // set only when browsing a NON-default database via "Show all databases"; threaded into every
+  // metadata call and the generate-SQL body so the whole subtree targets that database.
+  database?: string;
   schema?: string;
   table?: string;
 };
@@ -72,7 +78,8 @@ type DbNavigatorProps = {
 
 type ConnStatus = "unknown" | "testing" | "healthy" | "error";
 
-const DEFAULT_PORTS: Record<DbEngine, number> = { postgres: 5432, mysql: 3306 };
+// sqlite is file-backed and has no port; 0 stands in and is never sent for a sqlite connection.
+const DEFAULT_PORTS: Record<DbConnEngine, number> = { postgres: 5432, mysql: 3306, sqlite: 0 };
 
 const inputClass =
   "h-11 w-full rounded-xl border-none bg-surface px-4 text-sm font-medium text-fg outline-none ring-1 ring-edge transition-colors focus:ring-2 focus:ring-accent";
@@ -97,6 +104,12 @@ type NavContextValue = {
   menuAnchor: { x: number; y: number };
   openMenu: (id: string, x: number, y: number) => void;
   closeMenu: () => void;
+  // lowercased object-name filter; when non-empty the tree hides table/view/routine nodes whose
+  // label does not contain it. Structural nodes (schemas, folders, columns) are never filtered out.
+  filter: string;
+  // per-connection "Show all databases" flag and its toggle
+  showAllDb: Record<string, boolean>;
+  toggleShowAllDb: (id: string) => void;
 };
 
 const NavContext = createContext<NavContextValue | null>(null);
@@ -109,6 +122,7 @@ function useNav() {
 // --- tree node descriptor -------------------------------------------------------------------
 
 type NodeKind =
+  | "database"
   | "schema"
   | "folder"
   | "table"
@@ -134,6 +148,8 @@ function iconFor(kind: NodeKind | "connection", open: boolean) {
   switch (kind) {
     case "connection":
       return <Database size={15} className="shrink-0 text-accent" />;
+    case "database":
+      return <Server size={15} className="shrink-0 text-cyan-500" />;
     case "schema":
       return <Database size={15} className="shrink-0 text-muted" />;
     case "folder":
@@ -160,7 +176,9 @@ function iconFor(kind: NodeKind | "connection", open: boolean) {
 // --- children builders (one per drill level) ------------------------------------------------
 
 function buildTableFolders(token: string, connId: string, ctx: DbNavigatorCtx, schema: string, table: string): TreeNodeDescriptor[] {
-  const base = `${connId}:${schema}:${table}`;
+  // Threaded so a table opened under a non-default database queries THAT database's metadata.
+  const database = ctx.database;
+  const base = database ? `${connId}:${database}:${schema}:${table}` : `${connId}:${schema}:${table}`;
   const childCtx: DbNavigatorCtx = { ...ctx, schema, table };
   return [
     {
@@ -169,7 +187,7 @@ function buildTableFolders(token: string, connId: string, ctx: DbNavigatorCtx, s
       label: "Columns",
       ctx: childCtx,
       loadChildren: async () => {
-        const cols = await getDbColumns(token, connId, schema, table);
+        const cols = await getDbColumns(token, connId, schema, table, database);
         return cols.map((c) => ({
           id: `${base}:col:${c.name}`,
           kind: "column" as NodeKind,
@@ -185,7 +203,7 @@ function buildTableFolders(token: string, connId: string, ctx: DbNavigatorCtx, s
       label: "Indexes",
       ctx: childCtx,
       loadChildren: async () => {
-        const idx = await getDbIndexes(token, connId, schema, table);
+        const idx = await getDbIndexes(token, connId, schema, table, database);
         return idx.map((i) => ({
           id: `${base}:idx:${i.name}`,
           kind: "index" as NodeKind,
@@ -201,7 +219,7 @@ function buildTableFolders(token: string, connId: string, ctx: DbNavigatorCtx, s
       label: "Constraints",
       ctx: childCtx,
       loadChildren: async () => {
-        const cons = await getDbConstraints(token, connId, schema, table);
+        const cons = await getDbConstraints(token, connId, schema, table, database);
         return cons.map((c) => ({
           id: `${base}:con:${c.name}`,
           kind: "constraint" as NodeKind,
@@ -217,7 +235,7 @@ function buildTableFolders(token: string, connId: string, ctx: DbNavigatorCtx, s
       label: "Foreign Keys",
       ctx: childCtx,
       loadChildren: async () => {
-        const fks = await getDbForeignKeys(token, connId, schema, table);
+        const fks = await getDbForeignKeys(token, connId, schema, table, database);
         return fks.map((f) => ({
           id: `${base}:fk:${f.name}`,
           kind: "fkey" as NodeKind,
@@ -231,7 +249,9 @@ function buildTableFolders(token: string, connId: string, ctx: DbNavigatorCtx, s
 }
 
 function buildSchemaFolders(token: string, connId: string, ctx: DbNavigatorCtx, schema: string): TreeNodeDescriptor[] {
-  const base = `${connId}:${schema}`;
+  const database = ctx.database;
+  // Namespace node ids by database so identically-named schemas across databases don't collide.
+  const base = database ? `${connId}:${database}:${schema}` : `${connId}:${schema}`;
   const childCtx: DbNavigatorCtx = { ...ctx, schema };
   const makeObject = (kind: NodeKind) => (o: { schema: string; name: string; type: string }): TreeNodeDescriptor => ({
     id: `${base}:${kind}:${o.name}`,
@@ -248,7 +268,7 @@ function buildSchemaFolders(token: string, connId: string, ctx: DbNavigatorCtx, 
       label: "Tables",
       ctx: childCtx,
       loadChildren: async () => {
-        const objs = await getDbSchemaTables(token, connId, schema);
+        const objs = await getDbSchemaTables(token, connId, schema, database);
         return objs.filter((o) => o.type !== "view").map(makeObject("table"));
       }
     },
@@ -258,7 +278,7 @@ function buildSchemaFolders(token: string, connId: string, ctx: DbNavigatorCtx, 
       label: "Views",
       ctx: childCtx,
       loadChildren: async () => {
-        const objs = await getDbSchemaTables(token, connId, schema);
+        const objs = await getDbSchemaTables(token, connId, schema, database);
         return objs.filter((o) => o.type === "view").map(makeObject("view"));
       }
     },
@@ -268,7 +288,7 @@ function buildSchemaFolders(token: string, connId: string, ctx: DbNavigatorCtx, 
       label: "Routines",
       ctx: childCtx,
       loadChildren: async () => {
-        const routines = await getDbSchemaRoutines(token, connId, schema);
+        const routines = await getDbSchemaRoutines(token, connId, schema, database);
         return routines.map((r) => ({
           id: `${base}:routine:${r.name}`,
           kind: "routine" as NodeKind,
@@ -279,6 +299,35 @@ function buildSchemaFolders(token: string, connId: string, ctx: DbNavigatorCtx, 
       }
     }
   ];
+}
+
+// Fetches a connection's (or a specific database's) schemas and turns them into schema nodes. The
+// database override, when present, rides on `ctx.database` and is threaded to getDbSchemas and on
+// into every schema/table metadata call below it.
+async function buildSchemaNodes(token: string, connId: string, ctx: DbNavigatorCtx): Promise<TreeNodeDescriptor[]> {
+  const schemas = await getDbSchemas(token, connId, ctx.database);
+  const prefix = ctx.database ? `${connId}:${ctx.database}` : connId;
+  return schemas.map((s) => ({
+    id: `${prefix}:${s.name}`,
+    kind: "schema" as NodeKind,
+    label: s.name,
+    ctx: { ...ctx, schema: s.name },
+    menuKind: "schema" as MenuKind,
+    loadChildren: () => Promise.resolve(buildSchemaFolders(token, connId, ctx, s.name))
+  }));
+}
+
+// A "Show all databases" node: a database on the server, expanding to its schemas. Its ctx carries
+// `database` so the whole subtree targets that database rather than the connection's stored default.
+function buildDatabaseNode(token: string, connId: string, connCtx: DbNavigatorCtx, dbName: string): TreeNodeDescriptor {
+  const dbCtx: DbNavigatorCtx = { ...connCtx, database: dbName };
+  return {
+    id: `${connId}:db:${dbName}`,
+    kind: "database",
+    label: dbName,
+    ctx: dbCtx,
+    loadChildren: () => buildSchemaNodes(token, connId, dbCtx)
+  };
 }
 
 // --- context menu ---------------------------------------------------------------------------
@@ -377,6 +426,16 @@ function TreeNode({ node, depth }: { node: TreeNodeDescriptor; depth: number }) 
     toggle();
   }
 
+  // Object-name filter: hide table/view/routine children whose label doesn't match. Structural
+  // nodes (folders, columns, indexes, …) pass through untouched so the tree shape stays intact.
+  const filter = nav.filter.trim().toLowerCase();
+  const visibleChildren =
+    children && filter
+      ? children.filter((c) =>
+          c.kind === "table" || c.kind === "view" || c.kind === "routine" ? c.label.toLowerCase().includes(filter) : true
+        )
+      : children;
+
   const menuItems: MenuItem[] = useMemo(() => {
     if (node.menuKind === "schema") {
       return [
@@ -426,12 +485,12 @@ function TreeNode({ node, depth }: { node: TreeNodeDescriptor; depth: number }) 
             <div className="flex items-center gap-1.5 py-1 text-xs text-danger" style={{ paddingLeft: (depth + 1) * 14 + 8 }}>
               <AlertTriangle size={12} /> {error}
             </div>
-          ) : children && children.length === 0 && !loading ? (
+          ) : visibleChildren && visibleChildren.length === 0 && !loading ? (
             <div className="py-1 text-xs italic text-muted" style={{ paddingLeft: (depth + 1) * 14 + 8 }}>
-              (empty)
+              {children && children.length > 0 ? "(no match)" : "(empty)"}
             </div>
           ) : (
-            children?.map((child) => <TreeNode key={child.id} node={child} depth={depth + 1} />)
+            visibleChildren?.map((child) => <TreeNode key={child.id} node={child} depth={depth + 1} />)
           )}
         </div>
       )}
@@ -483,30 +542,35 @@ function ConnectionNode({ conn }: { conn: DbConnection }) {
     environment: conn.environment
   };
   const nodeId = `conn:${conn.id}`;
+  const showAll = nav.showAllDb[conn.id] ?? false;
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const schemas = await getDbSchemas(nav.token, conn.id);
-      setChildren(
-        schemas.map((s) => ({
-          id: `${conn.id}:${s.name}`,
-          kind: "schema" as NodeKind,
-          label: s.name,
-          ctx: { ...ctx, schema: s.name },
-          menuKind: "schema" as MenuKind,
-          loadChildren: () => Promise.resolve(buildSchemaFolders(nav.token, conn.id, ctx, s.name))
-        }))
-      );
+      if (showAll) {
+        // Under the connection, list the server's databases; each expands to its own schemas.
+        const dbs = await getDbDatabases(nav.token, conn.id);
+        setChildren(dbs.map((d) => buildDatabaseNode(nav.token, conn.id, ctx, d.name)));
+      } else {
+        // Default: the connection's stored database, schemas directly under the connection.
+        setChildren(await buildSchemaNodes(nav.token, conn.id, ctx));
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load schemas");
+      setError(e instanceof Error ? e.message : showAll ? "Failed to load databases" : "Failed to load schemas");
       setChildren([]);
     } finally {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conn, nav.token]);
+  }, [conn, nav.token, showAll]);
+
+  // Toggling "Show all databases" invalidates the cached subtree; drop it and refetch if open.
+  useEffect(() => {
+    setChildren(null);
+    if (expanded) void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showAll]);
 
   const toggle = useCallback(() => {
     const next = !expanded;
@@ -525,6 +589,7 @@ function ConnectionNode({ conn }: { conn: DbConnection }) {
   const menuItems: MenuItem[] = [
     { label: "Open SQL Editor", onClick: () => nav.onOpenEditor(ctx) },
     { label: "Test connection", onClick: () => nav.testConnection(conn.id) },
+    { label: showAll ? "Show only default database" : "Show all databases", onClick: () => nav.toggleShowAllDb(conn.id) },
     { label: "Refresh", onClick: refresh },
     { label: "Edit", onClick: () => nav.openConnDialog(conn) },
     { label: "Delete", danger: true, onClick: () => nav.deleteConnection(conn) }
@@ -560,7 +625,7 @@ function ConnectionNode({ conn }: { conn: DbConnection }) {
               <AlertTriangle size={12} /> {error}
             </div>
           ) : children && children.length === 0 && !loading ? (
-            <div className="py-1 pl-6 text-xs italic text-muted">(no schemas)</div>
+            <div className="py-1 pl-6 text-xs italic text-muted">{showAll ? "(no databases)" : "(no schemas)"}</div>
           ) : (
             children?.map((child) => <TreeNode key={child.id} node={child} depth={1} />)
           )}
@@ -584,7 +649,7 @@ function ConnectionDialog({
   onSaved: () => void;
 }) {
   const [name, setName] = useState(editing?.name ?? "");
-  const [engine, setEngine] = useState<DbEngine>(editing?.engine ?? "postgres");
+  const [engine, setEngine] = useState<DbConnEngine>(editing?.engine ?? "postgres");
   const [host, setHost] = useState(editing?.host ?? "");
   const [port, setPort] = useState<number>(editing?.port ?? DEFAULT_PORTS.postgres);
   const [username, setUsername] = useState(editing?.username ?? "");
@@ -597,13 +662,28 @@ function ConnectionDialog({
   const [note, setNote] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const [error, setError] = useState("");
 
-  function changeEngine(next: DbEngine) {
+  const isSqlite = engine === "sqlite";
+
+  function changeEngine(next: DbConnEngine) {
     setPort((current) => (current === DEFAULT_PORTS[engine] ? DEFAULT_PORTS[next] : current));
     setEngine(next);
     setNote(null);
   }
 
   function input(): DbConnectionInput {
+    // SQLite is file-backed: `database` is the file path and host/port/username are unused.
+    if (engine === "sqlite") {
+      return {
+        name: name.trim(),
+        engine,
+        host: "",
+        port: 0,
+        username: "",
+        database: database.trim(),
+        environment: environment || "",
+        group: group.trim() ? group.trim() : null
+      };
+    }
     return {
       name: name.trim(),
       engine,
@@ -615,6 +695,9 @@ function ConnectionDialog({
       group: group.trim() ? group.trim() : null
     };
   }
+
+  // Whether the form has enough to save/test: sqlite needs a file path, others need a host.
+  const hasTarget = isSqlite ? database.trim().length > 0 : host.trim().length > 0;
 
   async function test() {
     setTesting(true);
@@ -650,21 +733,6 @@ function ConnectionDialog({
     }
   }
 
-  function engineButton(value: DbEngine, label: string) {
-    const active = engine === value;
-    return (
-      <button
-        type="button"
-        onClick={() => changeEngine(value)}
-        className={`h-11 flex-1 rounded-xl px-4 text-sm font-semibold transition-colors ${
-          active ? "bg-accent text-white" : "bg-surface text-muted ring-1 ring-edge hover:text-fg"
-        }`}
-      >
-        {label}
-      </button>
-    );
-  }
-
   return (
     <div className="fixed inset-0 z-[92] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
       <button aria-label="Cancel" onClick={onClose} className="absolute inset-0 cursor-default" />
@@ -681,38 +749,54 @@ function ConnectionDialog({
         </label>
         <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted md:col-span-2">
           Engine
-          <div className="flex gap-2">
-            {engineButton("postgres", "PostgreSQL")}
-            {engineButton("mysql", "MySQL")}
-          </div>
+          <select value={engine} onChange={(e) => changeEngine(e.target.value as DbConnEngine)} className={inputClass}>
+            <option value="postgres">PostgreSQL</option>
+            <option value="mysql">MySQL</option>
+            <option value="sqlite">SQLite</option>
+          </select>
         </label>
-        <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
-          Host
-          <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="db.example.internal" className={inputClass} />
-        </label>
-        <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
-          Port
-          <input type="number" min={1} max={65535} value={port} onChange={(e) => setPort(Number(e.target.value))} className={inputClass} />
-        </label>
-        <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
-          Username
-          <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" placeholder="reader" className={inputClass} />
-        </label>
-        <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
-          Password
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-            placeholder={editing ? "•••••••• (unchanged)" : "••••••••"}
-            className={inputClass}
-          />
-        </label>
-        <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
-          Database
-          <input value={database} onChange={(e) => setDatabase(e.target.value)} placeholder="app" className={inputClass} />
-        </label>
+        {isSqlite ? (
+          <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted md:col-span-2">
+            Database file path
+            <input
+              value={database}
+              onChange={(e) => setDatabase(e.target.value)}
+              placeholder="/var/lib/app/data.db"
+              spellCheck={false}
+              className={inputClass}
+            />
+          </label>
+        ) : (
+          <>
+            <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+              Host
+              <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="db.example.internal" className={inputClass} />
+            </label>
+            <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+              Port
+              <input type="number" min={1} max={65535} value={port} onChange={(e) => setPort(Number(e.target.value))} className={inputClass} />
+            </label>
+            <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+              Username
+              <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" placeholder="reader" className={inputClass} />
+            </label>
+            <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+              Password
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
+                placeholder={editing ? "•••••••• (unchanged)" : "••••••••"}
+                className={inputClass}
+              />
+            </label>
+            <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+              Database
+              <input value={database} onChange={(e) => setDatabase(e.target.value)} placeholder="app" className={inputClass} />
+            </label>
+          </>
+        )}
         <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
           Environment
           <select value={environment} onChange={(e) => setEnvironment(e.target.value)} className={inputClass}>
@@ -731,7 +815,7 @@ function ConnectionDialog({
         <div className="flex flex-wrap items-center gap-3 md:col-span-2">
           <button
             type="submit"
-            disabled={saving || !name.trim() || !host.trim()}
+            disabled={saving || !name.trim() || !hasTarget}
             className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
           >
             {saving ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
@@ -740,7 +824,7 @@ function ConnectionDialog({
           <button
             type="button"
             onClick={() => void test()}
-            disabled={testing || !host.trim()}
+            disabled={testing || !hasTarget}
             className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-surface px-5 text-sm font-semibold text-fg ring-1 ring-edge transition-colors hover:text-accent disabled:opacity-50"
           >
             {testing ? <Loader2 size={16} className="animate-spin" /> : <PlugZap size={16} />}
@@ -791,6 +875,12 @@ export function DbNavigator(props: DbNavigatorProps) {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<DbConnection | null>(null);
+
+  const [filter, setFilter] = useState("");
+  const [showAllDb, setShowAllDb] = useState<Record<string, boolean>>({});
+  const toggleShowAllDb = useCallback((id: string) => {
+    setShowAllDb((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
 
   const loadConnections = useCallback(async () => {
     try {
@@ -862,9 +952,26 @@ export function DbNavigator(props: DbNavigatorProps) {
         setMenuAnchor({ x, y });
         setOpenMenuId(id);
       },
-      closeMenu: () => setOpenMenuId(null)
+      closeMenu: () => setOpenMenuId(null),
+      filter,
+      showAllDb,
+      toggleShowAllDb
     }),
-    [token, onOpenEditor, onViewData, onGenerate, statuses, testConnection, openConnDialog, deleteConnection, openMenuId, menuAnchor]
+    [
+      token,
+      onOpenEditor,
+      onViewData,
+      onGenerate,
+      statuses,
+      testConnection,
+      openConnDialog,
+      deleteConnection,
+      openMenuId,
+      menuAnchor,
+      filter,
+      showAllDb,
+      toggleShowAllDb
+    ]
   );
 
   return (
@@ -903,6 +1010,20 @@ export function DbNavigator(props: DbNavigatorProps) {
             >
               <Plus size={14} /> New
             </button>
+          </div>
+        </div>
+
+        <div className="border-b border-edge px-2 py-2">
+          <div className="relative">
+            <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
+            <input
+              type="text"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter tables, views, routines…"
+              spellCheck={false}
+              className="h-8 w-full rounded-lg bg-surface pl-7 pr-2 text-xs text-fg outline-none ring-1 ring-edge transition-colors focus:ring-2 focus:ring-accent"
+            />
           </div>
         </div>
 

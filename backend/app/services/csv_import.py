@@ -117,8 +117,11 @@ def _reader(csv_text: str) -> csv.DictReader:
 
 
 def _existing_identifiers(db: Session) -> tuple[set[str], set[str]]:
-    rows = db.execute(select(Server.hostname, Server.ip_address)).all()
-    hostnames = {row[0].lower() for row in rows if row[0]}
+    rows = db.execute(select(Server.hostname, Server.ip_address, Server.folder_id)).all()
+    # Imported servers land in the "Unassigned" group (folder_id NULL). Hostname uniqueness is
+    # scoped to the group, so a hostname only clashes with other UNASSIGNED servers; the same
+    # hostname living inside a folder is a different bucket and is not a collision. IPs stay global.
+    hostnames = {row[0].lower() for row in rows if row[0] and row[2] is None}
     ip_addresses = {row[1].lower() for row in rows if row[1]}
     return hostnames, ip_addresses
 

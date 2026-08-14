@@ -15,6 +15,7 @@ catalog, so there is no SQL-injection surface here.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from app.services import db_console
@@ -54,13 +55,65 @@ def _s(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+# --- SQLite helpers -------------------------------------------------------------------------
+#
+# SQLite introspection is done through PRAGMAs, which cannot bind parameters -- the table name has
+# to be interpolated into the statement text. To keep that safe, the name is validated against the
+# live sqlite_master list first and then double-quoted, so only a real, existing object name can
+# ever reach a PRAGMA.
+
+
+def _sqlite_object_names(host: str, port: int, username: str, password: str, database: str) -> set[str]:
+    rows = _run(
+        "sqlite", host, port, username, password, database,
+        "SELECT name FROM sqlite_master WHERE type IN ('table','view')",
+    )
+    return {_s(row[0]) for row in rows}
+
+
+def _sqlite_checked_table(host: str, port: int, username: str, password: str, database: str, table: str) -> str:
+    """Return `table` only if it is a real table/view in this SQLite file, else raise.
+
+    Guards the PRAGMA interpolation below against SQL injection: a PRAGMA takes no bind parameters,
+    so the name must be validated against the catalog before it is quoted into the statement.
+    """
+    if table not in _sqlite_object_names(host, port, username, password, database):
+        raise DbConsoleError(f"Unknown table {table}")
+    return table
+
+
 # System schemas that are noise in a browsing tree: never surfaced as user schemas.
 _PG_SYSTEM_SCHEMAS = ("pg_catalog", "information_schema")
 _MYSQL_SYSTEM_SCHEMAS = ("information_schema", "mysql", "performance_schema", "sys")
 
 
+def list_databases(engine: str, host: str, port: int, username: str, password: str, database: str) -> list[dict]:
+    """Return the databases visible on this server as `[{"name": str}, ...]`.
+
+    Lets the UI browse/query a different database on the same server via the `database` override
+    (postgres: separate databases each hold their own schemas; mysql: a database *is* a schema).
+    On SQLite there is only the one file, so its basename is reported.
+    """
+    if engine == "postgres":
+        rows = _run(
+            engine, host, port, username, password, database,
+            "SELECT datname FROM pg_database WHERE datistemplate = false AND datallowconn ORDER BY datname",
+        )
+        return [{"name": _s(row[0])} for row in rows]
+    if engine == "sqlite":
+        base = os.path.basename(database) if database else ""
+        return [{"name": base or "main"}]
+    # mysql: SHOW DATABASES, hiding the server-internal schemas
+    rows = _run(engine, host, port, username, password, database, "SHOW DATABASES")
+    excluded = {"information_schema", "mysql", "performance_schema", "sys"}
+    return [{"name": _s(row[0])} for row in rows if _s(row[0]).lower() not in excluded]
+
+
 def list_schemas(engine: str, host: str, port: int, username: str, password: str, database: str) -> list[dict]:
     """Return the user-visible schemas as `[{"name": str}, ...]`, system schemas excluded."""
+    if engine == "sqlite":
+        # SQLite has a single namespace for the main database file.
+        return [{"name": "main"}]
     if engine == "postgres":
         sql = (
             "SELECT schema_name FROM information_schema.schemata "
@@ -80,6 +133,12 @@ def list_schemas(engine: str, host: str, port: int, username: str, password: str
 
 def list_tables_in_schema(engine: str, host: str, port: int, username: str, password: str, database: str, schema: str) -> list[dict]:
     """Return `[{"schema","name","type"}]` for one schema; type is "view" for a VIEW else "table"."""
+    if engine == "sqlite":
+        rows = _run(
+            engine, host, port, username, password, database,
+            "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY name",
+        )
+        return [{"schema": "main", "name": _s(row[0]), "type": "view" if _s(row[1]).lower() == "view" else "table"} for row in rows]
     sql = (
         "SELECT table_schema, table_name, table_type FROM information_schema.tables "
         "WHERE table_schema = %s ORDER BY table_name"
@@ -97,6 +156,9 @@ def list_routines(engine: str, host: str, port: int, username: str, password: st
 
     kind is "procedure" when the catalog reports a PROCEDURE, else "function".
     """
+    if engine == "sqlite":
+        # SQLite has no stored functions/procedures.
+        return []
     sql = (
         "SELECT routine_schema, routine_name, routine_type FROM information_schema.routines "
         "WHERE routine_schema = %s ORDER BY routine_name"
@@ -135,6 +197,29 @@ def list_columns(engine: str, host: str, port: int, username: str, password: str
 
     Each row: `{"name","data_type","nullable":bool,"default":str,"is_primary_key":bool,"ordinal":int}`.
     """
+    if engine == "sqlite":
+        tbl = _sqlite_checked_table(host, port, username, password, database, table)
+        rows = _run(
+            engine, host, port, username, password, database,
+            f"PRAGMA table_info({_quote_ident(engine, tbl)})",
+        )
+        out = []
+        for row in rows:
+            # PRAGMA table_info: (cid, name, type, notnull, dflt_value, pk)
+            try:
+                cid = int(row[0]) if row[0] is not None else 0
+            except (TypeError, ValueError):
+                cid = 0
+            default = db_console._jsonable(row[4]) if row[4] is not None else ""
+            out.append({
+                "name": _s(row[1]),
+                "data_type": _s(row[2]),
+                "nullable": not bool(int(row[3] or 0)),
+                "default": _s(default),
+                "is_primary_key": int(row[5] or 0) != 0,
+                "ordinal": cid,
+            })
+        return out
     pk_cols = _primary_key_columns(engine, host, port, username, password, database, schema, table)
     sql = (
         "SELECT column_name, data_type, is_nullable, column_default, ordinal_position "
@@ -164,6 +249,29 @@ def list_columns(engine: str, host: str, port: int, username: str, password: str
 
 def list_indexes(engine: str, host: str, port: int, username: str, password: str, database: str, schema: str, table: str) -> list[dict]:
     """Return the table's indexes as `[{"name","columns":[str],"unique":bool,"primary":bool}]`."""
+    if engine == "sqlite":
+        tbl = _sqlite_checked_table(host, port, username, password, database, table)
+        index_rows = _run(
+            engine, host, port, username, password, database,
+            f"PRAGMA index_list({_quote_ident(engine, tbl)})",
+        )
+        out = []
+        for irow in index_rows:
+            # PRAGMA index_list: (seq, name, unique, origin, partial)
+            index_name = _s(irow[1])
+            info_rows = _run(
+                engine, host, port, username, password, database,
+                f"PRAGMA index_info({_quote_ident(engine, index_name)})",
+            )
+            # PRAGMA index_info: (seqno, cid, name)
+            columns = [_s(info[2]) for info in info_rows if info[2] is not None]
+            out.append({
+                "name": index_name,
+                "columns": columns,
+                "unique": bool(int(irow[2] or 0)),
+                "primary": _s(irow[3]) == "pk",
+            })
+        return out
     if engine == "postgres":
         sql = (
             "SELECT ic.relname AS index_name, a.attname AS column_name, "
@@ -216,6 +324,20 @@ def list_constraints(engine: str, host: str, port: int, username: str, password:
     type is one of PRIMARY KEY / UNIQUE / CHECK / FOREIGN KEY. On PostgreSQL `definition` is the
     real `pg_get_constraintdef` text; on MySQL, which has no equivalent, it is left blank.
     """
+    if engine == "sqlite":
+        # SQLite exposes no constraint catalog; derive PRIMARY KEY + FOREIGN KEY from the pragmas.
+        tbl = _sqlite_checked_table(host, port, username, password, database, table)
+        out: list[dict] = []
+        pk_cols = [c["name"] for c in list_columns(engine, host, port, username, password, database, "main", tbl) if c["is_primary_key"]]
+        if pk_cols:
+            out.append({"name": f"pk_{tbl}", "type": "PRIMARY KEY", "definition": f"PRIMARY KEY ({', '.join(pk_cols)})"})
+        for fk in list_foreign_keys(engine, host, port, username, password, database, "main", tbl):
+            definition = (
+                f"FOREIGN KEY ({', '.join(fk['columns'])}) "
+                f"REFERENCES {fk['ref_table']} ({', '.join(fk['ref_columns'])})"
+            )
+            out.append({"name": fk["name"], "type": "FOREIGN KEY", "definition": definition})
+        return out
     if engine == "postgres":
         sql = (
             "SELECT con.conname, "
@@ -244,6 +366,23 @@ def list_foreign_keys(engine: str, host: str, port: int, username: str, password
     """Return the table's foreign keys as
     `[{"name","columns":[str],"ref_schema","ref_table","ref_columns":[str]}]`.
     """
+    if engine == "sqlite":
+        tbl = _sqlite_checked_table(host, port, username, password, database, table)
+        rows = _run(
+            engine, host, port, username, password, database,
+            f"PRAGMA foreign_key_list({_quote_ident(engine, tbl)})",
+        )
+        grouped: dict[str, dict] = {}
+        for row in rows:
+            # PRAGMA foreign_key_list: (id, seq, table, from, to, on_update, on_delete, match)
+            fid = _s(row[0])
+            entry = grouped.setdefault(fid, {
+                "name": f"fk_{tbl}_{fid}", "columns": [], "ref_schema": "main",
+                "ref_table": _s(row[2]), "ref_columns": [],
+            })
+            entry["columns"].append(_s(row[3]))
+            entry["ref_columns"].append(_s(row[4]))
+        return list(grouped.values())
     if engine == "postgres":
         sql = (
             "SELECT con.conname, att.attname, nf.nspname, cf.relname, attf.attname, k.ord "
@@ -292,8 +431,8 @@ def list_foreign_keys(engine: str, host: str, port: int, username: str, password
 
 
 def _quote_ident(engine: str, name: str) -> str:
-    """Quote an identifier for the engine, escaping the quote char (pg: "..", mysql: `..`)."""
-    if engine == "postgres":
+    """Quote an identifier for the engine, escaping the quote char (pg/sqlite: "..", mysql: `..`)."""
+    if engine in ("postgres", "sqlite"):
         return '"' + name.replace('"', '""') + '"'
     return "`" + name.replace("`", "``") + "`"
 
@@ -319,7 +458,11 @@ def generate_sql(engine: str, host: str, port: int, username: str, password: str
     if not columns:
         raise DbConsoleError(f"Table {schema}.{table} has no columns")
 
-    qualified = _qualified(engine, schema, table)
+    # SQLite has one namespace ("main"); qualify only the (already catalog-validated) table name.
+    if engine == "sqlite":
+        qualified = _quote_ident(engine, table)
+    else:
+        qualified = _qualified(engine, schema, table)
     col_names = [c["name"] for c in columns]
     pk_cols = [c["name"] for c in columns if c["is_primary_key"]]
     non_pk = [c["name"] for c in columns if not c["is_primary_key"]]
