@@ -35,9 +35,10 @@ class Settings(BaseSettings):
     log_ship_interval_seconds: int = 30
 
     # How often the background Kubernetes log-shipping driver tails pod logs into Loki, in seconds.
-    # Same rules as log_ship_interval_seconds: skipped when loki_url is empty, disabled at <= 0.
-    # Defaults to 0 (off) because it only applies once a cluster has log shipping enabled.
-    k8s_log_ship_interval_seconds: int = 0
+    # Mirrors log_ship_interval_seconds (default 30): skipped when loki_url is empty, disabled at
+    # <= 0, and a harmless no-op every sweep until some cluster has log shipping enabled -- so it
+    # defaults ON, exactly like the server driver, and starts shipping the moment a cluster opts in.
+    k8s_log_ship_interval_seconds: int = 30
 
     # Where the app writes user-defined Prometheus alert rules. Shared with the Prometheus
     # container via the custom_rules volume (see docker-compose.full.yml). The app must be able

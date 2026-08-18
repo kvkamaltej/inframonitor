@@ -83,11 +83,11 @@ services:
       MONITORING_SD_TOKEN: ${MONITORING_SD_TOKEN:-}
       # Seconds between the background log-shipping sweep (tail servers -> Loki). 0 disables it.
       LOG_SHIP_INTERVAL_SECONDS: ${LOG_SHIP_INTERVAL_SECONDS:-30}
-      # Seconds between the background Kubernetes pod-log sweep (tail cluster pods -> Loki). Only
-      # ships from clusters that have log shipping enabled; 0 (the default, matching config.py)
-      # disables the driver -- it only matters once a cluster enables shipping. Listed here so
-      # Compose forwards it (see the SHELL_* note above).
-      K8S_LOG_SHIP_INTERVAL_SECONDS: ${K8S_LOG_SHIP_INTERVAL_SECONDS:-0}
+      # Seconds between the background Kubernetes pod-log sweep (tail cluster pods -> Loki). Defaults
+      # to 30 like LOG_SHIP_INTERVAL_SECONDS above: a harmless no-op every sweep until a cluster
+      # enables log shipping, then it ships. 0 disables the driver entirely. Listed here so Compose
+      # forwards it (see the SHELL_* note above).
+      K8S_LOG_SHIP_INTERVAL_SECONDS: ${K8S_LOG_SHIP_INTERVAL_SECONDS:-30}
       # Where the app writes user-defined Prometheus alert rules (shared custom_rules volume in
       # full mode). Harmless in lite mode -- nothing reads it when Prometheus is not running.
       CUSTOM_RULES_PATH: ${CUSTOM_RULES_PATH:-/app/custom-rules/custom.yml}
