@@ -1,4 +1,4 @@
-# Infra Monitor — desktop app (experimental)
+# Infra Monitor — desktop app
 
 Packages the exact same FastAPI backend + static UI as a **standalone native desktop app**:
 one window, no Docker, no browser, no server to operate. The backend runs on a private
@@ -59,6 +59,15 @@ powershell -ExecutionPolicy Bypass -File desktop\build-installer.ps1
 Wraps `dist\InfraMonitor.exe` in an Inno Setup installer at `dist-installer\InfraMonitor-Setup.exe`
 and signs both. Set `CODESIGN_PFX` + `CODESIGN_PFX_PASSWORD` to a real code-signing cert to clear
 SmartScreen elsewhere; otherwise a self-signed cert is used (trusted on this machine only).
+
+### App icon (the asset baked into the build)
+The window / taskbar / installer icon is **`desktop/inframonitor.ico`** — a teal server-stack with a
+green status LED. It is embedded into the exe by `inframonitor.spec` (`icon=`) and into the installer
+by `installer.iss`, so it shows on the built desktop app automatically. Preview it at
+`desktop/inframonitor-preview.png`. To change it, edit `desktop/gen_icon.py` and run
+`python desktop/gen_icon.py` (needs Pillow) to regenerate the `.ico` + preview PNG, then rebuild.
+(macOS uses `.icns` if present; Linux ELF binaries carry no icon — see the spec's platform-aware
+`APP_ICON`.)
 
 ### Platform notes / gotchas
 - **Windows — WebView2 runtime** ships with Windows 11 and updated Windows 10; if a target lacks

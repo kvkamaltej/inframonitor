@@ -353,11 +353,42 @@ so it cannot carry an `Authorization` header; the token goes in the first frame 
 would end up in access logs. That WebSocket route also needs the `websockets` package installed — plain
 `uvicorn` has no WebSocket implementation, and without it every shell connection gets a bare HTTP 404.
 
+## Desktop app (standalone)
+
+Infra Monitor also ships as a **standalone desktop application** — one double-clickable window,
+no Docker, no browser, no server to run. The backend runs on a private `127.0.0.1` port inside
+the app and a native OS webview shows the UI. Each install keeps its own local SQLite database
+and secret in `%APPDATA%\InfraMonitor\` (Windows), independent of the server deployment.
+
+### Build the Windows `.exe`
+
+Requires **Python 3.12** (`py -3.12`) and **Node** (for the one-time UI build). From the repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File desktop\build.ps1
+```
+
+Output: `dist\InfraMonitor.exe` — a single self-contained file (~40 MB, no Python needed on the
+target). Double-click to run; on first launch it seeds `admin@inframonitor.local` /
+`ChangeMe123!`. The **app icon** — a teal server-stack with a status LED (`desktop\inframonitor.ico`,
+regenerate with `python desktop\gen_icon.py`) — is embedded in the exe and shown in the taskbar,
+window, and installer.
+
+Optional signed installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File desktop\build-installer.ps1
+```
+
+produces `dist-installer\InfraMonitor-Setup.exe`. Linux/macOS builds (`desktop/build.sh`), the
+CI matrix, and packaging details are in [desktop/README.md](desktop/README.md).
+
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
 | [docs/Deployment.md](docs/Deployment.md) | **Both install profiles**, configuration, volumes, the scripts |
+| [desktop/README.md](desktop/README.md) | **Standalone desktop app**: build the `.exe`, signed installer, cross-platform, app icon |
 | [docs/Architecture.md](docs/Architecture.md) | Process topology per profile, data flows, RBAC |
 | [docs/Monitoring.md](docs/Monitoring.md) | Full mode only: Prometheus, Grafana, Loki, Alertmanager |
 | [docs/API.md](docs/API.md) | Complete endpoint reference |
