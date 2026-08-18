@@ -3,14 +3,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, Download, Loader2, Maximize2, Minimize2, Play, Plus, ScrollText, X } from "lucide-react";
 import { lokiLabelValues, lokiLabels, lokiQueryRange, type LokiStream } from "@/lib/api";
+import { buildLogqlSelector, type SelectorRow } from "@/lib/monitoring-queries";
 
 // A single flattened log line. `identity` is the most specific container/source label chosen for
 // display (see identityOf); `server` is a coarser host label shown as a secondary chip when it
 // differs from the identity.
 type LogRow = { ns: string; line: string; stderr: boolean; labels: Record<string, string> };
-
-// One row of the selector builder: a label name paired with the value to match it against.
-type SelectorRow = { label: string; value: string };
 
 // Relative-window presets. Kept local to this component (the monitoring page defines its own set).
 const RELATIVE_PRESETS: { key: string; label: string; seconds: number }[] = [
@@ -24,10 +22,6 @@ const RELATIVE_PRESETS: { key: string; label: string; seconds: number }[] = [
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
-
-// Escape a matcher value for safe interpolation into a LogQL double-quoted string. Mirrors the
-// helper in server-detail-app.tsx: backslashes first, then double quotes.
-const escapeLabelValue = (v: string) => v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
 // nanosecond epoch string -> HH:MM:SS. Slicing off the last 6 digits yields milliseconds without
 // losing precision to a float.
@@ -157,25 +151,8 @@ export function LokiLogViewer({
   }
 
   // Build the effective LogQL from the pinned selector + non-empty rows + line filter.
-  // Returns a discriminated result so the caller can tell the genuinely-empty case (no pinned
-  // selector and no rows) apart from the case where rows exist but are all incomplete.
-  function buildLogql(): { logql: string } | { error: "empty" | "incomplete" } {
-    const matchers: string[] = [];
-    if (pinnedSelector && pinnedSelector.trim()) matchers.push(pinnedSelector.trim());
-    const hasRows = selectors.length > 0;
-    for (const row of selectors) {
-      if (row.label && row.value) matchers.push(`${row.label}="${escapeLabelValue(row.value)}"`);
-    }
-    if (matchers.length === 0) {
-      // Rows were added but none are fully filled in vs. nothing to build from at all.
-      const anyPartial = selectors.some((row) => row.label || row.value);
-      return { error: hasRows && anyPartial ? "incomplete" : "empty" };
-    }
-    let logql = `{${matchers.join(", ")}}`;
-    const filter = lineFilter.trim();
-    if (filter) logql += ` ${filter}`;
-    return { logql };
-  }
+  // Thin wrapper over the shared builder in the query catalog; behavior is unchanged.
+  const buildLogql = () => buildLogqlSelector(selectors, pinnedSelector, lineFilter);
 
   const run = useCallback(
     async (overrideLogql?: string) => {

@@ -23,6 +23,7 @@ import {
   Trash2
 } from "lucide-react";
 import { LokiLogViewer } from "@/components/loki-logs";
+import { OVERVIEW_CHARTS, TARGETS_QUERIES, CHART_ACCENT } from "@/lib/monitoring-queries";
 import {
   addAlertRule,
   deleteAlertRule,
@@ -237,8 +238,6 @@ export function MonitoringPage({ token, isAdmin }: { token: string; isAdmin?: bo
 
 // --- Metrics --------------------------------------------------------------------------------
 
-const CHART_ACCENT = "var(--inframonitor-accent)";
-
 function MetricsTab({
   token,
   range,
@@ -259,33 +258,18 @@ function MetricsTab({
       </button>
       {graphsOpen ? (
         <div className="grid gap-5 lg:grid-cols-2">
-          <MetricChart
-            token={token}
-            title="Request rate"
-            subtitle="requests/sec"
-            query={`sum(rate(inframonitor_http_requests_total[5m]))`}
-            color={CHART_ACCENT}
-            range={range}
-            refreshKey={refreshKey}
-          />
-          <MetricChart
-            token={token}
-            title="Error rate"
-            subtitle="5xx/sec"
-            query={`sum(rate(inframonitor_http_requests_total{status=~"5.."}[5m]))`}
-            color="#dc2626"
-            range={range}
-            refreshKey={refreshKey}
-          />
-          <MetricChart
-            token={token}
-            title="p95 latency"
-            subtitle="seconds"
-            query={`histogram_quantile(0.95, sum by (le) (rate(inframonitor_http_request_duration_seconds_bucket[5m])))`}
-            color="#d97706"
-            range={range}
-            refreshKey={refreshKey}
-          />
+          {OVERVIEW_CHARTS.map((c) => (
+            <MetricChart
+              key={c.id}
+              token={token}
+              title={c.title}
+              subtitle={c.subtitle}
+              query={c.query}
+              color={c.color}
+              range={range}
+              refreshKey={refreshKey}
+            />
+          ))}
           <TargetsPanel token={token} refreshKey={refreshKey} />
         </div>
       ) : null}
@@ -401,7 +385,7 @@ function TargetsPanel({ token, refreshKey }: { token: string; refreshKey: number
     setLoading(true);
     setError("");
     try {
-      const [sumResp, perResp] = await Promise.all([promQuery(token, "sum(up)"), promQuery(token, "up")]);
+      const [sumResp, perResp] = await Promise.all([promQuery(token, TARGETS_QUERIES.total), promQuery(token, TARGETS_QUERIES.perTarget)]);
       const sumVal = Number(sumResp?.data?.result?.[0]?.value?.[1]);
       setTotal(Number.isFinite(sumVal) ? sumVal : null);
       const rows = (perResp?.data?.result ?? []).map((series) => {

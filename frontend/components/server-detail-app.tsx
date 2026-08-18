@@ -6,6 +6,7 @@ import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
 import { downloadTextFile, safeFilename } from "@/lib/download";
+import { serverMetricCharts } from "@/lib/monitoring-queries";
 import {
   assignServerFolder,
   ContainerInfo,
@@ -1923,13 +1924,6 @@ function ServerMonitoringDrilldown({ token, serverId, scraped }: { token: string
   const [range, setRange] = useState<MonRange>(MON_RANGES[1]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [chartsOpen, setChartsOpen] = useState(true);
-  const sid = promLabel(serverId);
-
-  const cpu = `100 - (avg(rate(node_cpu_seconds_total{mode="idle",server_id="${sid}"}[5m])) * 100)`;
-  const mem = `(1 - (node_memory_MemAvailable_bytes{server_id="${sid}"} / node_memory_MemTotal_bytes{server_id="${sid}"})) * 100`;
-  const disk = `100 - (node_filesystem_avail_bytes{server_id="${sid}",mountpoint="/"} / node_filesystem_size_bytes{server_id="${sid}",mountpoint="/"} * 100)`;
-  const netIn = `rate(node_network_receive_bytes_total{server_id="${sid}"}[5m])`;
-  const netOut = `rate(node_network_transmit_bytes_total{server_id="${sid}"}[5m])`;
 
   return (
     <div className="space-y-5">
@@ -1969,10 +1963,9 @@ function ServerMonitoringDrilldown({ token, serverId, scraped }: { token: string
 
       {chartsOpen ? (
         <div className="grid gap-5 lg:grid-cols-2">
-          <ServerChart token={token} title="CPU" subtitle="% used" unit="%" range={range} refreshKey={refreshKey} lines={[{ key: "v", query: cpu, color: "var(--inframonitor-accent)", label: "CPU %" }]} />
-          <ServerChart token={token} title="Memory" subtitle="% used" unit="%" range={range} refreshKey={refreshKey} lines={[{ key: "v", query: mem, color: "#7c3aed", label: "Memory %" }]} />
-          <ServerChart token={token} title="Disk (root)" subtitle="% used" unit="%" range={range} refreshKey={refreshKey} lines={[{ key: "v", query: disk, color: "#d97706", label: "Disk %" }]} />
-          <ServerChart token={token} title="Network" subtitle="bytes/sec" unit="B/s" range={range} refreshKey={refreshKey} lines={[{ key: "rx", query: netIn, color: "var(--inframonitor-accent)", label: "In" }, { key: "tx", query: netOut, color: "#dc2626", label: "Out" }]} />
+          {serverMetricCharts(serverId).map((c) => (
+            <ServerChart key={c.id} token={token} title={c.title} subtitle={c.subtitle} unit={c.unit} range={range} refreshKey={refreshKey} lines={c.lines} />
+          ))}
         </div>
       ) : null}
 
