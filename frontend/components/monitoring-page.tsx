@@ -86,7 +86,7 @@ function since(iso: string): string {
   return `${days}d ${hours % 24}h`;
 }
 
-export function MonitoringPage({ token }: { token: string }) {
+export function MonitoringPage({ token, isAdmin }: { token: string; isAdmin?: boolean }) {
   const [enabled, setEnabled] = useState<MonitoringEnabled | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -226,7 +226,7 @@ export function MonitoringPage({ token }: { token: string }) {
         <MetricsTab token={token} range={activeRange} refreshKey={refreshKey} />
       ) : null}
       {tab === "alerts" && enabled?.alertmanager ? (
-        <AlertsTab token={token} refreshKey={refreshKey} />
+        <AlertsTab token={token} isAdmin={isAdmin} refreshKey={refreshKey} />
       ) : null}
       {tab === "logs" && enabled?.loki ? (
         <LokiLogViewer token={token} title="Logs" />
@@ -474,7 +474,7 @@ function severityTone(severity: string): { dot: string; label: string } {
   return { dot: "bg-slate-400", label: severity || "info" };
 }
 
-function AlertsTab({ token, refreshKey }: { token: string; refreshKey: number }) {
+function AlertsTab({ token, isAdmin, refreshKey }: { token: string; isAdmin?: boolean; refreshKey: number }) {
   const [alerts, setAlerts] = useState<AlertmanagerAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -498,7 +498,7 @@ function AlertsTab({ token, refreshKey }: { token: string; refreshKey: number })
 
   return (
     <div className="grid gap-5">
-      <CustomAlertRules token={token} onAlertsChanged={load} />
+      <CustomAlertRules token={token} isAdmin={isAdmin} refreshKey={refreshKey} onAlertsChanged={load} />
 
       <div className="grid gap-3">
         <h3 className="text-sm font-semibold text-fg">Active alerts</h3>
@@ -559,7 +559,17 @@ function AlertsTab({ token, refreshKey }: { token: string; refreshKey: number })
 // Custom alert rules: list existing rules, delete them, and add new ones from a template or by
 // hand. Sits above the active-alerts list; on any change it also refreshes the active alerts via
 // onAlertsChanged so a freshly-created rule shows up once Prometheus evaluates it.
-function CustomAlertRules({ token, onAlertsChanged }: { token: string; onAlertsChanged: () => void }) {
+function CustomAlertRules({
+  token,
+  isAdmin,
+  refreshKey,
+  onAlertsChanged
+}: {
+  token: string;
+  isAdmin?: boolean;
+  refreshKey: number;
+  onAlertsChanged: () => void;
+}) {
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [templates, setTemplates] = useState<AlertTemplate[]>([]);
   const [loading, setLoading] = useState(true);
@@ -594,7 +604,7 @@ function CustomAlertRules({ token, onAlertsChanged }: { token: string; onAlertsC
 
   useEffect(() => {
     void loadRules();
-  }, [loadRules]);
+  }, [loadRules, refreshKey]);
 
   const activeTemplate = useMemo(() => templates.find((t) => t.key === templateKey), [templates, templateKey]);
 
@@ -672,7 +682,7 @@ function CustomAlertRules({ token, onAlertsChanged }: { token: string; onAlertsC
             fires — use it to verify the pipeline. New rules take up to ~30s to show as active alerts.
           </p>
         </div>
-        {!showForm ? (
+        {isAdmin && !showForm ? (
           <button
             onClick={() => setShowForm(true)}
             className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/90"
@@ -682,11 +692,15 @@ function CustomAlertRules({ token, onAlertsChanged }: { token: string; onAlertsC
         ) : null}
       </div>
 
+      {!isAdmin ? (
+        <p className="mb-3 text-xs font-medium text-muted">Adding or removing alert rules requires an admin.</p>
+      ) : null}
+
       {error ? (
         <div className="mb-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm font-medium text-danger">{error}</div>
       ) : null}
 
-      {showForm ? (
+      {isAdmin && showForm ? (
         <div className="mb-4 grid gap-3 rounded-xl border border-edge bg-page p-4">
           <label className="flex flex-col gap-1">
             <span className="text-xs font-semibold uppercase tracking-wide text-muted">Template</span>
@@ -821,13 +835,15 @@ function CustomAlertRules({ token, onAlertsChanged }: { token: string; onAlertsC
                   </div>
                   <p className="mt-1 break-all font-mono text-xs text-muted">{rule.expr}</p>
                 </div>
-                <button
-                  onClick={() => void remove(rule.name)}
-                  disabled={deleting === rule.name}
-                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-danger/40 px-3 text-xs font-semibold text-danger transition-colors hover:bg-danger/10 disabled:opacity-50"
-                >
-                  {deleting === rule.name ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Delete
-                </button>
+                {isAdmin ? (
+                  <button
+                    onClick={() => void remove(rule.name)}
+                    disabled={deleting === rule.name}
+                    className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-danger/40 px-3 text-xs font-semibold text-danger transition-colors hover:bg-danger/10 disabled:opacity-50"
+                  >
+                    {deleting === rule.name ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Delete
+                  </button>
+                ) : null}
               </li>
             );
           })}

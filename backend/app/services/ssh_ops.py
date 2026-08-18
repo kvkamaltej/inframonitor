@@ -2692,7 +2692,7 @@ def service_logs(server: Server, credentials: CredentialPayload, source: str, na
     elif source in ("docker", "podman"):
         return container_logs(server, credentials, source, name_or_path, safe_tail)
     else:
-        inner = f"tail -n {safe_tail} -- $LOGPATH"
+        inner = f'tail -n {safe_tail} -- "$LOGPATH"'
         output = run_command(server, credentials, f"LOGPATH={_q(name_or_path)} sh -c {_q(inner)}")
     return output.splitlines()
 

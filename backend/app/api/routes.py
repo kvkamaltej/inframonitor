@@ -26,7 +26,7 @@ from app.core.config import get_settings
 from app.core.database import SessionLocal, get_db
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_KEYS, ROLE_MENUS_KEY, menus_for_role
-from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, require_user_not_guest, verify_password
+from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, verify_password
 from app.services.secrets import VaultError, get_vault_config, load_credentials, save_vault_config, store_credentials, test_vault
 from app.services import alert_rules
 from app.services import db_backend
@@ -2591,8 +2591,9 @@ def delete_shell_favorite(favorite_id: int, claims: dict = Depends(require_user)
 #
 # A standalone SQL console: a signed-in (non-guest) user supplies connection parameters and
 # credentials per request, and the backend opens a fresh PostgreSQL/MySQL connection, runs the
-# work, and closes it. Nothing is stored. Blocked for desktop guests (require_user_not_guest):
-# the console dials out to arbitrary databases, so it must be a real account.
+# work, and closes it. Nothing is stored. Guarded by require_user, which by design (2026-08-14)
+# admits the desktop guest -- the guest role is admin and its menu includes the DB console. Only
+# a *_not_guest guard would exclude the guest, and these routes intentionally don't use one.
 #
 # IN scope: standalone params (not a managed server), test + run a read-only query, postgres +
 # mysql, per-request credentials. OUT of scope (follow-ons): saved/stored connections, a schema
@@ -2867,7 +2868,8 @@ def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, d
 # routines) and the per-table detail panes (columns/indexes/constraints/foreign-keys), plus a
 # generate-SQL helper that builds boilerplate from a table's real columns. Every call decrypts the
 # stored password, runs one short introspection query via db_metadata, and surfaces a DbConsoleError
-# as a clean HTTP 400. Same auth as the rest of the /db routes (require_user_not_guest).
+# as a clean HTTP 400. Same auth as the rest of the /db routes: require_user, which by design
+# admits the desktop guest (no *_not_guest guard is applied).
 
 
 def _db_meta_args(conn: DbConnection, database: str | None = None) -> tuple:
@@ -3174,8 +3176,9 @@ def clear_db_query_history(claims: dict = Depends(require_user), db: Session = D
 # credentials (a full kubeconfig YAML, or a bearer token) are encrypted at rest with the same
 # Fernet path, and the CA certificate is a public cert stored as plain text. `group` is a folder
 # NAME, resolved to a Folder exactly as servers are grouped. Writes are admin-only; the live reads
-# (nodes/pods/...) require a real signed-in user (require_user_not_guest, mirroring the DB console);
-# the mutating actions (restart/scale/cordon/delete) require a non-guest admin.
+# (nodes/pods/...) use require_user, which by design admits the desktop guest (mirroring the DB
+# console -- no *_not_guest guard); the mutating actions (restart/scale/cordon/delete) require a
+# non-guest admin.
 
 _KUBE_AUTH_METHODS = {"kubeconfig", "token"}
 

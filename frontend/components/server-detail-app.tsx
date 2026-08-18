@@ -199,6 +199,22 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
   }, []);
 
+  // While the Logs tab is fullscreen, let Escape exit it and lock body scroll so the page behind
+  // the fixed overlay doesn't scroll. Cleanup restores both when leaving fullscreen / unmounting.
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isFullscreen]);
+
   function report(result: { ok: boolean; message: string }, fallback: string) {
     notify(result.message || fallback, result.ok ? "info" : "error");
   }
@@ -1960,7 +1976,7 @@ function ServerMonitoringDrilldown({ token, serverId, scraped }: { token: string
         </div>
       ) : null}
 
-      <LokiLogViewer token={token} pinnedSelector={`server_id="${serverId}"`} title="Server logs" />
+      <LokiLogViewer token={token} pinnedSelector={`server_id="${promLabel(serverId)}"`} title="Server logs" />
     </div>
   );
 }

@@ -209,6 +209,49 @@ if [[ "$mode" == "full" ]]; then
     done
     echo "Both full-mode passwords are in .env (mode 600). Back it up with JWT_SECRET."
   fi
+
+  # --- Prometheus service-discovery token ----------------------------------
+  # Prometheus authenticates to the app's http_sd endpoint (the node_exporter
+  # target list) with a bearer token it reads from monitoring/prometheus/sd_token;
+  # the app requires the SAME value in MONITORING_SD_TOKEN. Nothing else creates
+  # either, so a fresh full bring-up would otherwise start Prometheus with no
+  # token file -- Docker would materialise a directory in its place -- and scrape
+  # zero node_exporter targets. Generate once and keep the two in sync.
+  #
+  # Idempotent: if the file already holds a token and .env already matches it,
+  # leave both alone. Unlike POSTGRES_PASSWORD this is safe to (re)write into an
+  # existing .env -- it is just a shared bearer token, read fresh at every app
+  # start, not a key that decrypts stored data. Reuse whichever side already has
+  # a value so a token an already-running Prometheus is using is never invalidated;
+  # only generate when neither side has one.
+  sd_file="monitoring/prometheus/sd_token"
+  sd_env="$(inframonitor_read_env MONITORING_SD_TOKEN)"
+  sd_file_value=""
+  [[ -f "$sd_file" ]] && sd_file_value="$(tr -d '\r\n' < "$sd_file")"
+  if [[ -n "$sd_file_value" && "$sd_file_value" == "$sd_env" ]]; then
+    echo "Prometheus SD token already set (sd_token matches MONITORING_SD_TOKEN)."
+  else
+    token="$sd_file_value"
+    [[ -z "$token" ]] && token="$sd_env"
+    if [[ -z "$token" ]]; then
+      token="$(gen_secret 24)" || {
+        echo "FAIL  could not generate a MONITORING_SD_TOKEN." >&2
+        echo "      Set it in .env and write the same value to ${sd_file}:" >&2
+        echo '        python -c "import secrets; print(secrets.token_urlsafe(24))"' >&2
+        exit 1
+      }
+    fi
+    # printf, not echo: the bearer token must be the exact file contents with no
+    # trailing newline surprises. mode 600 to match .env and the passwords above.
+    umask 077
+    printf '%s' "$token" > "$sd_file"
+    chmod 600 "$sd_file"
+    set_env_value MONITORING_SD_TOKEN "$token"
+    unset token
+    echo "Wrote ${sd_file} (mode 600) and set MONITORING_SD_TOKEN in .env to match."
+  fi
+  unset sd_file sd_env sd_file_value
+
   # Whether we generated them or not, they have to be usable now.
   inframonitor_check_full_env || exit 1
 fi

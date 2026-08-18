@@ -25,6 +25,10 @@ function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+// Escape a matcher value for safe interpolation into a LogQL double-quoted string. Mirrors the
+// helper in server-detail-app.tsx: backslashes first, then double quotes.
+const escapeLabelValue = (v: string) => v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
 // nanosecond epoch string -> HH:MM:SS. Slicing off the last 6 digits yields milliseconds without
 // losing precision to a float.
 function nsToClock(ns: string): string {
@@ -153,25 +157,42 @@ export function LokiLogViewer({
   }
 
   // Build the effective LogQL from the pinned selector + non-empty rows + line filter.
-  function buildLogql(): string | null {
+  // Returns a discriminated result so the caller can tell the genuinely-empty case (no pinned
+  // selector and no rows) apart from the case where rows exist but are all incomplete.
+  function buildLogql(): { logql: string } | { error: "empty" | "incomplete" } {
     const matchers: string[] = [];
     if (pinnedSelector && pinnedSelector.trim()) matchers.push(pinnedSelector.trim());
+    const hasRows = selectors.length > 0;
     for (const row of selectors) {
-      if (row.label && row.value) matchers.push(`${row.label}="${row.value}"`);
+      if (row.label && row.value) matchers.push(`${row.label}="${escapeLabelValue(row.value)}"`);
     }
-    if (matchers.length === 0) return null;
+    if (matchers.length === 0) {
+      // Rows were added but none are fully filled in vs. nothing to build from at all.
+      const anyPartial = selectors.some((row) => row.label || row.value);
+      return { error: hasRows && anyPartial ? "incomplete" : "empty" };
+    }
     let logql = `{${matchers.join(", ")}}`;
     const filter = lineFilter.trim();
     if (filter) logql += ` ${filter}`;
-    return logql;
+    return { logql };
   }
 
   const run = useCallback(
     async (overrideLogql?: string) => {
-      const logql = overrideLogql ?? buildLogql();
-      if (!logql) {
-        setError("Add at least one selector");
-        return;
+      let logql: string;
+      if (overrideLogql) {
+        logql = overrideLogql;
+      } else {
+        const built = buildLogql();
+        if ("error" in built) {
+          setError(
+            built.error === "incomplete"
+              ? "Fill in both label and value for each selector"
+              : "Add at least one selector"
+          );
+          return;
+        }
+        logql = built.logql;
       }
       let start: number, end: number;
       if (rangeMode === "absolute") {
@@ -216,6 +237,22 @@ export function LokiLogViewer({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinnedSelector]);
+
+  // While the fullscreen overlay is open, allow Escape to exit it and lock scrolling of the page
+  // behind it. Cleanup restores both when it closes.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [fullscreen]);
 
   // Export the currently loaded rows to a .log file, oldest-first (rows are held newest-first).
   function exportLogs() {

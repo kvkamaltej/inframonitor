@@ -62,6 +62,12 @@ EXPECTED_SERVER_COLUMNS: list[tuple[str, str]] = [
     ("node_exporter_port", "9100"),
     ("log_shipping_enabled", "0"),
     ("log_sources_json", "'[]'"),
+    # These four ship in the ServerRead payload; a DB predating them 500s GET /servers until
+    # ALTERed in. All four are plain TEXT/VARCHAR ORM columns with default="", so DEFAULT ''.
+    ("installed_services", "''"),
+    ("installed_exporters", "''"),
+    ("business_owner", "''"),
+    ("support_contact", "''"),
 ]
 
 DEFAULT_APP_SETTINGS: dict[str, list[str]] = {

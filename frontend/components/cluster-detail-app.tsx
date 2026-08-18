@@ -20,6 +20,7 @@ import {
   MemoryStick,
   RefreshCw,
   RotateCw,
+  Save,
   ScrollText,
   Server,
   Terminal,
@@ -51,7 +52,8 @@ import {
   Me,
   restartKubeDeployment,
   restartKubePod,
-  scaleKubeDeployment
+  scaleKubeDeployment,
+  setClusterLogShipping
 } from "@/lib/api";
 import { Sidebar } from "@/components/sidebar";
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
@@ -106,11 +108,17 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
   const [logsCopied, setLogsCopied] = useState(false);
   const [logsAuto, setLogsAuto] = useState(0);
 
+  // Log shipping (feature/k8s-log-shipping): whether this cluster's pod logs are tailed into
+  // Loki, and which namespaces (empty = all). Seeded from the cluster on load and after a save.
+  const [logShipEnabled, setLogShipEnabled] = useState(false);
+  const [logNamespaces, setLogNamespaces] = useState("");
+
   const [message, setMessage] = useState("");
   const [tone, setTone] = useState<Tone>("info");
   // Which action is in flight ("" = idle); every `disabled={loading}` serialises requests.
   const [busy, setBusy] = useState("");
   const loading = busy !== "";
+  const isAdmin = me?.role === "admin";
 
   // Toast auto-dismiss: info fades after a few seconds, errors persist until dismissed.
   const toastTimer = useRef<number | null>(null);
@@ -281,6 +289,8 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
       try {
         const [c, o] = await Promise.all([getKubeCluster(saved, clusterId), getKubeOverview(saved, clusterId)]);
         setCluster(c);
+        setLogShipEnabled(c.log_shipping_enabled);
+        setLogNamespaces((c.log_namespaces ?? []).join(", "));
         setOverview(o);
       } catch (error) {
         setLoadError(errText(error, "Unable to load cluster"));
@@ -412,6 +422,27 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
     }
   }
 
+  async function saveLogShipping() {
+    // Empty = all namespaces: split on commas and drop blanks so "a, ,b" becomes ["a","b"].
+    const namespaces = logNamespaces.split(",").map((ns) => ns.trim()).filter(Boolean);
+    setBusy("log-shipping");
+    try {
+      const next = await setClusterLogShipping(token, clusterId, logShipEnabled, namespaces);
+      setCluster(next);
+      setLogShipEnabled(next.log_shipping_enabled);
+      setLogNamespaces((next.log_namespaces ?? []).join(", "));
+      notify(
+        next.log_shipping_enabled
+          ? `Log shipping enabled for ${next.log_namespaces.length ? next.log_namespaces.join(", ") : "all namespaces"}.`
+          : "Log shipping disabled for this cluster."
+      );
+    } catch (error) {
+      notify(errText(error, "Unable to update log shipping"), "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
   if (initializing) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-page">
@@ -469,6 +500,51 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
             </div>
 
             {tab === "overview" ? <OverviewTab overview={overview} /> : null}
+
+            {tab === "overview" && isAdmin ? (
+              <Panel title="Log shipping" icon={<ScrollText size={18} />}>
+                <label className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    checked={logShipEnabled}
+                    onChange={(event) => setLogShipEnabled(event.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-line text-accent focus:ring-accent"
+                  />
+                  <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                    Ship this cluster&apos;s pod logs to Loki
+                  </span>
+                </label>
+
+                <label className="mt-4 grid max-w-xl gap-1">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted">Namespaces</span>
+                  <input
+                    value={logNamespaces}
+                    onChange={(event) => setLogNamespaces(event.target.value)}
+                    disabled={!logShipEnabled}
+                    placeholder="e.g. default, kube-system"
+                    className="h-10 rounded-xl border border-line bg-white px-3 text-sm disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                  />
+                  <span className="text-xs text-muted">Comma-separated. Leave empty to ship all namespaces.</span>
+                </label>
+
+                <div className="mt-4 flex items-center gap-3">
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => void saveLogShipping()}
+                    className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
+                  >
+                    {busy === "log-shipping" ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Save
+                  </button>
+                </div>
+
+                <p className="mt-4 text-xs text-muted">
+                  Shipped logs land in Loki under <code className="font-mono">{`{job="k8s-logs"}`}</code>, labelled by
+                  namespace, pod and container. View them from the <span className="font-semibold">Logs</span> tab on the
+                  Monitoring page.
+                </p>
+              </Panel>
+            ) : null}
 
             {tab === "nodes" ? (
               <Panel title="Nodes" icon={<Server size={18} />}>

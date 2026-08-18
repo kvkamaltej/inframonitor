@@ -310,6 +310,11 @@ inframonitor_check_full_env() {
   local -a required=(
     "monitoring/prometheus/prometheus.yml"
     "monitoring/prometheus/alerts.yml"
+    # Must exist as a FILE before `up`: it is bind-mounted at
+    # /etc/prometheus/sd_token, and a missing path makes Docker create a
+    # directory there, so Prometheus reads no bearer token and the node_exporter
+    # http_sd job is refused. scripts/deploy.sh generates it on a full deploy.
+    "monitoring/prometheus/sd_token"
     "monitoring/prometheus/targets"
     "monitoring/alertmanager/alertmanager.yml"
     "monitoring/loki/loki.yml"
