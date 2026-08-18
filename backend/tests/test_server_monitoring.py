@@ -285,3 +285,26 @@ def test_ship_once_pushes_new_lines_with_fake_httpx(monkeypatch):
     with SessionLocal() as db:
         shipped2 = log_shipper.ship_once(db, client=FakeClient(), tail_fn=fake_reader)
     assert shipped2 == 0
+
+
+# --- service_logs docker branch -------------------------------------------------------------
+
+
+def test_service_logs_docker_branch_runs_docker_logs(monkeypatch):
+    from app.schemas.contracts import CredentialPayload
+    from app.services import ssh_ops
+
+    captured = {}
+
+    def fake_run_command(server, credentials, command, *args, **kwargs):
+        captured["command"] = command
+        return "log line 1\nlog line 2"
+
+    monkeypatch.setattr(ssh_ops, "run_command", fake_run_command)
+
+    server = Server(hostname="web01", ip_address="10.0.0.5", ssh_port=22, username="ops")
+    lines = ssh_ops.service_logs(server, CredentialPayload(password="pw"), "docker", "mycontainer", 50)
+
+    assert "docker logs" in captured["command"]
+    assert "mycontainer" in captured["command"]
+    assert lines == ["log line 1", "log line 2"]

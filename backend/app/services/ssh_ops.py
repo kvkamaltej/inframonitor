@@ -2685,6 +2685,8 @@ def service_logs(server: Server, credentials: CredentialPayload, source: str, na
     safe_tail = max(10, min(tail, 1000))
     if source == "journal":
         output = run_command(server, credentials, f"journalctl -u {_q(name_or_path)} -n {safe_tail} --no-pager")
+    elif source in ("docker", "podman"):
+        return container_logs(server, credentials, source, name_or_path, safe_tail)
     else:
         inner = f"tail -n {safe_tail} -- $LOGPATH"
         output = run_command(server, credentials, f"LOGPATH={_q(name_or_path)} sh -c {_q(inner)}")

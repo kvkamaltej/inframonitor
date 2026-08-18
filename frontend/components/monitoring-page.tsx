@@ -14,6 +14,7 @@ import {
   Activity,
   AlertTriangle,
   BellRing,
+  Download,
   ExternalLink,
   Loader2,
   Play,
@@ -50,6 +51,19 @@ type TabKey = "metrics" | "alerts" | "logs";
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+// Trigger a client-side download of a plain-text file from an in-memory string.
+function downloadTextFile(filename: string, text: string) {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // Prometheus range result -> recharts rows. Takes the first series (the queries here all reduce
@@ -591,6 +605,11 @@ function LogsTab({
   const [error, setError] = useState("");
   const [ran, setRan] = useState(false);
 
+  // Time-window mode: relative (the shared range pills) or an explicit absolute From/To window.
+  const [rangeMode, setRangeMode] = useState<"relative" | "absolute">("relative");
+  const [absFrom, setAbsFrom] = useState("");
+  const [absTo, setAbsTo] = useState("");
+
   // label picker state
   const [labelNames, setLabelNames] = useState<string[]>([]);
   const [pickLabel, setPickLabel] = useState("");
@@ -643,13 +662,27 @@ function LogsTab({
       setError("Enter a LogQL selector to run.");
       return;
     }
+    let start: number, end: number;
+    if (rangeMode === "absolute") {
+      if (!absFrom || !absTo) {
+        setError("Pick both From and To dates.");
+        return;
+      }
+      start = Math.floor(new Date(absFrom).getTime() / 1000);
+      end = Math.floor(new Date(absTo).getTime() / 1000);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
+        setError("From must be before To.");
+        return;
+      }
+    } else {
+      end = nowSec();
+      start = end - range.seconds;
+    }
     setLoading(true);
     setError("");
     setRan(true);
     try {
-      const end = nowSec();
-      const start = end - range.seconds;
-      const resp = await lokiQueryRange(token, logql, start, end, { limit: 500, direction: "backward" });
+      const resp = await lokiQueryRange(token, logql, start, end, { limit: 1000, direction: "backward" });
       const streams = resp?.data?.result ?? [];
       setRows(flattenStreams(streams));
       const seen = new Set<string>();
@@ -662,7 +695,7 @@ function LogsTab({
     } finally {
       setLoading(false);
     }
-  }, [token, query, range.seconds]);
+  }, [token, query, range.seconds, rangeMode, absFrom, absTo]);
 
   // Re-run on Refresh / range change once the user has run at least once.
   useEffect(() => {
@@ -673,6 +706,16 @@ function LogsTab({
   function applyLabelSelector() {
     if (!pickLabel || !pickValue) return;
     setQuery(`{${pickLabel}="${pickValue}"}`);
+  }
+
+  // Export the currently loaded rows to a .log file, oldest-first (rows are held newest-first).
+  function exportLogs() {
+    if (rows.length === 0) return;
+    const text = [...rows]
+      .reverse()
+      .map((row) => `${new Date(Number(row.ns.slice(0, -6))).toISOString()}\t${row.line}`)
+      .join("\n");
+    downloadTextFile(`loki-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.log`, text);
   }
 
   return (
@@ -698,6 +741,13 @@ function LogsTab({
             className="inline-flex h-9 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
           >
             {loading ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />} Run
+          </button>
+          <button
+            onClick={exportLogs}
+            disabled={rows.length === 0}
+            className="inline-flex h-9 items-center gap-2 rounded-full border border-edge px-4 text-sm font-medium text-fg transition-colors hover:bg-elevated disabled:opacity-50"
+          >
+            <Download size={15} /> Export
           </button>
         </div>
 
@@ -741,6 +791,48 @@ function LogsTab({
           >
             Use selector
           </button>
+        </div>
+
+        {/* Time window: relative (shared range pills) vs an explicit absolute From/To window. */}
+        <div className="mt-3 flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Time window</span>
+            <div className="flex items-center gap-1 rounded-full border border-edge p-1">
+              {(["relative", "absolute"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => setRangeMode(mode)}
+                  className={`h-7 rounded-full px-3 text-xs font-semibold capitalize transition-colors ${
+                    rangeMode === mode ? "bg-accent text-white" : "text-muted hover:text-fg"
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+          </label>
+          {rangeMode === "absolute" ? (
+            <>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted">From</span>
+                <input
+                  type="datetime-local"
+                  value={absFrom}
+                  onChange={(e) => setAbsFrom(e.target.value)}
+                  className="h-9 rounded-lg border border-edge bg-page px-2 text-sm text-fg outline-none focus:border-accent"
+                />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted">To</span>
+                <input
+                  type="datetime-local"
+                  value={absTo}
+                  onChange={(e) => setAbsTo(e.target.value)}
+                  className="h-9 rounded-lg border border-edge bg-page px-2 text-sm text-fg outline-none focus:border-accent"
+                />
+              </label>
+            </>
+          ) : null}
         </div>
       </div>
 

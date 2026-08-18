@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, Clock, Coffee, Copy, Download, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, LineChart as LineChartIcon, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, PlugZap, RefreshCw, ScrollText, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, ChevronDown, ChevronRight, Clock, Coffee, Copy, Download, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, LineChart as LineChartIcon, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, PlugZap, RefreshCw, ScrollText, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Fragment, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
@@ -122,6 +122,9 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   const [monLoaded, setMonLoaded] = useState(false);
   const [logShipEnabled, setLogShipEnabled] = useState(false);
   const [chosenSources, setChosenSources] = useState<Set<string>>(new Set());
+  // Once the metrics agent is installed its controls collapse behind a status header, so the
+  // Monitoring tab isn't dominated by an already-done step. Expands to reveal Uninstall.
+  const [metricsExpanded, setMetricsExpanded] = useState(false);
 
   const { confirm, confirmDialog } = useConfirm();
   const isAdmin = me?.role === "admin";
@@ -580,7 +583,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   async function saveLogShipping() {
     // Ships log files/journal units to Loki — an invasive change on the host, so confirm before
     // enabling it. Disabling or editing the set is confirmed too for symmetry.
-    const options = buildLogSourceOptions(server, tomcatRows, monitoring?.log_sources ?? []);
+    const options = buildLogSourceOptions(server, tomcatRows, containers, monitoring?.log_sources ?? []);
     const sources: ServerLogSource[] = options
       .filter((opt) => chosenSources.has(`${opt.source}|${opt.name_or_path}`))
       .map(({ source, name_or_path }) => ({ source, name_or_path }));
@@ -1132,29 +1135,41 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                         <Gauge size={16} className="text-accent" /> Metrics agent (node_exporter)
                       </div>
                       {monitoring.metrics_enabled ? (
-                        <div className="flex flex-wrap items-center gap-3">
-                          <span className="inline-flex items-center gap-2 text-sm text-muted">
-                            <span className={`h-2 w-2 rounded-full ${monitoring.scraped ? "bg-emerald-500" : "bg-amber-500"}`} />
-                            Agent installed · {monitoring.scraped ? "scraped ✓" : "not scraped ✗"} on port {monitoring.node_exporter_port}
-                          </span>
+                        <div>
                           <button
-                            disabled={loading}
-                            onClick={() => void uninstallMetrics()}
-                            className="inline-flex h-9 items-center gap-2 rounded-full bg-red-100 px-4 text-xs font-semibold text-red-800 transition-colors hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-200 dark:hover:bg-red-900/60"
+                            type="button"
+                            onClick={() => setMetricsExpanded((prev) => !prev)}
+                            className="flex w-full items-center gap-2 rounded-lg text-left text-sm text-muted hover:text-fg"
                           >
-                            {busy === "metrics-uninstall" ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />} Uninstall
+                            {metricsExpanded ? <ChevronDown size={15} className="shrink-0" /> : <ChevronRight size={15} className="shrink-0" />}
+                            <span className={`h-2 w-2 shrink-0 rounded-full ${monitoring.scraped ? "bg-emerald-500" : "bg-amber-500"}`} />
+                            <span>Agent installed · {monitoring.scraped ? "scraped ✓" : "not scraped ✗"} on port {monitoring.node_exporter_port}</span>
                           </button>
+                          {metricsExpanded ? (
+                            <div className="mt-3 pl-6">
+                              <button
+                                disabled={loading}
+                                onClick={() => void uninstallMetrics()}
+                                className="inline-flex h-9 items-center gap-2 rounded-full bg-red-100 px-4 text-xs font-semibold text-red-800 transition-colors hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/40 dark:text-red-200 dark:hover:bg-red-900/60"
+                              >
+                                {busy === "metrics-uninstall" ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />} Uninstall
+                              </button>
+                              <p className="mt-2 text-xs text-muted">Installing runs commands on the real host over SSH to set up node_exporter.</p>
+                            </div>
+                          ) : null}
                         </div>
                       ) : (
-                        <button
-                          disabled={loading}
-                          onClick={() => void installMetrics()}
-                          className="inline-flex h-9 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
-                        >
-                          {busy === "metrics-install" ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={15} />} Install metrics agent
-                        </button>
+                        <>
+                          <button
+                            disabled={loading}
+                            onClick={() => void installMetrics()}
+                            className="inline-flex h-9 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
+                          >
+                            {busy === "metrics-install" ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={15} />} Install metrics agent
+                          </button>
+                          <p className="mt-2 text-xs text-muted">Installing runs commands on the real host over SSH to set up node_exporter.</p>
+                        </>
                       )}
-                      <p className="mt-2 text-xs text-muted">Installing runs commands on the real host over SSH to set up node_exporter.</p>
                     </div>
 
                     {/* Log shipping */}
@@ -1174,10 +1189,21 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                       <p className="mt-2 mb-3 text-xs text-muted">
                         Choose which discovered log sources to ship. Each is labelled with <code className="font-mono">server_id=&quot;{serverId}&quot;</code> in Loki.
                       </p>
+                      <div className="mb-3 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={loading}
+                          onClick={() => void loadContainers()}
+                          className="inline-flex h-8 items-center gap-1.5 rounded-full border border-edge px-3 text-xs font-medium text-fg transition-colors hover:bg-elevated disabled:opacity-50"
+                        >
+                          <Boxes size={13} /> {containers.length > 0 ? "Reload containers" : "Load containers"}
+                        </button>
+                        <span className="text-xs text-muted">Container logs are shipped with <code className="font-mono">source=&lt;container name&gt;</code>.</span>
+                      </div>
                       {(() => {
-                        const options = buildLogSourceOptions(server, tomcatRows, monitoring.log_sources);
+                        const options = buildLogSourceOptions(server, tomcatRows, containers, monitoring.log_sources);
                         if (options.length === 0) {
-                          return <p className="text-xs text-muted">No log sources discovered yet. Run discovery, or load Tomcat instances, to populate this list.</p>;
+                          return <p className="text-xs text-muted">No log sources discovered yet. Run discovery, load Tomcat instances, or load containers to populate this list.</p>;
                         }
                         return (
                           <div className="grid gap-2 sm:grid-cols-2">
@@ -1746,7 +1772,7 @@ type LogSourceOption = { source: string; name_or_path: string; label: string };
 // systemd units (shipped from the journal), database log files, and Tomcat log files — so the
 // operator picks real paths/units rather than typing them. Anything already shipped but no
 // longer discovered is appended so it stays visible and selectable. Deduped by source+path.
-function buildLogSourceOptions(server: Server | null, tomcatRows: TomcatInstance[], shipped: ServerLogSource[]): LogSourceOption[] {
+function buildLogSourceOptions(server: Server | null, tomcatRows: TomcatInstance[], containers: ContainerInfo[], shipped: ServerLogSource[]): LogSourceOption[] {
   const out: LogSourceOption[] = [];
   const seen = new Set<string>();
   const add = (source: string, name_or_path: string, label: string) => {
@@ -1766,6 +1792,10 @@ function buildLogSourceOptions(server: Server | null, tomcatRows: TomcatInstance
     for (const file of inst.log_files ?? []) {
       if (file.path) add("file", file.path, `${inst.name} · ${file.name}`);
     }
+  }
+  for (const c of containers) {
+    const rt = c.runtime || "docker";
+    if (c.name) add(rt, c.name, `${rt} · ${c.name}`);
   }
   for (const s of shipped) add(s.source, s.name_or_path, `${s.source} · ${s.name_or_path}`);
   return out;
