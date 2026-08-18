@@ -223,6 +223,39 @@ def _backfill_role_menus() -> None:
             db.commit()
 
 
+_GUEST_MENU_ADDITIONS = ("databases", "kubernetes", "appdatabase")
+_GUEST_MENU_ADDED_KEY = "guest_menu_additions_v1"
+
+
+def _backfill_guest_menu_additions() -> None:
+    """One-time: give the desktop guest the Databases, Kubernetes and App Database sections.
+
+    These items were already "provisioned" (present for admin/developer) before the guest default
+    gained them, so _backfill_role_menus never adds them to the guest row. Apply once, tracked by a
+    marker, so an admin who later removes one keeps it removed. Fresh installs already get them from
+    DEFAULT_ROLE_MENUS, so this is a no-op there beyond stamping the marker.
+    """
+    with SessionLocal() as db:
+        if db.get(AppSetting, _GUEST_MENU_ADDED_KEY):
+            return  # already applied
+        setting = db.get(AppSetting, ROLE_MENUS_KEY)
+        if setting:
+            try:
+                matrix = json.loads(setting.value)
+            except (ValueError, TypeError):
+                matrix = None
+            if isinstance(matrix, dict):
+                row = matrix.get("guest")
+                row = row if isinstance(row, list) else []
+                for item in _GUEST_MENU_ADDITIONS:
+                    if item not in row:
+                        row.append(item)
+                matrix["guest"] = row
+                setting.value = json.dumps(matrix)
+        db.add(AppSetting(key=_GUEST_MENU_ADDED_KEY, value="1"))
+        db.commit()
+
+
 def _seed_defaults() -> None:
     with SessionLocal() as db:
         for key, value in DEFAULT_APP_SETTINGS.items():
@@ -312,6 +345,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _backfill_public_ids()
     _seed_defaults()
     _backfill_role_menus()
+    _backfill_guest_menu_additions()
     _warn_if_default_admin_password()
     yield
 

@@ -29,12 +29,12 @@ _ADMIN = {"sub": "tester@local", "role": "admin", "guest": False}
 
 @pytest.fixture()
 def client():
-    from app.core.security import require_admin, require_admin_not_guest, require_user_not_guest
+    from app.core.security import require_admin, require_admin_not_guest, require_user
     from app.main import app
 
     app.dependency_overrides[require_admin] = lambda: _ADMIN
     app.dependency_overrides[require_admin_not_guest] = lambda: _ADMIN
-    app.dependency_overrides[require_user_not_guest] = lambda: _ADMIN
+    app.dependency_overrides[require_user] = lambda: _ADMIN
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

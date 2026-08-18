@@ -257,10 +257,10 @@ def test_run_query_driver_error_is_cleaned(monkeypatch):
 
 @pytest.fixture()
 def client(monkeypatch):
-    from app.core.security import require_user_not_guest
+    from app.core.security import require_user
     from app.main import app
 
-    app.dependency_overrides[require_user_not_guest] = lambda: {"sub": "tester@local", "role": "admin", "guest": False}
+    app.dependency_overrides[require_user] = lambda: {"sub": "tester@local", "role": "admin", "guest": False}
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

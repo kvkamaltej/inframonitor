@@ -40,7 +40,7 @@ DEFAULT_ROLE_MENUS: dict[str, list[str]] = {
     "developer": ["dashboard", "servers", "databases", "kubernetes", "profile"],
     "support": ["dashboard", "servers", "databases", "profile"],
     # guest is login-less and local-only: no database console (require_user_not_guest blocks it).
-    "guest": ["dashboard", "servers", "shell", "appearance"],
+    "guest": ["dashboard", "servers", "databases", "kubernetes", "shell", "appearance", "appdatabase"],
 }
 
 # Last-resort row for a role that is somehow neither in the matrix nor in the defaults:

@@ -12,7 +12,7 @@ import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT, resolveInitialTheme, themeMeta
 // sidebar's previous hardcoded behaviour: admins see everything, a desktop guest gets the shell
 // and appearance but no account pages, and developer/support get the read-only pages.
 function fallbackMenus(role?: string, guest?: boolean): string[] {
-  if (guest) return ["dashboard", "servers", "shell", "appearance"];
+  if (guest) return ["dashboard", "servers", "databases", "kubernetes", "shell", "appearance", "appdatabase"];
   if (role === "admin") return ["dashboard", "servers", "shell", "kubernetes", "users", "policies", "administration", "access", "appdatabase", "appearance", "profile"];
   return ["dashboard", "servers", "profile"];
 }

@@ -706,20 +706,20 @@ def _app_db_target_url(payload: AppDbConnectionRequest) -> str:
 
 
 @router.get("/settings/database", response_model=AppDbConfigRead)
-def get_app_database(_: dict = Depends(require_admin_not_guest)) -> AppDbConfigRead:
+def get_app_database(_: dict = Depends(require_admin)) -> AppDbConfigRead:
     cfg = db_backend.current_config()
     return AppDbConfigRead(backend=cfg["backend"], url_masked=cfg["url_masked"], is_override=cfg["is_override"])
 
 
 @router.post("/settings/database/test", response_model=AppDbTestResult)
-def test_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_admin_not_guest)) -> AppDbTestResult:
+def test_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_admin)) -> AppDbTestResult:
     target_url = _app_db_target_url(payload)
     ok, message = db_backend.test_url(target_url)
     return AppDbTestResult(ok=ok, message=message)
 
 
 @router.post("/settings/database/migrate", response_model=AppDbMigrateResult)
-def migrate_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_admin_not_guest)) -> AppDbMigrateResult:
+def migrate_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_admin)) -> AppDbMigrateResult:
     target_url = _app_db_target_url(payload)
     # Guard: writing the override needs a SQLite base configuration to anchor the file. Fail here
     # with a clear message rather than after a full (wasted) copy that could not be persisted.
@@ -737,7 +737,7 @@ def migrate_app_database(payload: AppDbConnectionRequest, _: dict = Depends(requ
 
 
 @router.post("/settings/database/use", response_model=AppDbMigrateResult)
-def use_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_admin_not_guest)) -> AppDbMigrateResult:
+def use_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_admin)) -> AppDbMigrateResult:
     # Point at an EXISTING database without copying anything -- for a target that already holds
     # Infra Monitor's data (a prior migration, or a shared/pre-provisioned DB). Startup will
     # create_all/seed against it, so an empty target is initialised and a populated one is kept.
@@ -754,7 +754,7 @@ def use_app_database(payload: AppDbConnectionRequest, _: dict = Depends(require_
 
 
 @router.post("/settings/database/reset", response_model=AppDbMigrateResult)
-def reset_app_database(_: dict = Depends(require_admin_not_guest)) -> AppDbMigrateResult:
+def reset_app_database(_: dict = Depends(require_admin)) -> AppDbMigrateResult:
     removed = db_backend.clear_override()
     message = (
         "Reverted to the built-in SQLite database. Restart the app to apply."
@@ -2318,7 +2318,7 @@ def _db_engine_or_400(engine: str) -> str:
 
 
 @router.post("/db/test-connection", response_model=DbConnectionResult)
-def db_test_connection(payload: DbConnectionRequest, _: dict = Depends(require_user_not_guest)) -> DbConnectionResult:
+def db_test_connection(payload: DbConnectionRequest, _: dict = Depends(require_user)) -> DbConnectionResult:
     engine = _db_engine_or_400(payload.engine)
     port = payload.port or DEFAULT_PORTS.get(engine, 0)
     try:
@@ -2331,7 +2331,7 @@ def db_test_connection(payload: DbConnectionRequest, _: dict = Depends(require_u
 
 
 @router.post("/db/query", response_model=DbQueryResult)
-def db_query(payload: DbQueryRequest, _: dict = Depends(require_user_not_guest)) -> DbQueryResult:
+def db_query(payload: DbQueryRequest, _: dict = Depends(require_user)) -> DbQueryResult:
     engine = _db_engine_or_400(payload.engine)
     port = payload.port or DEFAULT_PORTS.get(engine, 0)
     row_cap = min(db_console.parse_limit(payload.sql) or _DB_DEFAULT_ROW_LIMIT, _DB_MAX_ROW_LIMIT)
@@ -2387,7 +2387,7 @@ def _db_connection_read(db: Session, conn: DbConnection) -> DbConnectionRead:
 
 
 @router.get("/db/connections", response_model=list[DbConnectionRead])
-def list_db_connections(_: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbConnectionRead]:
+def list_db_connections(_: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbConnectionRead]:
     conns = db.scalars(select(DbConnection).order_by(func.lower(DbConnection.name))).all()
     return [_db_connection_read(db, conn) for conn in conns]
 
@@ -2403,7 +2403,7 @@ def _validate_db_connection_target(engine: str, host: str, database: str) -> Non
 
 
 @router.post("/db/connections", response_model=DbConnectionRead, status_code=status.HTTP_201_CREATED)
-def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbConnectionRead:
+def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbConnectionRead:
     engine = _db_engine_or_400(payload.engine)
     _validate_db_connection_target(engine, payload.host, payload.database)
     conn = DbConnection(
@@ -2426,7 +2426,7 @@ def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_
 
 
 @router.post("/db/connections/test", response_model=DbConnectionResult)
-def test_unsaved_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user_not_guest)) -> DbConnectionResult:
+def test_unsaved_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user)) -> DbConnectionResult:
     # Test the parameters as typed, without persisting anything. A bad host/credentials is an
     # expected outcome, reported as ok=false with HTTP 200 (like the ad-hoc db_test_connection).
     engine = _db_engine_or_400(payload.engine)
@@ -2439,12 +2439,12 @@ def test_unsaved_db_connection(payload: DbConnectionCreate, _: dict = Depends(re
 
 
 @router.get("/db/connections/{connection_id}", response_model=DbConnectionRead)
-def get_db_connection(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbConnectionRead:
+def get_db_connection(connection_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbConnectionRead:
     return _db_connection_read(db, _db_connection_or_404(db, connection_id))
 
 
 @router.patch("/db/connections/{connection_id}", response_model=DbConnectionRead)
-def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbConnectionRead:
+def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbConnectionRead:
     conn = _db_connection_or_404(db, connection_id)
     data = payload.model_dump(exclude_unset=True)
 
@@ -2485,14 +2485,14 @@ def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dic
 
 
 @router.delete("/db/connections/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_db_connection(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> None:
+def delete_db_connection(connection_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> None:
     conn = _db_connection_or_404(db, connection_id)
     db.delete(conn)
     db.commit()
 
 
 @router.post("/db/connections/{connection_id}/test", response_model=DbConnectionResult)
-def test_saved_db_connection(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbConnectionResult:
+def test_saved_db_connection(connection_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbConnectionResult:
     conn = _db_connection_or_404(db, connection_id)
     try:
         message = db_console.test_connection(
@@ -2504,7 +2504,7 @@ def test_saved_db_connection(connection_id: str, _: dict = Depends(require_user_
 
 
 @router.get("/db/connections/{connection_id}/tables", response_model=list[DbTable])
-def list_db_connection_tables(connection_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbTable]:
+def list_db_connection_tables(connection_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbTable]:
     conn = _db_connection_or_404(db, connection_id)
     try:
         tables = db_console.list_tables(
@@ -2543,7 +2543,7 @@ def _record_db_query_history(db: Session, conn: DbConnection, user_email: str, s
 
 
 @router.post("/db/connections/{connection_id}/query", response_model=DbQueryResult)
-def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, database: str | None = None, claims: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbQueryResult:
+def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, database: str | None = None, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbQueryResult:
     conn = _db_connection_or_404(db, connection_id)
     user_email = claims.get("sub", "")
     # Optional ?database= override lets the caller run the query against a different database on the
@@ -2589,7 +2589,7 @@ def _db_meta_args(conn: DbConnection, database: str | None = None) -> tuple:
 
 
 @router.get("/db/connections/{connection_id}/databases", response_model=list[DbDatabase])
-def list_db_connection_databases(connection_id: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbDatabase]:
+def list_db_connection_databases(connection_id: str, database: str | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbDatabase]:
     conn = _db_connection_or_404(db, connection_id)
     try:
         rows = db_metadata.list_databases(*_db_meta_args(conn, database))
@@ -2599,7 +2599,7 @@ def list_db_connection_databases(connection_id: str, database: str | None = None
 
 
 @router.get("/db/connections/{connection_id}/schemas", response_model=list[DbSchema])
-def list_db_connection_schemas(connection_id: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbSchema]:
+def list_db_connection_schemas(connection_id: str, database: str | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbSchema]:
     conn = _db_connection_or_404(db, connection_id)
     try:
         rows = db_metadata.list_schemas(*_db_meta_args(conn, database))
@@ -2609,7 +2609,7 @@ def list_db_connection_schemas(connection_id: str, database: str | None = None, 
 
 
 @router.get("/db/connections/{connection_id}/schemas/{schema}/tables", response_model=list[DbTable])
-def list_db_connection_schema_tables(connection_id: str, schema: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbTable]:
+def list_db_connection_schema_tables(connection_id: str, schema: str, database: str | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbTable]:
     conn = _db_connection_or_404(db, connection_id)
     try:
         rows = db_metadata.list_tables_in_schema(*_db_meta_args(conn, database), schema)
@@ -2619,7 +2619,7 @@ def list_db_connection_schema_tables(connection_id: str, schema: str, database: 
 
 
 @router.get("/db/connections/{connection_id}/schemas/{schema}/routines", response_model=list[DbRoutine])
-def list_db_connection_schema_routines(connection_id: str, schema: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbRoutine]:
+def list_db_connection_schema_routines(connection_id: str, schema: str, database: str | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbRoutine]:
     conn = _db_connection_or_404(db, connection_id)
     try:
         rows = db_metadata.list_routines(*_db_meta_args(conn, database), schema)
@@ -2629,7 +2629,7 @@ def list_db_connection_schema_routines(connection_id: str, schema: str, database
 
 
 @router.get("/db/connections/{connection_id}/tables/{schema}/{table}/columns", response_model=list[DbColumn])
-def list_db_connection_table_columns(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbColumn]:
+def list_db_connection_table_columns(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbColumn]:
     conn = _db_connection_or_404(db, connection_id)
     try:
         rows = db_metadata.list_columns(*_db_meta_args(conn, database), schema, table)
@@ -2639,7 +2639,7 @@ def list_db_connection_table_columns(connection_id: str, schema: str, table: str
 
 
 @router.get("/db/connections/{connection_id}/tables/{schema}/{table}/indexes", response_model=list[DbIndex])
-def list_db_connection_table_indexes(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbIndex]:
+def list_db_connection_table_indexes(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbIndex]:
     conn = _db_connection_or_404(db, connection_id)
     try:
         rows = db_metadata.list_indexes(*_db_meta_args(conn, database), schema, table)
@@ -2649,7 +2649,7 @@ def list_db_connection_table_indexes(connection_id: str, schema: str, table: str
 
 
 @router.get("/db/connections/{connection_id}/tables/{schema}/{table}/constraints", response_model=list[DbConstraint])
-def list_db_connection_table_constraints(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbConstraint]:
+def list_db_connection_table_constraints(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbConstraint]:
     conn = _db_connection_or_404(db, connection_id)
     try:
         rows = db_metadata.list_constraints(*_db_meta_args(conn, database), schema, table)
@@ -2659,7 +2659,7 @@ def list_db_connection_table_constraints(connection_id: str, schema: str, table:
 
 
 @router.get("/db/connections/{connection_id}/tables/{schema}/{table}/foreign-keys", response_model=list[DbForeignKey])
-def list_db_connection_table_foreign_keys(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[DbForeignKey]:
+def list_db_connection_table_foreign_keys(connection_id: str, schema: str, table: str, database: str | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[DbForeignKey]:
     conn = _db_connection_or_404(db, connection_id)
     try:
         rows = db_metadata.list_foreign_keys(*_db_meta_args(conn, database), schema, table)
@@ -2669,7 +2669,7 @@ def list_db_connection_table_foreign_keys(connection_id: str, schema: str, table
 
 
 @router.post("/db/connections/{connection_id}/generate-sql", response_model=DbGenerateSqlResult)
-def generate_db_connection_sql(connection_id: str, payload: DbGenerateSqlRequest, database: str | None = None, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> DbGenerateSqlResult:
+def generate_db_connection_sql(connection_id: str, payload: DbGenerateSqlRequest, database: str | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbGenerateSqlResult:
     conn = _db_connection_or_404(db, connection_id)
     try:
         sql = db_metadata.generate_sql(*_db_meta_args(conn, database), payload.schema, payload.table, payload.kind)
@@ -2851,7 +2851,7 @@ def list_db_query_history(
     status: str | None = None,
     search: str | None = None,
     limit: int = _DB_HISTORY_DEFAULT_LIMIT,
-    claims: dict = Depends(require_user_not_guest),
+    claims: dict = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[DbQueryHistoryRead]:
     # scoped to the caller: history is a personal record, not a shared audit log
@@ -2868,7 +2868,7 @@ def list_db_query_history(
 
 
 @router.delete("/db/query-history", status_code=status.HTTP_204_NO_CONTENT)
-def clear_db_query_history(claims: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> None:
+def clear_db_query_history(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> None:
     # clear only the caller's own history
     db.execute(delete(DbQueryHistory).where(DbQueryHistory.user_email == claims.get("sub", "")))
     db.commit()
@@ -2961,7 +2961,7 @@ def _conn_from_create(payload: KubeClusterCreate) -> dict:
 
 
 @router.get("/kube/clusters", response_model=list[KubeClusterRead])
-def list_kube_clusters(_: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubeClusterRead]:
+def list_kube_clusters(_: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubeClusterRead]:
     # Cheap: reads rows only, never probes a cluster.
     clusters = db.scalars(select(KubeCluster).order_by(func.lower(KubeCluster.name))).all()
     return [_cluster_read(db, cluster) for cluster in clusters]
@@ -3005,7 +3005,7 @@ def test_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_admi
 
 
 @router.get("/kube/clusters/{cluster_id}", response_model=KubeClusterRead)
-def get_kube_cluster(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> KubeClusterRead:
+def get_kube_cluster(cluster_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> KubeClusterRead:
     return _cluster_read(db, _cluster_or_404(db, cluster_id))
 
 
@@ -3060,13 +3060,13 @@ def _kube_call(func, *args):
 
 
 @router.get("/kube/clusters/{cluster_id}/overview", response_model=KubeOverview)
-def kube_overview(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> KubeOverview:
+def kube_overview(cluster_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> KubeOverview:
     cluster = _cluster_or_404(db, cluster_id)
     return KubeOverview(**_kube_call(kube.overview, _cluster_conn(cluster)))
 
 
 @router.get("/kube/clusters/{cluster_id}/nodes", response_model=list[KubeNode])
-def kube_nodes(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubeNode]:
+def kube_nodes(cluster_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubeNode]:
     cluster = _cluster_or_404(db, cluster_id)
     nodes = _kube_call(kube.list_nodes, _cluster_conn(cluster))
     # Link each node to a managed Server: primary match on internal IP, fallback on name==hostname
@@ -3093,40 +3093,40 @@ def kube_nodes(cluster_id: str, _: dict = Depends(require_user_not_guest), db: S
 
 
 @router.get("/kube/clusters/{cluster_id}/namespaces", response_model=list[str])
-def kube_namespaces(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[str]:
+def kube_namespaces(cluster_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[str]:
     cluster = _cluster_or_404(db, cluster_id)
     return _kube_call(kube.list_namespaces, _cluster_conn(cluster))
 
 
 @router.get("/kube/clusters/{cluster_id}/pods", response_model=list[KubePod])
-def kube_pods(cluster_id: str, namespace: str = "", _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubePod]:
+def kube_pods(cluster_id: str, namespace: str = "", _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubePod]:
     cluster = _cluster_or_404(db, cluster_id)
     pods = _kube_call(kube.list_pods, _cluster_conn(cluster), namespace)
     return [KubePod(**pod) for pod in pods]
 
 
 @router.get("/kube/clusters/{cluster_id}/pods/{namespace}/{pod}/logs", response_model=KubePodLogs)
-def kube_pod_logs(cluster_id: str, namespace: str, pod: str, container: str = "", tail: int = 200, previous: bool = False, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> KubePodLogs:
+def kube_pod_logs(cluster_id: str, namespace: str, pod: str, container: str = "", tail: int = 200, previous: bool = False, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> KubePodLogs:
     cluster = _cluster_or_404(db, cluster_id)
     result = _kube_call(kube.pod_logs, _cluster_conn(cluster), namespace, pod, container, tail, previous)
     return KubePodLogs(**result)
 
 
 @router.get("/kube/clusters/{cluster_id}/deployments", response_model=list[KubeDeployment])
-def kube_deployments(cluster_id: str, namespace: str = "", _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubeDeployment]:
+def kube_deployments(cluster_id: str, namespace: str = "", _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubeDeployment]:
     cluster = _cluster_or_404(db, cluster_id)
     deployments = _kube_call(kube.list_deployments, _cluster_conn(cluster), namespace)
     return [KubeDeployment(**dep) for dep in deployments]
 
 
 @router.get("/kube/clusters/{cluster_id}/health", response_model=KubeHealth)
-def kube_health(cluster_id: str, _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> KubeHealth:
+def kube_health(cluster_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> KubeHealth:
     cluster = _cluster_or_404(db, cluster_id)
     return KubeHealth(**_kube_call(kube.health, _cluster_conn(cluster)))
 
 
 @router.get("/kube/clusters/{cluster_id}/events", response_model=list[KubeEvent])
-def kube_events(cluster_id: str, namespace: str = "", _: dict = Depends(require_user_not_guest), db: Session = Depends(get_db)) -> list[KubeEvent]:
+def kube_events(cluster_id: str, namespace: str = "", _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubeEvent]:
     cluster = _cluster_or_404(db, cluster_id)
     events = _kube_call(kube.list_events, _cluster_conn(cluster), namespace)
     return [KubeEvent(**ev) for ev in events]
