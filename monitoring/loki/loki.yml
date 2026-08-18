@@ -82,8 +82,16 @@ ruler:
     local:
       directory: /loki/rules
   rule_path: /loki/rules-tmp
-  # No alertmanager_url and no rules: alerting lives in Prometheus for this
-  # stack. Loki is queried from Grafana, not alerted on.
+  # Log-based alerting: some conditions are only visible in the log text, not in any metric.
+  # The nginx request-timeout rule (rules/fake/nginx.yml) is the case in point -- the stock nginx
+  # metrics exporter exposes connection counts, never per-request duration, so ">30s" can only be
+  # read off the access log. Loki evaluates these LogQL rules and sends firings to the SAME
+  # Alertmanager Prometheus uses, so they land in the app's Alerts view alongside metric alerts.
+  # "fake" is the tenant id Loki uses when auth_enabled is false; rules live under rules/<tenant>/.
+  alertmanager_url: http://alertmanager:9093
+  enable_alertmanager_v2: true
+  evaluation_interval: 30s
+  poll_interval: 1m
 
 # Off by default here. It phones home to Grafana Labs with usage statistics.
 analytics:

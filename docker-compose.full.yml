@@ -175,6 +175,9 @@ services:
     command: -config.file=/etc/loki/loki.yml
     volumes:
       - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+      # Log-based ruler rules (nginx timeout). Mounted UNDER the ruler's local storage dir
+      # (/loki/rules) at the "fake" tenant path; Loki's ruler loads rules/<tenant>/*.yml. Read-only.
+      - ./monitoring/loki/rules/fake:/loki/rules/fake:ro
       - loki_data:/loki
     ports:
       - "${MONITORING_BIND:-127.0.0.1}:${LOKI_PORT:-13100}:3100"

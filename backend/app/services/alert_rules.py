@@ -97,10 +97,13 @@ TEMPLATES: list[dict] = [
         "severity": "warning",
         "summary": "nginx upstream responses slower than 30s",
         "description": (
-            "p95 nginx request duration exceeded 30s. Requires an nginx metrics exporter "
-            "feeding nginx_http_request_duration_seconds_bucket."
+            "p95 nginx request duration exceeded 30s. This METRIC variant needs an exporter "
+            "emitting nginx_http_request_duration_seconds_bucket. If you don't run one, use the "
+            "log-based rule instead: Infra Monitor ships a Loki ruler alert (NginxUpstreamTimeout) "
+            "that reads request time straight off the shipped nginx access log -- just enable log "
+            "shipping for /var/log/nginx/access.log and make nginx log $request_time."
         ),
-        "requires": "nginx metrics exporter (nginx_http_request_duration_seconds_bucket)",
+        "requires": "nginx metrics exporter (nginx_http_request_duration_seconds_bucket) -- or use the log-based Loki rule",
     },
 ]
 

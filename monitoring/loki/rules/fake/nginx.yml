@@ -1,0 +1,42 @@
+# Loki ruler: log-based alert rules (tenant "fake", the id Loki uses with auth_enabled=false).
+#
+# NginxUpstreamTimeout -- fires when an nginx access log shows a request slower than 30s. This is a
+# LOG-based rule on purpose: the stock nginx metrics exporter (stub_status) exposes connection and
+# request COUNTS, never per-request DURATION, so a ">30s" condition cannot be expressed as a
+# Prometheus metric without a log-parsing exporter. Infra Monitor already ships nginx access logs to
+# Loki (Server detail -> Monitoring -> Log shipping picks up /var/log/nginx/access.log when nginx is
+# detected), so the timing is right there in the line -- if nginx is configured to log it.
+#
+# REQUIREMENT: nginx must record the request time in the access log. Add this to the log_format:
+#     log_format timed '$remote_addr - $remote_user [$time_local] "$request" '
+#                      '$status $body_bytes_sent "$http_referer" "$http_user_agent" '
+#                      'rt=$request_time urt=$upstream_response_time';
+#     access_log /var/log/nginx/access.log timed;
+# The regexp below pulls the number after `rt=` (or `request_time=`); tune it if your format differs.
+#
+# The rule counts, per server, access-log lines in the last 5m whose request time exceeds 30s and
+# fires if there is at least one. `server`/`server_id` come from the shipper's stream labels, so the
+# alert says which host. Firings go to Alertmanager and appear in the app's Alerts view.
+
+groups:
+  - name: nginx-log-alerts
+    rules:
+      - alert: NginxUpstreamTimeout
+        expr: |
+          sum by (server, server_id) (
+            count_over_time(
+              {job="server-logs", source=~".*nginx.*|.*access.*"}
+                | regexp `(?:rt=|request_time=)(?P<rt>[0-9]+\.[0-9]+)`
+                | rt > 30
+              [5m]
+            )
+          ) > 0
+        for: 2m
+        labels:
+          severity: warning
+          component: nginx
+        annotations:
+          summary: nginx on {{ $labels.server }} served a request slower than 30s
+          description: >-
+            At least one nginx request on {{ $labels.server }} took over 30 seconds in the last
+            5 minutes (read from the shipped access log). Check upstream health and timeouts.
