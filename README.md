@@ -389,6 +389,8 @@ CI matrix, and packaging details are in [desktop/README.md](desktop/README.md).
 | --- | --- |
 | [docs/Deployment.md](docs/Deployment.md) | **Both install profiles**, configuration, volumes, the scripts |
 | [desktop/README.md](desktop/README.md) | **Standalone desktop app**: build the `.exe`, signed installer, cross-platform, app icon |
+| [docs/Database.md](docs/Database.md) | **Database module**: DBeaver-style SQL browser, engines, backup/restore, permissions |
+| [docs/Kubernetes.md](docs/Kubernetes.md) | **Kubernetes module**: cluster connections, live nodes/pods/logs/health, actions |
 | [docs/Architecture.md](docs/Architecture.md) | Process topology per profile, data flows, RBAC |
 | [docs/Monitoring.md](docs/Monitoring.md) | Full mode only: Prometheus, Grafana, Loki, Alertmanager |
 | [docs/API.md](docs/API.md) | Complete endpoint reference |

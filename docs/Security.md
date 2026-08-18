@@ -310,6 +310,16 @@ again next time.
   Making the problem loud is not the same as fixing it — a default-password install is exposed until
   someone changes it.
 
+- **Desktop guest mode is loopback-only.** The standalone desktop app runs with `DESKTOP_MODE=1` and
+  auto-authenticates a **guest** — a no-login session — but *only* when the request has no token **and**
+  comes from `127.0.0.1`. The guest is treated as an admin-role local operator and can use most of the
+  app (Dashboard, Servers, Shell, Databases, Kubernetes, App Database) on the machine's own local data.
+  It **cannot** reach account/security surfaces (Users, Policies, Vault) or destructive database/cluster
+  operations (DB backup/restore/schema-rename, Kubernetes restart/scale/delete/cordon). The **server
+  deployment never sets `DESKTOP_MODE`**, so there is no guest there — every request needs a real login,
+  and a token-less call returns 401. Guest mode is a convenience for the desktop machine owner, not a way
+  to expose the shared server.
+
 ## What does not exist
 
 Do not assume any of the following. Each is a real gap, not an oversight in the documentation.
