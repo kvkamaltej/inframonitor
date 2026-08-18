@@ -2642,7 +2642,10 @@ def _short_ports(value: str) -> str:
 def container_logs(server: Server, credentials: CredentialPayload, runtime: str, container: str, tail: int = 200) -> list[str]:
     binary = "podman" if runtime == "podman" else "docker"
     safe_tail = max(10, min(tail, 1000))
-    output = run_command(server, credentials, f"{binary} logs --tail {safe_tail} {_q(container)}")
+    # 2>&1: `docker/podman logs` writes the container's stderr to *our* stderr, and most images
+    # (Prometheus, uvicorn, nginx, ...) log entirely to stderr. run_command returns stdout only,
+    # so without this redirect those containers come back empty -- both here and in the log shipper.
+    output = run_command(server, credentials, f"{binary} logs --tail {safe_tail} {_q(container)} 2>&1")
     return output.splitlines()
 
 
