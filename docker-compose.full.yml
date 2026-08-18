@@ -104,6 +104,10 @@ services:
       # that was never mounted, so the job had zero targets forever and looked
       # like working node-exporter monitoring. See monitoring/prometheus/targets/.
       - ./monitoring/prometheus/targets:/etc/prometheus/targets:ro
+      # Bearer token Prometheus sends to the app's http_sd endpoint; matches MONITORING_SD_TOKEN in
+      # the app env. Gitignored + created at deploy time (see .gitignore / scripts). Must exist as a
+      # FILE before `up`, or Docker creates a directory in its place.
+      - ./monitoring/prometheus/sd_token:/etc/prometheus/sd_token:ro
       - prometheus_data:/prometheus
     ports:
       # Prometheus has no authentication of any kind, so localhost by default.

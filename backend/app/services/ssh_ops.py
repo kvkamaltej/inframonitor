@@ -161,12 +161,14 @@ def _is_sudo_auth_failure(text: str) -> bool:
     return any(marker in lowered for marker in _SUDO_AUTH_MARKERS)
 
 
-def run_privileged(server: Server, credentials: CredentialPayload, command: str, sudo_password: str = "") -> str:
+def run_privileged(server: Server, credentials: CredentialPayload, command: str, sudo_password: str = "", timeout: int = 15) -> str:
+    # timeout defaults to the one-shot 15s that suits systemctl/restart callers; longer-running
+    # privileged work (node_exporter install downloads a release tarball) passes a larger value.
     mode = _privilege_mode(server, credentials)
     if mode == "root":
-        return run_command(server, credentials, command)
+        return run_command(server, credentials, command, timeout=timeout)
     if mode == "nopasswd":
-        return run_command(server, credentials, f"sudo -n sh -c {_q(command)}")
+        return run_command(server, credentials, f"sudo -n sh -c {_q(command)}", timeout=timeout)
     if not sudo_password:
         raise SudoPasswordRequired(f"Sudo password required for {server.username}@{server.ip_address}")
     code, output, error = _exec(
@@ -174,6 +176,7 @@ def run_privileged(server: Server, credentials: CredentialPayload, command: str,
         credentials,
         f"sudo -S -p '' sh -c {_q(command)}",
         stdin_data=sudo_password if sudo_password.endswith("\n") else sudo_password + "\n",
+        timeout=timeout,
     )
     if code != 0:
         if _is_sudo_auth_failure(error) or _is_sudo_auth_failure(output):

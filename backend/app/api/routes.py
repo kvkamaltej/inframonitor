@@ -17,7 +17,7 @@ import asyncio
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
@@ -83,7 +83,10 @@ from app.schemas.contracts import (
     KubeTestResult,
     LoginRequest,
     LogResponse,
+    LogShippingUpdate,
+    LogSourceEntry,
     MeResponse,
+    MonitoringInstallRequest,
     OperationRequest,
     OptionCreate,
     OptionList,
@@ -97,6 +100,7 @@ from app.schemas.contracts import (
     ServerFolderUpdate,
     ServerImportRequest,
     ServerImportResult,
+    ServerMonitoringState,
     ServerRead,
     ServerUpdate,
     ServerAccessUpdate,
@@ -131,6 +135,8 @@ from app.services.kube import KubeError
 from app.services.integrations import check_integrations
 from app.services import monitoring
 from app.services.monitoring import MonitoringError
+from app.services import node_exporter
+from app.services.node_exporter import NodeExporterError
 from app.services.inventory import InventoryService, to_read
 from app.services.validation import validate_host_address
 from app.services.ssh_ops import (
@@ -1793,6 +1799,151 @@ async def monitoring_alerts(_: dict = Depends(require_user)) -> list:
         return await monitoring.alertmanager_alerts()
     except MonitoringError as exc:
         raise _monitoring_502(exc) from exc
+
+
+# --- per-server monitoring ingestion --------------------------------------------------------
+#
+# Two capabilities, both opt-in per server and both mutated only through the endpoints here (never
+# PATCH /servers): (a) install node_exporter over SSH so Prometheus scrapes the host's metrics, and
+# (b) tail the server's logs into Loki. The install/uninstall run privileged commands on the real
+# host and reuse the shared sudo-aware PrivilegedOperationResult flow; the http_sd endpoint is what
+# Prometheus itself calls to discover which servers to scrape.
+
+
+def _require_sd_token(authorization: str | None) -> None:
+    """Gate the http_sd target list on settings.monitoring_sd_token.
+
+    When the token is unset the endpoint is left open, so a dev stack without a configured token
+    still works (documented on the setting). When set, Prometheus must present it as a bearer token
+    in the Authorization header; anything else is a 401.
+    """
+    expected = (get_settings().monitoring_sd_token or "").strip()
+    if not expected:
+        return
+    presented = (authorization or "").strip()
+    prefix = "Bearer "
+    token = presented[len(prefix):].strip() if presented.startswith(prefix) else ""
+    if token != expected:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+@router.get("/monitoring/prometheus/targets", response_model=None)
+def prometheus_targets(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> list[dict]:
+    """Prometheus http_sd target list: every metrics-enabled server as a scrape target.
+
+    Authenticated by the shared MONITORING_SD_TOKEN bearer token (see _require_sd_token), NOT the
+    normal user auth -- this is a machine endpoint Prometheus polls, not a UI route.
+    """
+    _require_sd_token(authorization)
+    servers = db.scalars(select(Server).where(Server.metrics_enabled.is_(True))).all()
+    targets: list[dict] = []
+    for server in servers:
+        targets.append(
+            {
+                "targets": [f"{server.ip_address}:{server.node_exporter_port}"],
+                "labels": {
+                    "server": server.hostname or server.ip_address,
+                    "server_id": server.public_id,
+                    "env": server.environment,
+                    "job": "node",
+                },
+            }
+        )
+    return targets
+
+
+@router.post("/servers/{server_id}/monitoring/install-metrics", response_model=PrivilegedOperationResult)
+def install_metrics(server_id: str, payload: MonitoringInstallRequest = Body(default=MonitoringInstallRequest()), _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> PrivilegedOperationResult:
+    server = _server_or_404(db, server_id)
+    try:
+        ok, message = node_exporter.install(server, _credentials_for(db, server, CredentialPayload()), payload.sudo_password)
+    except SudoPasswordRequired:
+        return _sudo_prompt(server)
+    except NodeExporterError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except SshOperationError as exc:
+        return _privileged_failure(server, exc, bool(payload.sudo_password))
+    server.metrics_enabled = True
+    db.commit()
+    return PrivilegedOperationResult(ok=ok, message=message)
+
+
+@router.post("/servers/{server_id}/monitoring/uninstall-metrics", response_model=PrivilegedOperationResult)
+def uninstall_metrics(server_id: str, payload: MonitoringInstallRequest = Body(default=MonitoringInstallRequest()), _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> PrivilegedOperationResult:
+    server = _server_or_404(db, server_id)
+    try:
+        ok, message = node_exporter.uninstall(server, _credentials_for(db, server, CredentialPayload()), payload.sudo_password)
+    except SudoPasswordRequired:
+        return _sudo_prompt(server)
+    except NodeExporterError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except SshOperationError as exc:
+        return _privileged_failure(server, exc, bool(payload.sudo_password))
+    server.metrics_enabled = False
+    db.commit()
+    return PrivilegedOperationResult(ok=ok, message=message)
+
+
+@router.put("/servers/{server_id}/monitoring/log-shipping", response_model=ServerMonitoringState)
+def update_log_shipping(server_id: str, payload: LogShippingUpdate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> ServerMonitoringState:
+    server = _server_or_404(db, server_id)
+    sources: list[dict] = []
+    for entry in payload.sources:
+        source = (entry.source or "journal").strip() or "journal"
+        name_or_path = (entry.name_or_path or "").strip()
+        if not name_or_path:
+            continue
+        sources.append({"source": source, "name_or_path": name_or_path})
+    server.log_shipping_enabled = bool(payload.enabled)
+    server.log_sources_json = json.dumps(sources)
+    db.commit()
+    db.refresh(server)
+    return ServerMonitoringState(
+        metrics_enabled=bool(server.metrics_enabled),
+        node_exporter_port=server.node_exporter_port,
+        scraped=False,
+        log_shipping_enabled=bool(server.log_shipping_enabled),
+        log_sources=[LogSourceEntry(**item) for item in sources],
+    )
+
+
+@router.get("/servers/{server_id}/monitoring", response_model=ServerMonitoringState)
+async def server_monitoring_state(server_id: str, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> ServerMonitoringState:
+    server = _server_or_404(db, server_id, claims)
+    scraped = False
+    if server.metrics_enabled:
+        try:
+            result = await monitoring.prometheus_query(f'up{{server_id="{server.public_id}"}}')
+            for series in (((result or {}).get("data") or {}).get("result") or []):
+                value = series.get("value") or []
+                if len(value) >= 2 and str(value[1]) == "1":
+                    scraped = True
+                    break
+        except MonitoringError:
+            # Prometheus not configured or unreachable -- report not-scraped rather than erroring
+            scraped = False
+    return ServerMonitoringState(
+        metrics_enabled=bool(server.metrics_enabled),
+        node_exporter_port=server.node_exporter_port,
+        scraped=scraped,
+        log_shipping_enabled=bool(server.log_shipping_enabled),
+        log_sources=_stored_log_sources(server),
+    )
+
+
+def _stored_log_sources(server: Server) -> list[LogSourceEntry]:
+    entries: list[LogSourceEntry] = []
+    for item in _json_list(server.log_sources_json):
+        name_or_path = str(item.get("name_or_path") or "").strip()
+        if not name_or_path:
+            continue
+        source = str(item.get("source") or "journal").strip() or "journal"
+        entries.append(LogSourceEntry(source=source, name_or_path=name_or_path))
+    return entries
 
 
 @router.post("/servers/{server_id}/vitals", response_model=ServerRead)

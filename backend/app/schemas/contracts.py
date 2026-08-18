@@ -100,6 +100,12 @@ class ServerRead(BaseModel):
     has_credentials: bool = False
     business_owner: str
     support_contact: str
+    # per-server monitoring ingestion state (read-only here; mutated through the dedicated
+    # /servers/{id}/monitoring/* endpoints, never PATCH /servers).
+    metrics_enabled: bool = False
+    node_exporter_port: int = 9100
+    log_shipping_enabled: bool = False
+    log_sources: list[dict] = Field(default_factory=list)
     status: str
     health_score: int
     # vitals: point-in-time, as of vitals_checked_at. cpu_percent is -1 when never sampled,
@@ -267,6 +273,34 @@ class PrivilegedOperationResult(BaseModel):
     message: str
     needs_sudo_password: bool = False
     output: str = ""
+
+
+class MonitoringInstallRequest(BaseModel):
+    # optional sudo password for the privileged install/uninstall, mirroring TomcatActionRequest;
+    # blank means "try root / passwordless sudo first, then prompt".
+    sudo_password: str = Field(default="", max_length=512)
+
+
+class LogSourceEntry(BaseModel):
+    # same shape the service-log endpoint accepts: source is "journal" (a unit name) or "file"
+    # (an absolute path), name_or_path is the unit or path to tail.
+    source: str = Field(default="journal", max_length=32)
+    name_or_path: str = Field(max_length=4096)
+
+
+class LogShippingUpdate(BaseModel):
+    enabled: bool = False
+    sources: list[LogSourceEntry] = Field(default_factory=list)
+
+
+class ServerMonitoringState(BaseModel):
+    metrics_enabled: bool = False
+    node_exporter_port: int = 9100
+    # best-effort: whether Prometheus currently reports this server's node_exporter as up. False
+    # when Prometheus is not configured or the query fails, so the UI never blocks on it.
+    scraped: bool = False
+    log_shipping_enabled: bool = False
+    log_sources: list[LogSourceEntry] = Field(default_factory=list)
 
 
 class WarDeployResult(BaseModel):

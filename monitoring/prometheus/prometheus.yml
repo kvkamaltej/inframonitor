@@ -83,7 +83,24 @@ scrape_configs:
   # node_exporters you run on the machines in your inventory can be scraped by
   # editing one JSON file.
   # ---------------------------------------------------------------------------
-  - job_name: node-exporters
+  # node_exporter targets, discovered from the app. When an operator enables metrics on a server
+  # (Server detail -> Monitoring -> Install metrics agent), the app installs node_exporter on that
+  # host and starts returning it from GET /api/monitoring/prometheus/targets. Prometheus polls that
+  # endpoint every 30s (http_sd), so a server appears/disappears here with no Prometheus restart and
+  # no file to edit. Each target carries labels server/server_id/env, which the per-server metrics
+  # drill-down queries on (up{server_id="..."}, node_* by server_id). `app:8000` is the in-network
+  # backend. The bearer token (credentials_file) matches MONITORING_SD_TOKEN in the app's env so the
+  # target list -- which contains inventory IPs -- is not served unauthenticated.
+  - job_name: node
+    http_sd_configs:
+      - url: http://app:8000/api/monitoring/prometheus/targets
+        refresh_interval: 30s
+        authorization:
+          type: Bearer
+          credentials_file: /etc/prometheus/sd_token
+
+  # Legacy file-based targets are still read if you drop a *.json here; harmless alongside http_sd.
+  - job_name: node-exporters-file
     file_sd_configs:
       - files:
           - /etc/prometheus/targets/*.json

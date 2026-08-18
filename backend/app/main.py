@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import time
@@ -54,6 +55,13 @@ EXPECTED_SERVER_COLUMNS: list[tuple[str, str]] = [
     # starts life "Unassigned". The DDL type is compiled from the ORM column by _column_ddl_type,
     # so this works unchanged on SQLite and PostgreSQL.
     ("folder_id", "NULL"),
+    # feature/per-server-monitoring: node_exporter install state + log-shipping config. The two
+    # BOOLEAN columns take DEFAULT false on PostgreSQL and DEFAULT 0 on SQLite/MySQL -- the literal
+    # is fixed up per dialect by _server_column_ddl below, exactly like _db_connection_ddl does.
+    ("metrics_enabled", "0"),
+    ("node_exporter_port", "9100"),
+    ("log_shipping_enabled", "0"),
+    ("log_sources_json", "'[]'"),
 ]
 
 DEFAULT_APP_SETTINGS: dict[str, list[str]] = {
@@ -74,6 +82,19 @@ def _column_ddl_type(name: str) -> str:
     return column.type.compile(dialect=engine.dialect)
 
 
+def _server_column_ddl(name: str, default: str) -> tuple[str, str]:
+    # Render the DDL type from the ORM column and fix up the default literal for the dialect: a
+    # BOOLEAN column takes DEFAULT false on PostgreSQL and DEFAULT 0 on SQLite/MySQL, so a bare "0"
+    # would be rejected by PostgreSQL. Everything else (text/varchar/int/timestamp) is spelled the
+    # same on both backends, so its literal passes straight through. Mirrors _db_connection_ddl.
+    column = Server.__table__.columns.get(name)
+    ddl_type = _column_ddl_type(name)
+    literal = default
+    if column is not None and column.type.python_type is bool and default in ("0", "false", "False"):
+        literal = "false" if engine.dialect.name == "postgresql" else "0"
+    return ddl_type, literal
+
+
 def _migrate_server_columns() -> None:
     existing = {column["name"] for column in inspect(engine).get_columns("servers")}
     missing = [entry for entry in EXPECTED_SERVER_COLUMNS if entry[0] not in existing]
@@ -81,8 +102,9 @@ def _migrate_server_columns() -> None:
         return
     with engine.begin() as conn:
         for name, default in missing:
+            ddl_type, literal = _server_column_ddl(name, default)
             conn.execute(
-                text(f"ALTER TABLE servers ADD COLUMN {name} {_column_ddl_type(name)} DEFAULT {default}")
+                text(f"ALTER TABLE servers ADD COLUMN {name} {ddl_type} DEFAULT {literal}")
             )
 
 
@@ -336,6 +358,29 @@ def _warn_if_default_admin_password() -> None:
     print("\n".join(lines), flush=True)
 
 
+async def _log_shipping_loop(interval: int) -> None:
+    """Periodically tail managed-server logs into Loki.
+
+    Runs ship_once every `interval` seconds in a worker thread (the shipper is blocking SSH + a
+    sync HTTP push), each run with its own DB session. Every failure is swallowed so a bad host or
+    a Loki hiccup can never crash the app; cancellation on shutdown breaks the loop cleanly.
+    """
+    from app.services.log_shipper import ship_once
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            def _run() -> None:
+                with SessionLocal() as db:
+                    ship_once(db)
+            await asyncio.to_thread(_run)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            # never let a shipping failure take down the periodic driver
+            continue
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
@@ -347,7 +392,21 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _backfill_role_menus()
     _backfill_guest_menu_additions()
     _warn_if_default_admin_password()
-    yield
+    # Background log-shipping driver: only when Loki is configured (full profile) and the interval
+    # is positive. Cancelled and awaited on shutdown so the task never outlives the app.
+    ship_task: asyncio.Task | None = None
+    interval = settings.log_ship_interval_seconds
+    if (settings.loki_url or "").strip() and interval > 0:
+        ship_task = asyncio.create_task(_log_shipping_loop(interval))
+    try:
+        yield
+    finally:
+        if ship_task is not None:
+            ship_task.cancel()
+            try:
+                await ship_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

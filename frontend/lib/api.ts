@@ -1653,3 +1653,64 @@ export async function lokiLabels(token: string): Promise<{ data: string[] }> {
 export async function lokiLabelValues(token: string, name: string): Promise<{ data: string[] }> {
   return request<{ data: string[] }>(`/monitoring/loki/label/${encodeURIComponent(name)}/values`, token);
 }
+
+// --- per-server monitoring (feature/server-monitoring) -------------------------------------
+// Enable/disable a node_exporter metrics agent and log shipping for a single managed host, and
+// read back its current state. Installing the agent runs commands on the real host over SSH, so
+// it may come back needing a sudo password (mirrors the PrivilegedResult flow used for tomcat /
+// service restarts); the caller retries with `sudoPassword` set. log_sources is the list of
+// discovered log sources currently shipped to Loki; setServerLogShipping replaces the whole set.
+
+export type ServerLogSource = { source: string; name_or_path: string };
+
+export type ServerMonitoring = {
+  metrics_enabled: boolean;
+  node_exporter_port: number;
+  // whether Prometheus is actually scraping this host's exporter yet (vs. merely installed)
+  scraped: boolean;
+  log_shipping_enabled: boolean;
+  log_sources: ServerLogSource[];
+};
+
+// Result of install-metrics: same shape as PrivilegedResult minus `output` — carries
+// needs_sudo_password so the caller can prompt and retry, exactly like tomcatAction.
+export type ServerMonitoringActionResult = {
+  ok: boolean;
+  message: string;
+  needs_sudo_password: boolean;
+};
+
+export async function getServerMonitoring(token: string, serverId: string): Promise<ServerMonitoring> {
+  return request<ServerMonitoring>(`/servers/${encodeURIComponent(serverId)}/monitoring`, token);
+}
+
+// Installs node_exporter on the host over SSH. Omit sudoPassword on the first attempt; if the
+// result carries needs_sudo_password, prompt for it and call again with the value.
+export async function installServerMetrics(
+  token: string,
+  serverId: string,
+  sudoPassword?: string
+): Promise<ServerMonitoringActionResult> {
+  return request<ServerMonitoringActionResult>(`/servers/${encodeURIComponent(serverId)}/monitoring/install-metrics`, token, {
+    method: "POST",
+    body: JSON.stringify(sudoPassword ? { sudo_password: sudoPassword } : {})
+  });
+}
+
+export async function uninstallServerMetrics(token: string, serverId: string): Promise<ServerMonitoringActionResult> {
+  return request<ServerMonitoringActionResult>(`/servers/${encodeURIComponent(serverId)}/monitoring/uninstall-metrics`, token, {
+    method: "POST"
+  });
+}
+
+export async function setServerLogShipping(
+  token: string,
+  serverId: string,
+  enabled: boolean,
+  sources: ServerLogSource[]
+): Promise<ServerMonitoringActionResult> {
+  return request<ServerMonitoringActionResult>(`/servers/${encodeURIComponent(serverId)}/monitoring/log-shipping`, token, {
+    method: "PUT",
+    body: JSON.stringify({ enabled, sources })
+  });
+}

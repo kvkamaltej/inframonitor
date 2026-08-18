@@ -100,6 +100,16 @@ class Server(Base):
     tomcat_json: Mapped[str] = mapped_column(Text, default="[]")
     business_owner: Mapped[str] = mapped_column(String(255), default="")
     support_contact: Mapped[str] = mapped_column(String(255), default="")
+    # Per-server monitoring ingestion (feature/per-server-monitoring). metrics_enabled means
+    # node_exporter is installed and this host should appear in the Prometheus http_sd target
+    # list; node_exporter_port is where that exporter listens. log_shipping_enabled turns on the
+    # background SSH log tail into Loki, and log_sources_json is a JSON list of {source,
+    # name_or_path} entries (the same shape the service-log endpoint accepts) to tail. All four
+    # are added after first release -> see the startup migration in app/main.py.
+    metrics_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    node_exporter_port: Mapped[int] = mapped_column(Integer, default=9100)
+    log_shipping_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    log_sources_json: Mapped[str] = mapped_column(Text, default="[]")
     # point-in-time vitals from the last probe. ram_mb above is total installed RAM from
     # discovery; ram_used_mb is what was in use when vitals were last sampled.
     uptime_seconds: Mapped[int] = mapped_column(Integer, default=0)

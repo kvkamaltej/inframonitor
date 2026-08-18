@@ -23,6 +23,17 @@ class Settings(BaseSettings):
     loki_url: str = ""
     alertmanager_url: str = ""
 
+    # Bearer token Prometheus presents when scraping GET /api/monitoring/prometheus/targets
+    # (the http_sd endpoint). When empty the endpoint is left unauthenticated so a dev stack
+    # works out of the box; set MONITORING_SD_TOKEN in any real deployment and configure the
+    # same value as Prometheus's http_sd_configs[].authorization.credentials.
+    monitoring_sd_token: str = ""
+
+    # How often the background log-shipping driver tails managed servers into Loki, in seconds.
+    # The driver is skipped entirely when loki_url is empty (lite profile). 0 or a negative value
+    # disables the periodic driver even when Loki is configured.
+    log_ship_interval_seconds: int = 30
+
     # /metrics is off in lite mode and the route is not registered at all; full mode
     # sets METRICS_ENABLED=true so Prometheus has something to scrape
     metrics_enabled: bool = False

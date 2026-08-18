@@ -52,3 +52,6 @@ Thumbs.db
 
 # TypeScript incremental build cache
 *.tsbuildinfo
+
+# Monitoring http_sd bearer token (created per-deploy, matches MONITORING_SD_TOKEN)
+monitoring/prometheus/sd_token
