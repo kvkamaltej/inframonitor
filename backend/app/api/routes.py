@@ -129,6 +129,8 @@ from app.services import db_metadata
 from app.services import kube
 from app.services.kube import KubeError
 from app.services.integrations import check_integrations
+from app.services import monitoring
+from app.services.monitoring import MonitoringError
 from app.services.inventory import InventoryService, to_read
 from app.services.validation import validate_host_address
 from app.services.ssh_ops import (
@@ -1704,6 +1706,93 @@ def recent_alerts(_: dict = Depends(require_user)) -> AlertBufferResponse:
         persistent=False,
         note=_ALERT_BUFFER_NOTE,
     )
+
+
+# --- monitoring proxies (full profile only) -------------------------------------------------
+#
+# Server-side proxies to the compose-network Prometheus / Loki / Alertmanager so the app's own UI
+# can render metrics, logs and alerts. require_user (a signed-in user OR the desktop guest) may
+# read them. The upstream base URL is fixed from settings -- only query params/label names vary --
+# so a caller can never point these at an arbitrary host. A MonitoringError (missing URL or an
+# upstream/transport failure) maps to HTTP 502 with its clean message; the frontend calls
+# /monitoring/enabled first and only shows the section when the relevant upstream is configured.
+
+
+def _monitoring_502(exc: MonitoringError) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+
+def _monitoring_int(value: str, field: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"'{field}' must be an integer"
+        ) from exc
+
+
+@router.get("/monitoring/enabled", response_model=None)
+def monitoring_enabled(_: dict = Depends(require_user)) -> dict:
+    return monitoring.configured()
+
+
+@router.get("/monitoring/prometheus/query", response_model=None)
+async def monitoring_prometheus_query(query: str, _: dict = Depends(require_user)) -> dict:
+    try:
+        return await monitoring.prometheus_query(query)
+    except MonitoringError as exc:
+        raise _monitoring_502(exc) from exc
+
+
+@router.get("/monitoring/prometheus/query_range", response_model=None)
+async def monitoring_prometheus_query_range(
+    query: str, start: str, end: str, step: str, _: dict = Depends(require_user)
+) -> dict:
+    try:
+        return await monitoring.prometheus_query_range(query, start, end, step)
+    except MonitoringError as exc:
+        raise _monitoring_502(exc) from exc
+
+
+@router.get("/monitoring/loki/query_range", response_model=None)
+async def monitoring_loki_query_range(
+    query: str,
+    start: str,
+    end: str,
+    limit: str = "1000",
+    direction: str = "backward",
+    _: dict = Depends(require_user),
+) -> dict:
+    limit_n = _monitoring_int(limit, "limit")
+    direction = direction if direction in ("backward", "forward") else "backward"
+    try:
+        return await monitoring.loki_query_range(query, start, end, limit_n, direction)
+    except MonitoringError as exc:
+        raise _monitoring_502(exc) from exc
+
+
+@router.get("/monitoring/loki/labels", response_model=None)
+async def monitoring_loki_labels(_: dict = Depends(require_user)) -> dict:
+    try:
+        return await monitoring.loki_labels()
+    except MonitoringError as exc:
+        raise _monitoring_502(exc) from exc
+
+
+@router.get("/monitoring/loki/label/{name}/values", response_model=None)
+async def monitoring_loki_label_values(name: str, _: dict = Depends(require_user)) -> dict:
+    try:
+        return await monitoring.loki_label_values(name)
+    except MonitoringError as exc:
+        raise _monitoring_502(exc) from exc
+
+
+@router.get("/monitoring/alerts", response_model=None)
+async def monitoring_alerts(_: dict = Depends(require_user)) -> list:
+    try:
+        return await monitoring.alertmanager_alerts()
+    except MonitoringError as exc:
+        raise _monitoring_502(exc) from exc
 
 
 @router.post("/servers/{server_id}/vitals", response_model=ServerRead)

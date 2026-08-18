@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Boxes, ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Play, Server, Settings, Shield, SlidersHorizontal, Sun, Table2 as TableIcon, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
+import { Activity, Boxes, ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Play, Server, Settings, Shield, SlidersHorizontal, Sun, Table2 as TableIcon, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
 import { MouseEvent, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getDbConnections, getDbTables, getFolders, getServers, DbConnection, DbTable, Folder as FolderType, Server as ServerRow } from "@/lib/api";
@@ -12,8 +12,8 @@ import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT, resolveInitialTheme, themeMeta
 // sidebar's previous hardcoded behaviour: admins see everything, a desktop guest gets the shell
 // and appearance but no account pages, and developer/support get the read-only pages.
 function fallbackMenus(role?: string, guest?: boolean): string[] {
-  if (guest) return ["dashboard", "servers", "databases", "kubernetes", "shell", "appearance", "appdatabase"];
-  if (role === "admin") return ["dashboard", "servers", "shell", "kubernetes", "users", "policies", "administration", "access", "appdatabase", "appearance", "profile"];
+  if (guest) return ["dashboard", "servers", "databases", "kubernetes", "monitoring", "shell", "appearance", "appdatabase"];
+  if (role === "admin") return ["dashboard", "servers", "shell", "kubernetes", "monitoring", "users", "policies", "administration", "access", "appdatabase", "appearance", "profile"];
   return ["dashboard", "servers", "profile"];
 }
 
@@ -271,6 +271,9 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
           {/* Kubernetes clusters (feature/kube-clusters): gated through the role->menu matrix; the
               backend also blocks guests (require_user_not_guest -> 403). */}
           {allowed.has("kubernetes") && <NavItem href="/kubernetes" icon={Boxes} label="Kubernetes" />}
+          {/* Monitoring (feature/monitoring-page): metrics, alerts, and logs from the Prometheus/
+              Loki/Alertmanager stack, surfaced in-app. Gated through the role->menu matrix. */}
+          {allowed.has("monitoring") && <NavItem href="/monitoring" icon={Activity} label="Monitoring" />}
           {/* EXPERIMENTAL (feature/server-folders): the Shell launcher. It is a button, not a
               route — it opens a flyout of hosts grouped by folder. Collapsing the sidebar first
               would hide the flyout's anchor, so opening it also opens the rail. */}

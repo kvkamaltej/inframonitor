@@ -1541,3 +1541,115 @@ export async function cordonKubeNode(token: string, id: string, name: string, co
     { method: "POST", body: JSON.stringify({ cordon }) }
   );
 }
+
+// --- monitoring (feature/monitoring-page) --------------------------------------------------
+// Surfaces the Prometheus / Loki / Alertmanager stack INSIDE the app. Every call is a GET that
+// proxies through the app's own backend (never straight to Prometheus/Loki), so the same
+// signed-in-or-guest auth applies. Payloads are raw Prometheus/Loki JSON, kept loosely typed.
+
+export type MonitoringEnabled = {
+  prometheus: boolean;
+  loki: boolean;
+  alertmanager: boolean;
+  grafana_url: string;
+};
+
+// Prometheus instant/range query envelope. `result` is a matrix (query_range, `values`) or a
+// vector (query, `value`); both variants are accepted so one type covers both endpoints.
+export type PromResult = {
+  metric: Record<string, string>;
+  // instant query: a single [unixSeconds, "value"] pair
+  value?: [number, string];
+  // range query: many [unixSeconds, "value"] pairs
+  values?: Array<[number, string]>;
+};
+
+export type PromResponse = {
+  status: string;
+  data: {
+    resultType: string;
+    result: PromResult[];
+  };
+};
+
+// Loki query_range envelope. `values` are [nanoTimestampString, logLine] pairs, newest last as
+// returned; the UI reverses them for newest-first display.
+export type LokiStream = {
+  stream: Record<string, string>;
+  values: Array<[string, string]>;
+};
+
+export type LokiResponse = {
+  status: string;
+  data: {
+    resultType: string;
+    result: LokiStream[];
+  };
+};
+
+// Alertmanager v2 alert. Kept loose — only the fields the UI reads are named; the rest ride along.
+export type AlertmanagerAlert = {
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  status: { state: string; [key: string]: unknown };
+  startsAt: string;
+  endsAt?: string;
+  [key: string]: unknown;
+};
+
+export async function getMonitoringEnabled(token: string): Promise<MonitoringEnabled> {
+  return request<MonitoringEnabled>("/monitoring/enabled", token);
+}
+
+export async function promQuery(token: string, query: string): Promise<PromResponse> {
+  const params = new URLSearchParams({ query });
+  return request<PromResponse>(`/monitoring/prometheus/query?${params.toString()}`, token);
+}
+
+// start/end/step are UNIX seconds; Prometheus expects seconds, so no conversion here.
+export async function promQueryRange(
+  token: string,
+  query: string,
+  startSec: number,
+  endSec: number,
+  stepSec: number
+): Promise<PromResponse> {
+  const params = new URLSearchParams({
+    query,
+    start: String(Math.floor(startSec)),
+    end: String(Math.floor(endSec)),
+    step: String(Math.max(1, Math.floor(stepSec)))
+  });
+  return request<PromResponse>(`/monitoring/prometheus/query_range?${params.toString()}`, token);
+}
+
+// Callers pass seconds; Loki wants NANOSECONDS, so convert here (as integer strings, since a
+// nanosecond epoch overflows the precision a JS number keeps as a plain integer past ~ms).
+export async function lokiQueryRange(
+  token: string,
+  query: string,
+  startSec: number,
+  endSec: number,
+  opts?: { limit?: number; direction?: string }
+): Promise<LokiResponse> {
+  const params = new URLSearchParams({
+    query,
+    start: `${Math.floor(startSec)}000000000`,
+    end: `${Math.floor(endSec)}000000000`,
+    limit: String(opts?.limit ?? 200),
+    direction: opts?.direction ?? "backward"
+  });
+  return request<LokiResponse>(`/monitoring/loki/query_range?${params.toString()}`, token);
+}
+
+export async function getMonitoringAlerts(token: string): Promise<AlertmanagerAlert[]> {
+  return request<AlertmanagerAlert[]>("/monitoring/alerts", token);
+}
+
+export async function lokiLabels(token: string): Promise<{ data: string[] }> {
+  return request<{ data: string[] }>("/monitoring/loki/labels", token);
+}
+
+export async function lokiLabelValues(token: string, name: string): Promise<{ data: string[] }> {
+  return request<{ data: string[] }>(`/monitoring/loki/label/${encodeURIComponent(name)}/values`, token);
+}
