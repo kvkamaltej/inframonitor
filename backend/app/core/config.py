@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     # disables the periodic driver even when Loki is configured.
     log_ship_interval_seconds: int = 30
 
+    # How often the background Kubernetes log-shipping driver tails pod logs into Loki, in seconds.
+    # Same rules as log_ship_interval_seconds: skipped when loki_url is empty, disabled at <= 0.
+    # Defaults to 0 (off) because it only applies once a cluster has log shipping enabled.
+    k8s_log_ship_interval_seconds: int = 0
+
+    # Where the app writes user-defined Prometheus alert rules. Shared with the Prometheus
+    # container via the custom_rules volume (see docker-compose.full.yml). The app must be able
+    # to write it -- the Dockerfile chowns /app/custom-rules to the runtime uid. Empty falls back
+    # to a sensible in-container default.
+    custom_rules_path: str = "/app/custom-rules/custom.yml"
+
     # /metrics is off in lite mode and the route is not registered at all; full mode
     # sets METRICS_ENABLED=true so Prometheus has something to scrape
     metrics_enabled: bool = False

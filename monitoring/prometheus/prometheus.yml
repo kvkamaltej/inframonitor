@@ -19,6 +19,10 @@ global:
 
 rule_files:
   - /etc/prometheus/alerts.yml
+  # User-defined rules written by the app (Monitoring -> Alerts -> Add alert). Shared custom_rules
+  # volume; the app POSTs /-/reload after changes so new rules apply without a Prometheus restart.
+  # A glob that currently matches one file -- harmless when empty, and future-proof for more.
+  - /etc/prometheus/custom-rules/*.yml
 
 alerting:
   alertmanagers:

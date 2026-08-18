@@ -57,6 +57,13 @@ services:
       GRAFANA_URL: ${GRAFANA_URL:-http://grafana:3000}
       LOKI_URL: http://loki:3100
       ALERTMANAGER_URL: http://alertmanager:9093
+    # Shared with Prometheus (below). User-defined alert rules are written here by the app
+    # (POST /api/monitoring/alerts/rules) and read by Prometheus from its own mount of the same
+    # volume. A named volume, not a host bind: the app runs as uid 10001 and the Dockerfile
+    # chowns /app/custom-rules to it, so a fresh volume inherits a writable dir (same trick as
+    # /app/data). The app writes the file in place and calls prometheus:9090/-/reload.
+    volumes:
+      - custom_rules:/app/custom-rules
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,6 +121,10 @@ services:
       # the app env. Gitignored + created at deploy time (see .gitignore / scripts). Must exist as a
       # FILE before `up`, or Docker creates a directory in its place.
       - ./monitoring/prometheus/sd_token:/etc/prometheus/sd_token:ro
+      # User-defined alert rules, written by the app into the shared custom_rules volume. Read-only
+      # here; prometheus.yml globs /etc/prometheus/custom-rules/*.yml into rule_files. Prometheus is
+      # reloaded via /-/reload (lifecycle) when the app changes them, so no restart is needed.
+      - custom_rules:/etc/prometheus/custom-rules:ro
       - prometheus_data:/prometheus
     ports:
       # Prometheus has no authentication of any kind, so localhost by default.
@@ -220,3 +231,6 @@ volumes:
   loki_data:
   promtail_positions:
   alertmanager_data:
+  # User-defined alert rules, written by the app and read by Prometheus (see the app + prometheus
+  # mounts above). Empty on first create; the app seeds/updates it via the alerts API.
+  custom_rules:

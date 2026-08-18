@@ -219,6 +219,11 @@ class KubeCluster(Base):
     ca_cert: Mapped[str] = mapped_column(Text, default="")
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
     default_namespace: Mapped[str] = mapped_column(String(255), default="")
+    # feature/k8s-log-shipping: tail this cluster's pod logs into Loki. log_namespaces_json is a
+    # JSON list of namespace names ("[]" = every namespace). Mirrors the Server log-shipping
+    # columns; ALTERed into an existing table by _migrate_kube_cluster_columns in app.main.
+    log_shipping_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    log_namespaces_json: Mapped[str] = mapped_column(Text, default="[]")
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

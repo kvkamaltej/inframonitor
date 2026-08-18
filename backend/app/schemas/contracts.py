@@ -859,7 +859,29 @@ class KubeClusterRead(BaseModel):
     default_namespace: str = ""
     group: str | None = None
     has_credentials: bool = False
+    # feature/k8s-log-shipping: whether this cluster's pod logs are tailed into Loki, and the
+    # namespaces shipped ([] = all). Present on read so the UI can render the toggle state.
+    log_shipping_enabled: bool = False
+    log_namespaces: list[str] = Field(default_factory=list)
     created_at: datetime
+
+
+class KubeLogShippingUpdate(BaseModel):
+    # Enable/disable tailing this cluster's pod logs into Loki, and which namespaces to ship.
+    # An empty list means every namespace.
+    enabled: bool = False
+    namespaces: list[str] = Field(default_factory=list)
+
+
+class AlertRuleCreate(BaseModel):
+    # A user-defined Prometheus alert rule. `name` is the alert name (Prometheus identifier rules
+    # apply); `expr` is a PromQL expression; `for_duration` like "5m"; severity feeds the label.
+    name: str
+    expr: str
+    for_duration: str = "5m"
+    severity: str = "warning"
+    summary: str = ""
+    description: str = ""
 
 
 class KubeTestResult(BaseModel):

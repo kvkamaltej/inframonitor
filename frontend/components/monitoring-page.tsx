@@ -12,26 +12,29 @@ import {
 } from "recharts";
 import {
   Activity,
-  AlertTriangle,
   BellRing,
-  Download,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   Loader2,
-  Play,
+  Plus,
   RefreshCw,
-  ScrollText,
-  ServerCog
+  ServerCog,
+  Trash2
 } from "lucide-react";
+import { LokiLogViewer } from "@/components/loki-logs";
 import {
+  addAlertRule,
+  deleteAlertRule,
+  getAlertTemplates,
   getMonitoringAlerts,
   getMonitoringEnabled,
-  lokiLabels,
-  lokiLabelValues,
-  lokiQueryRange,
+  listAlertRules,
   promQuery,
   promQueryRange,
   type AlertmanagerAlert,
-  type LokiStream,
+  type AlertRule,
+  type AlertTemplate,
   type MonitoringEnabled,
   type PromResponse
 } from "@/lib/api";
@@ -51,19 +54,6 @@ type TabKey = "metrics" | "alerts" | "logs";
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
-}
-
-// Trigger a client-side download of a plain-text file from an in-memory string.
-function downloadTextFile(filename: string, text: string) {
-  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
 }
 
 // Prometheus range result -> recharts rows. Takes the first series (the queries here all reduce
@@ -195,7 +185,7 @@ export function MonitoringPage({ token }: { token: string }) {
         </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          {(tab === "metrics" || tab === "logs") && (
+          {tab === "metrics" && (
             <div className="flex items-center gap-1 rounded-full border border-edge bg-surface p-1">
               {RANGES.map((r) => (
                 <button
@@ -239,7 +229,7 @@ export function MonitoringPage({ token }: { token: string }) {
         <AlertsTab token={token} refreshKey={refreshKey} />
       ) : null}
       {tab === "logs" && enabled?.loki ? (
-        <LogsTab token={token} range={activeRange} refreshKey={refreshKey} />
+        <LokiLogViewer token={token} title="Logs" />
       ) : null}
     </section>
   );
@@ -258,36 +248,47 @@ function MetricsTab({
   range: { seconds: number; step: number };
   refreshKey: number;
 }) {
+  const [graphsOpen, setGraphsOpen] = useState(true);
   return (
-    <div className="grid gap-5 lg:grid-cols-2">
-      <MetricChart
-        token={token}
-        title="Request rate"
-        subtitle="requests/sec"
-        query={`sum(rate(inframonitor_http_requests_total[5m]))`}
-        color={CHART_ACCENT}
-        range={range}
-        refreshKey={refreshKey}
-      />
-      <MetricChart
-        token={token}
-        title="Error rate"
-        subtitle="5xx/sec"
-        query={`sum(rate(inframonitor_http_requests_total{status=~"5.."}[5m]))`}
-        color="#dc2626"
-        range={range}
-        refreshKey={refreshKey}
-      />
-      <MetricChart
-        token={token}
-        title="p95 latency"
-        subtitle="seconds"
-        query={`histogram_quantile(0.95, sum by (le) (rate(inframonitor_http_request_duration_seconds_bucket[5m])))`}
-        color="#d97706"
-        range={range}
-        refreshKey={refreshKey}
-      />
-      <TargetsPanel token={token} refreshKey={refreshKey} />
+    <div className="grid gap-3">
+      <button
+        onClick={() => setGraphsOpen((v) => !v)}
+        className="flex items-center gap-2 text-sm font-semibold text-fg transition-colors hover:text-accent"
+      >
+        {graphsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />} Graphs
+      </button>
+      {graphsOpen ? (
+        <div className="grid gap-5 lg:grid-cols-2">
+          <MetricChart
+            token={token}
+            title="Request rate"
+            subtitle="requests/sec"
+            query={`sum(rate(inframonitor_http_requests_total[5m]))`}
+            color={CHART_ACCENT}
+            range={range}
+            refreshKey={refreshKey}
+          />
+          <MetricChart
+            token={token}
+            title="Error rate"
+            subtitle="5xx/sec"
+            query={`sum(rate(inframonitor_http_requests_total{status=~"5.."}[5m]))`}
+            color="#dc2626"
+            range={range}
+            refreshKey={refreshKey}
+          />
+          <MetricChart
+            token={token}
+            title="p95 latency"
+            subtitle="seconds"
+            query={`histogram_quantile(0.95, sum by (le) (rate(inframonitor_http_request_duration_seconds_bucket[5m])))`}
+            color="#d97706"
+            range={range}
+            refreshKey={refreshKey}
+          />
+          <TargetsPanel token={token} refreshKey={refreshKey} />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -495,389 +496,343 @@ function AlertsTab({ token, refreshKey }: { token: string; refreshKey: number })
     void load();
   }, [load, refreshKey]);
 
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 py-10 text-sm font-medium text-muted">
-        <Loader2 size={16} className="animate-spin" /> Loading alerts…
-      </div>
-    );
-  }
-  if (error) {
-    return <div className="rounded-2xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm font-medium text-danger">{error}</div>;
-  }
-  if (alerts.length === 0) {
-    return (
-      <div className="flex flex-col items-center gap-2 rounded-2xl border border-edge bg-surface px-8 py-12 text-center">
-        <BellRing size={28} className="text-accent" />
-        <p className="text-sm font-semibold text-fg">No active alerts</p>
-        <p className="text-sm font-medium text-muted">Everything is quiet right now.</p>
-      </div>
-    );
-  }
-
   return (
-    <div className="grid gap-3">
-      {alerts.map((alert, index) => {
-        const labels = alert.labels ?? {};
-        const annotations = alert.annotations ?? {};
-        const tone = severityTone(labels.severity);
-        const name = labels.alertname || "alert";
-        return (
-          <div key={`${name}-${index}`} className="rounded-2xl border border-edge bg-surface p-4">
-            <div className="flex items-start gap-3">
-              <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${tone.dot}`} />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-sm font-semibold text-fg">{name}</h3>
-                  <span className="rounded-full bg-elevated px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
-                    {tone.label}
-                  </span>
-                  {labels.job ? (
-                    <span className="rounded-full border border-edge px-2 py-0.5 text-[11px] font-medium text-muted">job: {labels.job}</span>
-                  ) : null}
-                  {labels.instance ? (
-                    <span className="rounded-full border border-edge px-2 py-0.5 text-[11px] font-medium text-muted">
-                      {labels.instance}
-                    </span>
-                  ) : null}
-                </div>
-                {annotations.summary ? <p className="mt-1.5 text-sm font-medium text-fg">{annotations.summary}</p> : null}
-                {annotations.description ? <p className="mt-1 text-sm text-muted">{annotations.description}</p> : null}
-                <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted">
-                  {alert.startsAt ? <span>firing since {since(alert.startsAt)}</span> : null}
-                  {alert.status?.state ? <span className="capitalize">state: {alert.status.state}</span> : null}
+    <div className="grid gap-5">
+      <CustomAlertRules token={token} onAlertsChanged={load} />
+
+      <div className="grid gap-3">
+        <h3 className="text-sm font-semibold text-fg">Active alerts</h3>
+        {loading ? (
+          <div className="flex items-center gap-2 py-10 text-sm font-medium text-muted">
+            <Loader2 size={16} className="animate-spin" /> Loading alerts…
+          </div>
+        ) : error ? (
+          <div className="rounded-2xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm font-medium text-danger">{error}</div>
+        ) : alerts.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 rounded-2xl border border-edge bg-surface px-8 py-12 text-center">
+            <BellRing size={28} className="text-accent" />
+            <p className="text-sm font-semibold text-fg">No active alerts</p>
+            <p className="text-sm font-medium text-muted">Everything is quiet right now.</p>
+          </div>
+        ) : (
+          alerts.map((alert, index) => {
+            const labels = alert.labels ?? {};
+            const annotations = alert.annotations ?? {};
+            const tone = severityTone(labels.severity);
+            const name = labels.alertname || "alert";
+            return (
+              <div key={`${name}-${index}`} className="rounded-2xl border border-edge bg-surface p-4">
+                <div className="flex items-start gap-3">
+                  <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${tone.dot}`} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-sm font-semibold text-fg">{name}</h3>
+                      <span className="rounded-full bg-elevated px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+                        {tone.label}
+                      </span>
+                      {labels.job ? (
+                        <span className="rounded-full border border-edge px-2 py-0.5 text-[11px] font-medium text-muted">job: {labels.job}</span>
+                      ) : null}
+                      {labels.instance ? (
+                        <span className="rounded-full border border-edge px-2 py-0.5 text-[11px] font-medium text-muted">
+                          {labels.instance}
+                        </span>
+                      ) : null}
+                    </div>
+                    {annotations.summary ? <p className="mt-1.5 text-sm font-medium text-fg">{annotations.summary}</p> : null}
+                    {annotations.description ? <p className="mt-1 text-sm text-muted">{annotations.description}</p> : null}
+                    <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted">
+                      {alert.startsAt ? <span>firing since {since(alert.startsAt)}</span> : null}
+                      {alert.status?.state ? <span className="capitalize">state: {alert.status.state}</span> : null}
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
-          </div>
-        );
-      })}
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }
 
-// --- Logs -----------------------------------------------------------------------------------
-
-type LogRow = { ns: string; line: string; stderr: boolean; labels: Record<string, string> };
-
-// nanosecond epoch string -> ms Date. Slicing off the last 6 digits yields milliseconds without
-// losing precision to a float.
-function nsToClock(ns: string): string {
-  const ms = Number(ns.slice(0, -6));
-  if (!Number.isFinite(ms)) return "";
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function flattenStreams(streams: LokiStream[]): LogRow[] {
-  const rows: LogRow[] = [];
-  for (const stream of streams) {
-    const labels = stream.stream ?? {};
-    const stderr = labels.stream === "stderr";
-    for (const [ns, line] of stream.values ?? []) {
-      rows.push({ ns, line, stderr, labels });
-    }
-  }
-  // newest-first: nanosecond strings are fixed-width-ish; compare as BigInt for correctness.
-  rows.sort((a, b) => {
-    try {
-      const diff = BigInt(b.ns) - BigInt(a.ns);
-      return diff > 0n ? 1 : diff < 0n ? -1 : 0;
-    } catch {
-      return b.ns.localeCompare(a.ns);
-    }
-  });
-  return rows;
-}
-
-function LogsTab({
-  token,
-  range,
-  refreshKey
-}: {
-  token: string;
-  range: { seconds: number };
-  refreshKey: number;
-}) {
-  const [query, setQuery] = useState('{service="app"}');
-  const [rows, setRows] = useState<LogRow[]>([]);
-  const [streamLabels, setStreamLabels] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
+// Custom alert rules: list existing rules, delete them, and add new ones from a template or by
+// hand. Sits above the active-alerts list; on any change it also refreshes the active alerts via
+// onAlertsChanged so a freshly-created rule shows up once Prometheus evaluates it.
+function CustomAlertRules({ token, onAlertsChanged }: { token: string; onAlertsChanged: () => void }) {
+  const [rules, setRules] = useState<AlertRule[]>([]);
+  const [templates, setTemplates] = useState<AlertTemplate[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [ran, setRan] = useState(false);
 
-  // Time-window mode: relative (the shared range pills) or an explicit absolute From/To window.
-  const [rangeMode, setRangeMode] = useState<"relative" | "absolute">("relative");
-  const [absFrom, setAbsFrom] = useState("");
-  const [absTo, setAbsTo] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [templateKey, setTemplateKey] = useState("");
+  const [name, setName] = useState("");
+  const [expr, setExpr] = useState("");
+  const [forDuration, setForDuration] = useState("5m");
+  const [severity, setSeverity] = useState("warning");
+  const [summary, setSummary] = useState("");
+  const [description, setDescription] = useState("");
+  const [formError, setFormError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
-  // label picker state
-  const [labelNames, setLabelNames] = useState<string[]>([]);
-  const [pickLabel, setPickLabel] = useState("");
-  const [labelValues, setLabelValues] = useState<string[]>([]);
-  const [pickValue, setPickValue] = useState("");
-  const [valuesLoading, setValuesLoading] = useState(false);
-
-  // Load the available label names once.
-  useEffect(() => {
-    (async () => {
-      try {
-        const resp = await lokiLabels(token);
-        setLabelNames(resp.data ?? []);
-      } catch {
-        // The picker is a convenience; a failure here just leaves the dropdown empty.
-      }
-    })();
-  }, [token]);
-
-  // When a label name is chosen, fetch its values for the second dropdown.
-  useEffect(() => {
-    if (!pickLabel) {
-      setLabelValues([]);
-      setPickValue("");
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      setValuesLoading(true);
-      try {
-        const resp = await lokiLabelValues(token, pickLabel);
-        if (!cancelled) {
-          setLabelValues(resp.data ?? []);
-          setPickValue("");
-        }
-      } catch {
-        if (!cancelled) setLabelValues([]);
-      } finally {
-        if (!cancelled) setValuesLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [token, pickLabel]);
-
-  const run = useCallback(async () => {
-    const logql = query.trim();
-    if (!logql) {
-      setError("Enter a LogQL selector to run.");
-      return;
-    }
-    let start: number, end: number;
-    if (rangeMode === "absolute") {
-      if (!absFrom || !absTo) {
-        setError("Pick both From and To dates.");
-        return;
-      }
-      start = Math.floor(new Date(absFrom).getTime() / 1000);
-      end = Math.floor(new Date(absTo).getTime() / 1000);
-      if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
-        setError("From must be before To.");
-        return;
-      }
-    } else {
-      end = nowSec();
-      start = end - range.seconds;
-    }
+  const loadRules = useCallback(async () => {
     setLoading(true);
     setError("");
-    setRan(true);
     try {
-      const resp = await lokiQueryRange(token, logql, start, end, { limit: 1000, direction: "backward" });
-      const streams = resp?.data?.result ?? [];
-      setRows(flattenStreams(streams));
-      const seen = new Set<string>();
-      for (const s of streams) seen.add(JSON.stringify(s.stream ?? {}));
-      setStreamLabels(Array.from(seen));
+      const [rulesResp, templatesResp] = await Promise.all([listAlertRules(token), getAlertTemplates(token)]);
+      setRules(rulesResp);
+      setTemplates(templatesResp);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Query failed");
-      setRows([]);
-      setStreamLabels([]);
+      setError(err instanceof Error ? err.message : "Unable to load alert rules");
+      setRules([]);
     } finally {
       setLoading(false);
     }
-  }, [token, query, range.seconds, rangeMode, absFrom, absTo]);
+  }, [token]);
 
-  // Re-run on Refresh / range change once the user has run at least once.
   useEffect(() => {
-    if (ran) void run();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey]);
+    void loadRules();
+  }, [loadRules]);
 
-  function applyLabelSelector() {
-    if (!pickLabel || !pickValue) return;
-    setQuery(`{${pickLabel}="${pickValue}"}`);
+  const activeTemplate = useMemo(() => templates.find((t) => t.key === templateKey), [templates, templateKey]);
+
+  function applyTemplate(key: string) {
+    setTemplateKey(key);
+    const tpl = templates.find((t) => t.key === key);
+    if (!tpl) return;
+    setName(tpl.name);
+    setExpr(tpl.expr);
+    setForDuration(tpl.for || "5m");
+    setSeverity(tpl.severity || "warning");
+    setSummary(tpl.summary);
+    setDescription(tpl.description);
   }
 
-  // Export the currently loaded rows to a .log file, oldest-first (rows are held newest-first).
-  function exportLogs() {
-    if (rows.length === 0) return;
-    const text = [...rows]
-      .reverse()
-      .map((row) => `${new Date(Number(row.ns.slice(0, -6))).toISOString()}\t${row.line}`)
-      .join("\n");
-    downloadTextFile(`loki-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.log`, text);
+  function resetForm() {
+    setShowForm(false);
+    setTemplateKey("");
+    setName("");
+    setExpr("");
+    setForDuration("5m");
+    setSeverity("warning");
+    setSummary("");
+    setDescription("");
+    setFormError("");
+  }
+
+  async function create() {
+    if (!name.trim() || !expr.trim()) {
+      setFormError("Name and expression are required.");
+      return;
+    }
+    setSubmitting(true);
+    setFormError("");
+    try {
+      await addAlertRule(token, {
+        name: name.trim(),
+        expr: expr.trim(),
+        for_duration: forDuration.trim() || "5m",
+        severity,
+        summary: summary.trim(),
+        description: description.trim()
+      });
+      resetForm();
+      await loadRules();
+      onAlertsChanged();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : "Could not create the alert rule.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function remove(ruleName: string) {
+    setDeleting(ruleName);
+    setError("");
+    try {
+      await deleteAlertRule(token, ruleName);
+      await loadRules();
+      onAlertsChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not delete the alert rule.");
+    } finally {
+      setDeleting(null);
+    }
   }
 
   return (
-    <div className="grid gap-4">
-      <div className="rounded-2xl border border-edge bg-surface p-4">
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="flex min-w-[240px] flex-1 flex-col gap-1">
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted">LogQL</span>
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void run();
-              }}
-              placeholder='{service="app"}'
-              spellCheck={false}
-              className="h-9 rounded-lg border border-edge bg-page px-3 font-mono text-sm text-fg outline-none focus:border-accent"
-            />
-          </label>
-          <button
-            onClick={() => void run()}
-            disabled={loading}
-            className="inline-flex h-9 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
-          >
-            {loading ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />} Run
-          </button>
-          <button
-            onClick={exportLogs}
-            disabled={rows.length === 0}
-            className="inline-flex h-9 items-center gap-2 rounded-full border border-edge px-4 text-sm font-medium text-fg transition-colors hover:bg-elevated disabled:opacity-50"
-          >
-            <Download size={15} /> Export
-          </button>
+    <div className="rounded-2xl border border-edge bg-surface p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-fg">Custom alert rules</h3>
+          <p className="mt-0.5 text-xs font-medium text-muted">
+            Add a rule from a template or by hand. The <span className="font-mono">InfraMonitorTestAlert</span> template always
+            fires — use it to verify the pipeline. New rules take up to ~30s to show as active alerts.
+          </p>
         </div>
-
-        {/* Label picker: name -> value -> apply as a {name="value"} selector. */}
-        <div className="mt-3 flex flex-wrap items-end gap-2">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Label</span>
-            <select
-              value={pickLabel}
-              onChange={(e) => setPickLabel(e.target.value)}
-              className="h-9 rounded-lg border border-edge bg-page px-2 text-sm text-fg outline-none focus:border-accent"
-            >
-              <option value="">Choose…</option>
-              {labelNames.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Value</span>
-            <select
-              value={pickValue}
-              onChange={(e) => setPickValue(e.target.value)}
-              disabled={!pickLabel || valuesLoading}
-              className="h-9 min-w-[160px] rounded-lg border border-edge bg-page px-2 text-sm text-fg outline-none focus:border-accent disabled:opacity-50"
-            >
-              <option value="">{valuesLoading ? "Loading…" : "Choose…"}</option>
-              {labelValues.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
+        {!showForm ? (
           <button
-            onClick={applyLabelSelector}
-            disabled={!pickLabel || !pickValue}
-            className="inline-flex h-9 items-center gap-2 rounded-full border border-edge px-4 text-sm font-medium text-fg transition-colors hover:bg-elevated disabled:opacity-50"
+            onClick={() => setShowForm(true)}
+            className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/90"
           >
-            Use selector
+            <Plus size={15} /> Add alert
           </button>
-        </div>
-
-        {/* Time window: relative (shared range pills) vs an explicit absolute From/To window. */}
-        <div className="mt-3 flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Time window</span>
-            <div className="flex items-center gap-1 rounded-full border border-edge p-1">
-              {(["relative", "absolute"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  onClick={() => setRangeMode(mode)}
-                  className={`h-7 rounded-full px-3 text-xs font-semibold capitalize transition-colors ${
-                    rangeMode === mode ? "bg-accent text-white" : "text-muted hover:text-fg"
-                  }`}
-                >
-                  {mode}
-                </button>
-              ))}
-            </div>
-          </label>
-          {rangeMode === "absolute" ? (
-            <>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs font-semibold uppercase tracking-wide text-muted">From</span>
-                <input
-                  type="datetime-local"
-                  value={absFrom}
-                  onChange={(e) => setAbsFrom(e.target.value)}
-                  className="h-9 rounded-lg border border-edge bg-page px-2 text-sm text-fg outline-none focus:border-accent"
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className="text-xs font-semibold uppercase tracking-wide text-muted">To</span>
-                <input
-                  type="datetime-local"
-                  value={absTo}
-                  onChange={(e) => setAbsTo(e.target.value)}
-                  className="h-9 rounded-lg border border-edge bg-page px-2 text-sm text-fg outline-none focus:border-accent"
-                />
-              </label>
-            </>
-          ) : null}
-        </div>
+        ) : null}
       </div>
 
-      {streamLabels.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5">
-          {streamLabels.map((label) => (
-            <span key={label} className="rounded-full border border-edge bg-surface px-2.5 py-0.5 font-mono text-[11px] text-muted">
-              {label}
-            </span>
-          ))}
+      {error ? (
+        <div className="mb-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm font-medium text-danger">{error}</div>
+      ) : null}
+
+      {showForm ? (
+        <div className="mb-4 grid gap-3 rounded-xl border border-edge bg-page p-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Template</span>
+            <select
+              value={templateKey}
+              onChange={(e) => applyTemplate(e.target.value)}
+              className="h-9 rounded-lg border border-edge bg-surface px-2 text-sm text-fg outline-none focus:border-accent"
+            >
+              <option value="">Start from scratch…</option>
+              {templates.map((tpl) => (
+                <option key={tpl.key} value={tpl.key}>
+                  {tpl.name}
+                </option>
+              ))}
+            </select>
+            {activeTemplate?.requires ? (
+              <span className="text-xs font-medium text-amber-600 dark:text-amber-400">Requires: {activeTemplate.requires}</span>
+            ) : null}
+          </label>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted">Name</span>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                spellCheck={false}
+                className="h-9 rounded-lg border border-edge bg-surface px-3 text-sm text-fg outline-none focus:border-accent"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted">For</span>
+              <input
+                value={forDuration}
+                onChange={(e) => setForDuration(e.target.value)}
+                placeholder="5m"
+                spellCheck={false}
+                className="h-9 rounded-lg border border-edge bg-surface px-3 font-mono text-sm text-fg outline-none focus:border-accent"
+              />
+            </label>
+          </div>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Expression</span>
+            <textarea
+              value={expr}
+              onChange={(e) => setExpr(e.target.value)}
+              rows={2}
+              spellCheck={false}
+              placeholder="up == 0"
+              className="rounded-lg border border-edge bg-surface px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Severity</span>
+            <select
+              value={severity}
+              onChange={(e) => setSeverity(e.target.value)}
+              className="h-9 rounded-lg border border-edge bg-surface px-2 text-sm text-fg outline-none focus:border-accent"
+            >
+              <option value="info">info</option>
+              <option value="warning">warning</option>
+              <option value="critical">critical</option>
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Summary</span>
+            <input
+              value={summary}
+              onChange={(e) => setSummary(e.target.value)}
+              className="h-9 rounded-lg border border-edge bg-surface px-3 text-sm text-fg outline-none focus:border-accent"
+            />
+          </label>
+
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted">Description</span>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={2}
+              className="rounded-lg border border-edge bg-surface px-3 py-2 text-sm text-fg outline-none focus:border-accent"
+            />
+          </label>
+
+          {formError ? (
+            <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm font-medium text-danger">{formError}</div>
+          ) : null}
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => void create()}
+              disabled={submitting}
+              className="inline-flex h-9 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+            >
+              {submitting ? <Loader2 size={15} className="animate-spin" /> : null} Create
+            </button>
+            <button
+              onClick={resetForm}
+              disabled={submitting}
+              className="inline-flex h-9 items-center rounded-full border border-edge px-4 text-sm font-medium text-fg transition-colors hover:bg-elevated disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       ) : null}
 
-      <div className="rounded-2xl border border-edge bg-surface">
-        <div className="flex items-center gap-2 border-b border-edge px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted">
-          <ScrollText size={14} /> Logs {rows.length > 0 ? `(${rows.length})` : ""}
+      {loading ? (
+        <div className="flex items-center gap-2 py-6 text-sm font-medium text-muted">
+          <Loader2 size={16} className="animate-spin" /> Loading rules…
         </div>
-        <div className="max-h-[480px] overflow-auto p-2 font-mono text-xs leading-relaxed">
-          {loading ? (
-            <div className="flex items-center gap-2 px-2 py-6 text-muted">
-              <Loader2 size={14} className="animate-spin" /> Running query…
-            </div>
-          ) : error ? (
-            <div className="flex items-center gap-2 px-2 py-6 font-sans text-sm font-medium text-danger">
-              <AlertTriangle size={15} /> {error}
-            </div>
-          ) : !ran ? (
-            <div className="px-2 py-6 font-sans text-sm text-muted">Run a query to see log lines.</div>
-          ) : rows.length === 0 ? (
-            <div className="px-2 py-6 font-sans text-sm text-muted">No log lines for this selector and range.</div>
-          ) : (
-            rows.map((row, index) => (
-              <div
-                key={`${row.ns}-${index}`}
-                className={`flex gap-3 whitespace-pre-wrap break-all rounded px-2 py-0.5 ${
-                  row.stderr ? "text-red-600 dark:text-red-400" : "text-fg"
-                }`}
-              >
-                <span className="shrink-0 select-none text-muted">{nsToClock(row.ns)}</span>
-                <span className="min-w-0 flex-1">{row.line}</span>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
+      ) : rules.length === 0 ? (
+        <p className="py-4 text-sm font-medium text-muted">No custom alert rules yet.</p>
+      ) : (
+        <ul className="grid gap-2">
+          {rules.map((rule) => {
+            const tone = severityTone(rule.severity);
+            return (
+              <li key={rule.name} className="flex items-start gap-3 rounded-xl border border-edge px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-fg">{rule.name}</span>
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-elevated px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+                      <span className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} />
+                      {tone.label}
+                    </span>
+                    {rule.for ? (
+                      <span className="rounded-full border border-edge px-2 py-0.5 text-[11px] font-medium text-muted">for: {rule.for}</span>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 break-all font-mono text-xs text-muted">{rule.expr}</p>
+                </div>
+                <button
+                  onClick={() => void remove(rule.name)}
+                  disabled={deleting === rule.name}
+                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-danger/40 px-3 text-xs font-semibold text-danger transition-colors hover:bg-danger/10 disabled:opacity-50"
+                >
+                  {deleting === rule.name ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Delete
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

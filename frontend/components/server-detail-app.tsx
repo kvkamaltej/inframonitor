@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, ChevronDown, ChevronRight, Clock, Coffee, Copy, Download, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, LineChart as LineChartIcon, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, PlugZap, RefreshCw, ScrollText, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
-import { Fragment, FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
 import { downloadTextFile, safeFilename } from "@/lib/download";
@@ -24,16 +24,16 @@ import {
   getTomcatLogs,
   getMonitoringEnabled,
   getServerMonitoring,
+  getServerLogCapabilities,
   installServerMetrics,
   uninstallServerMetrics,
   setServerLogShipping,
   promQueryRange,
-  lokiQueryRange,
   Me,
   MonitoringEnabled,
   PromResponse,
-  LokiStream,
   ServerMonitoring,
+  ServerLogCapabilities,
   ServerLogSource,
   PrivilegedResult,
   restartContainer,
@@ -51,6 +51,7 @@ import {
 import { addressError } from "@/lib/address";
 import { DefaultPasswordBanner } from "@/components/app-shell";
 import { useConfirm } from "@/components/confirm-dialog";
+import { LokiLogViewer } from "@/components/loki-logs";
 import { LoginPanel } from "@/components/login-panel";
 import { ShellPanel } from "@/components/shell-panel";
 import { StatusPill } from "@/components/status-pill";
@@ -119,7 +120,13 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   // and a Set of chosen source keys, seeded from `monitoring.log_sources`.
   const [monitoring, setMonitoring] = useState<ServerMonitoring | null>(null);
   const [monEnabled, setMonEnabled] = useState<MonitoringEnabled | null>(null);
+  // Detected log-producing systems on the host (nginx/docker/podman/kubernetes) plus suggested
+  // log sources. Best-effort: a probe failure leaves this null and the chips simply don't render.
+  const [caps, setCaps] = useState<ServerLogCapabilities | null>(null);
   const [monLoaded, setMonLoaded] = useState(false);
+  // The whole metrics + log-shipping card folds shut once monitoring is already configured, so a
+  // done setup step doesn't dominate the tab. Defaults open; loadMonitoring closes it when set up.
+  const [monCardOpen, setMonCardOpen] = useState(true);
   const [logShipEnabled, setLogShipEnabled] = useState(false);
   const [chosenSources, setChosenSources] = useState<Set<string>>(new Set());
   // Once the metrics agent is installed its controls collapse behind a status header, so the
@@ -534,8 +541,16 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       setMonEnabled(enabled);
       setLogShipEnabled(mon.log_shipping_enabled);
       setChosenSources(new Set(mon.log_sources.map((s) => `${s.source}|${s.name_or_path}`)));
+      // Already configured? Fold the setup card so the tab leads with the drill-down instead.
+      setMonCardOpen(!(mon.metrics_enabled || mon.log_shipping_enabled));
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load monitoring state", "error");
+    }
+    // Best-effort capability probe (one SSH round-trip); failures leave the chips absent.
+    try {
+      setCaps(await getServerLogCapabilities(token, serverId));
+    } catch {
+      setCaps(null);
     }
   }
 
@@ -583,7 +598,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   async function saveLogShipping() {
     // Ships log files/journal units to Loki — an invasive change on the host, so confirm before
     // enabling it. Disabling or editing the set is confirmed too for symmetry.
-    const options = buildLogSourceOptions(server, tomcatRows, containers, monitoring?.log_sources ?? []);
+    const options = buildLogSourceOptions(server, tomcatRows, containers, monitoring?.log_sources ?? [], caps?.suggested_sources ?? []);
     const sources: ServerLogSource[] = options
       .filter((opt) => chosenSources.has(`${opt.source}|${opt.name_or_path}`))
       .map(({ source, name_or_path }) => ({ source, name_or_path }));
@@ -1110,11 +1125,37 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
 
           {tab === "monitoring" ? (
             <div className="space-y-6">
-              <Panel title="Server monitoring" icon={<Activity size={18} />}>
+              <Panel
+                title="Server monitoring"
+                icon={<Activity size={18} />}
+                action={monitoring !== null ? (
+                  <button
+                    type="button"
+                    onClick={() => setMonCardOpen((prev) => !prev)}
+                    aria-expanded={monCardOpen}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-edge px-3 text-xs font-semibold text-fg transition-colors hover:bg-elevated"
+                  >
+                    {monCardOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                    {monCardOpen ? "Collapse" : "Expand"}
+                  </button>
+                ) : undefined}
+              >
                 {monitoring === null ? (
                   <div className="flex items-center gap-2 py-6 text-sm font-medium text-muted">
                     <Loader2 size={16} className="animate-spin" /> Loading monitoring…
                   </div>
+                ) : !monCardOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setMonCardOpen(true)}
+                    className="flex w-full items-center gap-2 text-left text-sm font-medium text-muted transition-colors hover:text-fg"
+                  >
+                    <span className={`h-2 w-2 shrink-0 rounded-full ${monitoring.metrics_enabled ? "bg-emerald-500" : "bg-slate-400"}`} />
+                    <span>
+                      Metrics: {monitoring.metrics_enabled ? "on" : "off"} · Log shipping: {monitoring.log_shipping_enabled ? "on" : "off"}
+                      {monitoring.log_shipping_enabled ? ` (${monitoring.log_sources.length} source${monitoring.log_sources.length === 1 ? "" : "s"})` : ""}
+                    </span>
+                  </button>
                 ) : (
                   <div className="space-y-6">
                     {monEnabled && (!monEnabled.prometheus || !monEnabled.loki) ? (
@@ -1177,6 +1218,21 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                       <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-fg">
                         <ScrollText size={16} className="text-accent" /> Log shipping
                       </div>
+                      {caps ? (
+                        <div className="mb-3 flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-medium text-muted">Detected:</span>
+                          {([["nginx", caps.nginx], ["docker", caps.docker], ["podman", caps.podman], ["kubernetes", caps.kubernetes]] as const)
+                            .filter(([, on]) => on)
+                            .map(([name]) => (
+                              <span key={name} className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> {name}
+                              </span>
+                            ))}
+                          {!caps.nginx && !caps.docker && !caps.podman && !caps.kubernetes ? (
+                            <span className="text-xs text-muted">none detected</span>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-fg">
                         <input
                           type="checkbox"
@@ -1201,7 +1257,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                         <span className="text-xs text-muted">Container logs are shipped with <code className="font-mono">source=&lt;container name&gt;</code>.</span>
                       </div>
                       {(() => {
-                        const options = buildLogSourceOptions(server, tomcatRows, containers, monitoring.log_sources);
+                        const options = buildLogSourceOptions(server, tomcatRows, containers, monitoring.log_sources, caps?.suggested_sources ?? []);
                         if (options.length === 0) {
                           return <p className="text-xs text-muted">No log sources discovered yet. Run discovery, load Tomcat instances, or load containers to populate this list.</p>;
                         }
@@ -1772,7 +1828,7 @@ type LogSourceOption = { source: string; name_or_path: string; label: string };
 // systemd units (shipped from the journal), database log files, and Tomcat log files — so the
 // operator picks real paths/units rather than typing them. Anything already shipped but no
 // longer discovered is appended so it stays visible and selectable. Deduped by source+path.
-function buildLogSourceOptions(server: Server | null, tomcatRows: TomcatInstance[], containers: ContainerInfo[], shipped: ServerLogSource[]): LogSourceOption[] {
+function buildLogSourceOptions(server: Server | null, tomcatRows: TomcatInstance[], containers: ContainerInfo[], shipped: ServerLogSource[], suggested: ServerLogSource[] = []): LogSourceOption[] {
   const out: LogSourceOption[] = [];
   const seen = new Set<string>();
   const add = (source: string, name_or_path: string, label: string) => {
@@ -1797,6 +1853,7 @@ function buildLogSourceOptions(server: Server | null, tomcatRows: TomcatInstance
     const rt = c.runtime || "docker";
     if (c.name) add(rt, c.name, `${rt} · ${c.name}`);
   }
+  for (const s of suggested) add(s.source, s.name_or_path, `${s.source} · ${s.name_or_path}`);
   for (const s of shipped) add(s.source, s.name_or_path, `${s.source} · ${s.name_or_path}`);
   return out;
 }
@@ -1823,13 +1880,6 @@ function monFormatClock(unixSec: number): string {
   return new Date(unixSec * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-// nanosecond epoch string -> clock. Slicing off the last 6 digits yields ms without a float.
-function nsToClockMon(ns: string): string {
-  const ms = Number(ns.slice(0, -6));
-  if (!Number.isFinite(ms)) return "";
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
 type MonLine = { key: string; query: string; color: string; label: string };
 
 // Merges the first series of each response into recharts rows keyed by timestamp, so a chart can
@@ -1850,30 +1900,13 @@ function mergeSeries(parts: { key: string; resp: PromResponse | null }[]): Recor
   return Array.from(map.values()).sort((a, b) => (a.t ?? 0) - (b.t ?? 0));
 }
 
-function flattenLokiStreams(streams: LokiStream[]): { ns: string; line: string; stderr: boolean }[] {
-  const rows: { ns: string; line: string; stderr: boolean }[] = [];
-  for (const stream of streams) {
-    const stderr = (stream.stream ?? {}).stream === "stderr";
-    for (const [ns, line] of stream.values ?? []) rows.push({ ns, line, stderr });
-  }
-  // newest-first: nanosecond strings compared as BigInt for correctness.
-  rows.sort((a, b) => {
-    try {
-      const diff = BigInt(b.ns) - BigInt(a.ns);
-      return diff > 0n ? 1 : diff < 0n ? -1 : 0;
-    } catch {
-      return b.ns.localeCompare(a.ns);
-    }
-  });
-  return rows;
-}
-
 // Drill-down: per-server metric charts (scoped by server_id) plus shipped-log tail, sharing one
 // range selector + Refresh. Only meaningful once the agent is installed / logs are shipping;
 // each panel shows its own empty state until then.
 function ServerMonitoringDrilldown({ token, serverId, scraped }: { token: string; serverId: string; scraped: boolean }) {
   const [range, setRange] = useState<MonRange>(MON_RANGES[1]);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [chartsOpen, setChartsOpen] = useState(true);
   const sid = promLabel(serverId);
 
   const cpu = `100 - (avg(rate(node_cpu_seconds_total{mode="idle",server_id="${sid}"}[5m])) * 100)`;
@@ -1885,12 +1918,18 @@ function ServerMonitoringDrilldown({ token, serverId, scraped }: { token: string
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-sm font-semibold text-fg">
-          <Activity size={16} className="text-accent" /> Metrics
+        <button
+          type="button"
+          onClick={() => setChartsOpen((prev) => !prev)}
+          aria-expanded={chartsOpen}
+          className="flex items-center gap-2 text-sm font-semibold text-fg"
+        >
+          {chartsOpen ? <ChevronDown size={16} className="text-muted" /> : <ChevronRight size={16} className="text-muted" />}
+          <Activity size={16} className="text-accent" /> Metrics graphs
           <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${scraped ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" : "bg-slate-100 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300"}`}>
             <span className={`h-1.5 w-1.5 rounded-full ${scraped ? "bg-emerald-500" : "bg-slate-400"}`} /> {scraped ? "scraped" : "not scraped"}
           </span>
-        </div>
+        </button>
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1 rounded-full border border-edge bg-surface p-1">
             {MON_RANGES.map((r) => (
@@ -1912,14 +1951,16 @@ function ServerMonitoringDrilldown({ token, serverId, scraped }: { token: string
         </div>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-2">
-        <ServerChart token={token} title="CPU" subtitle="% used" unit="%" range={range} refreshKey={refreshKey} lines={[{ key: "v", query: cpu, color: "var(--inframonitor-accent)", label: "CPU %" }]} />
-        <ServerChart token={token} title="Memory" subtitle="% used" unit="%" range={range} refreshKey={refreshKey} lines={[{ key: "v", query: mem, color: "#7c3aed", label: "Memory %" }]} />
-        <ServerChart token={token} title="Disk (root)" subtitle="% used" unit="%" range={range} refreshKey={refreshKey} lines={[{ key: "v", query: disk, color: "#d97706", label: "Disk %" }]} />
-        <ServerChart token={token} title="Network" subtitle="bytes/sec" unit="B/s" range={range} refreshKey={refreshKey} lines={[{ key: "rx", query: netIn, color: "var(--inframonitor-accent)", label: "In" }, { key: "tx", query: netOut, color: "#dc2626", label: "Out" }]} />
-      </div>
+      {chartsOpen ? (
+        <div className="grid gap-5 lg:grid-cols-2">
+          <ServerChart token={token} title="CPU" subtitle="% used" unit="%" range={range} refreshKey={refreshKey} lines={[{ key: "v", query: cpu, color: "var(--inframonitor-accent)", label: "CPU %" }]} />
+          <ServerChart token={token} title="Memory" subtitle="% used" unit="%" range={range} refreshKey={refreshKey} lines={[{ key: "v", query: mem, color: "#7c3aed", label: "Memory %" }]} />
+          <ServerChart token={token} title="Disk (root)" subtitle="% used" unit="%" range={range} refreshKey={refreshKey} lines={[{ key: "v", query: disk, color: "#d97706", label: "Disk %" }]} />
+          <ServerChart token={token} title="Network" subtitle="bytes/sec" unit="B/s" range={range} refreshKey={refreshKey} lines={[{ key: "rx", query: netIn, color: "var(--inframonitor-accent)", label: "In" }, { key: "tx", query: netOut, color: "#dc2626", label: "Out" }]} />
+        </div>
+      ) : null}
 
-      <ServerLokiLogs token={token} serverId={serverId} range={range} refreshKey={refreshKey} />
+      <LokiLogViewer token={token} pinnedSelector={`server_id="${serverId}"`} title="Server logs" />
     </div>
   );
 }
@@ -2002,67 +2043,6 @@ function ServerChart({
               ))}
             </LineChart>
           </ResponsiveContainer>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ServerLokiLogs({
-  token,
-  serverId,
-  range,
-  refreshKey
-}: {
-  token: string;
-  serverId: string;
-  range: MonRange;
-  refreshKey: number;
-}) {
-  const [rows, setRows] = useState<{ ns: string; line: string; stderr: boolean }[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const sid = promLabel(serverId);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const end = monNowSec();
-      const start = end - range.seconds;
-      const resp = await lokiQueryRange(token, `{server_id="${sid}"}`, start, end, { limit: 300, direction: "backward" });
-      setRows(flattenLokiStreams(resp?.data?.result ?? []));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Query failed");
-      setRows([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [token, sid, range.seconds]);
-
-  useEffect(() => {
-    void load();
-  }, [load, refreshKey]);
-
-  return (
-    <div className="rounded-2xl border border-edge bg-surface">
-      <div className="flex items-center gap-2 border-b border-edge px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted">
-        <ScrollText size={14} /> Shipped logs {rows.length > 0 ? `(${rows.length})` : ""}
-      </div>
-      <div className="max-h-[420px] overflow-auto p-2 font-mono text-xs leading-relaxed">
-        {loading ? (
-          <div className="flex items-center gap-2 px-2 py-6 font-sans text-muted"><Loader2 size={14} className="animate-spin" /> Loading logs…</div>
-        ) : error ? (
-          <div className="flex items-center gap-2 px-2 py-6 font-sans text-sm font-medium text-danger"><AlertTriangle size={15} /> {error}</div>
-        ) : rows.length === 0 ? (
-          <div className="px-2 py-6 font-sans text-sm text-muted">No logs shipped yet — enable log shipping.</div>
-        ) : (
-          rows.map((row, index) => (
-            <div key={`${row.ns}-${index}`} className={`flex gap-3 whitespace-pre-wrap break-all rounded px-2 py-0.5 ${row.stderr ? "text-red-600 dark:text-red-400" : "text-fg"}`}>
-              <span className="shrink-0 select-none text-muted">{nsToClockMon(row.ns)}</span>
-              <span className="min-w-0 flex-1">{row.line}</span>
-            </div>
-          ))
         )}
       </div>
     </div>

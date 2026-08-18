@@ -64,8 +64,8 @@ COPY --from=ui /app/out ./static
 # from the image's content and permissions at that path.
 RUN groupadd --gid 10001 inframonitor \
  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin inframonitor \
- && mkdir -p /app/data \
- && chown -R inframonitor:inframonitor /app/data
+ && mkdir -p /app/data /app/custom-rules \
+ && chown -R inframonitor:inframonitor /app/data /app/custom-rules
 
 USER inframonitor
 

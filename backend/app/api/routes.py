@@ -28,6 +28,7 @@ from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_KEYS, ROLE_MENUS_KEY, menus_for_role
 from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, require_user_not_guest, verify_password
 from app.services.secrets import VaultError, get_vault_config, load_credentials, save_vault_config, store_credentials, test_vault
+from app.services import alert_rules
 from app.services import db_backend
 from app.services import db_backup
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, DbQueryHistory, Folder, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
@@ -68,9 +69,11 @@ from app.schemas.contracts import (
     FolderRead,
     IntegrationStatus,
     ActionResult,
+    AlertRuleCreate,
     KubeClusterCreate,
     KubeClusterRead,
     KubeClusterUpdate,
+    KubeLogShippingUpdate,
     KubeCordonRequest,
     KubeDeployment,
     KubeEvent,
@@ -147,6 +150,7 @@ from app.services.ssh_ops import (
     container_env_file,
     container_logs,
     deploy_war,
+    detect_log_capabilities,
     discover_host,
     discover_tomcat,
     list_containers_with_ports,
@@ -1911,6 +1915,56 @@ def update_log_shipping(server_id: str, payload: LogShippingUpdate, _: dict = De
     )
 
 
+@router.get("/servers/{server_id}/log-capabilities", response_model=None)
+def server_log_capabilities(server_id: str, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+    """Detect which log-producing systems this host runs (nginx/docker/podman/kubernetes) and
+    suggest log sources. One cheap SSH probe; returns all-false on any SSH failure (never 500s)."""
+    server = _server_or_404(db, server_id, claims)
+    return detect_log_capabilities(server, _credentials_for(db, server, CredentialPayload()))
+
+
+# --- user-defined Prometheus alert rules (feature/custom-alerts) ---------------------------
+# Written to a file shared with the Prometheus container; Prometheus is reloaded via /-/reload so
+# changes apply without a restart. Reads are require_user; mutations are require_admin.
+
+
+@router.get("/monitoring/alerts/rules", response_model=None)
+def list_alert_rules(_: dict = Depends(require_user)) -> list[dict]:
+    return alert_rules.list_rules()
+
+
+@router.get("/monitoring/alerts/templates", response_model=None)
+def alert_rule_templates(_: dict = Depends(require_user)) -> list[dict]:
+    return alert_rules.TEMPLATES
+
+
+@router.post("/monitoring/alerts/rules", response_model=None, status_code=status.HTTP_201_CREATED)
+def add_alert_rule(payload: AlertRuleCreate, _: dict = Depends(require_admin)) -> dict:
+    try:
+        alert_rules.add_rule(
+            alert_rules.AlertRule(
+                name=payload.name.strip(),
+                expr=payload.expr.strip(),
+                for_duration=(payload.for_duration or "5m").strip(),
+                severity=(payload.severity or "warning").strip(),
+                summary=payload.summary.strip(),
+                description=payload.description.strip(),
+            )
+        )
+    except alert_rules.AlertRuleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {"ok": True, "message": f"Alert rule {payload.name} added"}
+
+
+@router.delete("/monitoring/alerts/rules/{name}", response_model=None)
+def delete_alert_rule(name: str, _: dict = Depends(require_admin)) -> dict:
+    try:
+        alert_rules.delete_rule(name)
+    except alert_rules.AlertRuleError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return {"ok": True, "message": f"Alert rule {name} deleted"}
+
+
 @router.get("/servers/{server_id}/monitoring", response_model=ServerMonitoringState)
 async def server_monitoring_state(server_id: str, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> ServerMonitoringState:
     server = _server_or_404(db, server_id, claims)
@@ -3173,8 +3227,18 @@ def _cluster_read(db: Session, cluster: KubeCluster) -> KubeClusterRead:
         default_namespace=cluster.default_namespace,
         group=_cluster_group_name(db, cluster),
         has_credentials=bool(cluster.encrypted_kubeconfig or cluster.encrypted_token),
+        log_shipping_enabled=bool(getattr(cluster, "log_shipping_enabled", False)),
+        log_namespaces=_cluster_namespaces(cluster),
         created_at=cluster.created_at,
     )
+
+
+def _cluster_namespaces(cluster: KubeCluster) -> list[str]:
+    try:
+        value = json.loads(getattr(cluster, "log_namespaces_json", "") or "[]")
+        return [str(n) for n in value] if isinstance(value, list) else []
+    except (ValueError, TypeError):
+        return []
 
 
 def _cluster_conn(cluster: KubeCluster) -> dict:
@@ -3205,6 +3269,19 @@ def list_kube_clusters(_: dict = Depends(require_user), db: Session = Depends(ge
     # Cheap: reads rows only, never probes a cluster.
     clusters = db.scalars(select(KubeCluster).order_by(func.lower(KubeCluster.name))).all()
     return [_cluster_read(db, cluster) for cluster in clusters]
+
+
+@router.put("/kube/clusters/{cluster_id}/log-shipping", response_model=KubeClusterRead)
+def update_kube_log_shipping(cluster_id: str, payload: KubeLogShippingUpdate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> KubeClusterRead:
+    # Enable/disable tailing this cluster's pod logs into Loki (namespaces=[] means all). The
+    # background driver (app.main._k8s_log_shipping_loop) picks up enabled clusters each sweep.
+    cluster = _cluster_or_404(db, cluster_id)
+    namespaces = [str(n).strip() for n in (payload.namespaces or []) if str(n).strip()]
+    cluster.log_shipping_enabled = bool(payload.enabled)
+    cluster.log_namespaces_json = json.dumps(namespaces)
+    db.commit()
+    db.refresh(cluster)
+    return _cluster_read(db, cluster)
 
 
 @router.post("/kube/clusters", response_model=KubeClusterRead, status_code=status.HTTP_201_CREATED)

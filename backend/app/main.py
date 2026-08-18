@@ -20,7 +20,7 @@ from app.core.config import Settings, get_settings
 from app.core.database import Base, SessionLocal, engine
 from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_MENUS_KEY
 from app.core.security import SEEDED_GUEST_EMAIL, hash_password, verify_password
-from app.models.entities import AppSetting, DbConnection, Role, Server, User
+from app.models.entities import AppSetting, DbConnection, KubeCluster, Role, Server, User
 
 
 settings = get_settings()
@@ -149,6 +149,42 @@ def _migrate_db_connection_columns() -> None:
         for name, default in missing:
             ddl_type, literal = _db_connection_ddl(name, default)
             conn.execute(text(f"ALTER TABLE db_connections ADD COLUMN {name} {ddl_type} DEFAULT {literal}"))
+
+
+# (column name, SQL default) for kube_clusters columns added after the first release -- the
+# log-shipping pair, mirroring the Server ones. Same compile-the-type-from-the-ORM approach.
+EXPECTED_KUBE_CLUSTER_COLUMNS: list[tuple[str, str]] = [
+    ("log_shipping_enabled", "0"),
+    ("log_namespaces_json", "'[]'"),
+]
+
+
+def _kube_cluster_ddl(name: str, default: str) -> tuple[str, str]:
+    column = KubeCluster.__table__.columns.get(name)
+    if column is None:
+        return "TEXT", default
+    ddl_type = column.type.compile(dialect=engine.dialect)
+    literal = default
+    if column.type.python_type is bool and default in ("0", "false", "False"):
+        literal = "false" if engine.dialect.name == "postgresql" else "0"
+    return ddl_type, literal
+
+
+def _migrate_kube_cluster_columns() -> None:
+    # kube_clusters is created by create_all() on a fresh install; an older table needs the
+    # log-shipping columns ALTERed in. No-op once both exist. Same dialect-correct DDL as the
+    # servers/db_connections migrations above.
+    inspector = inspect(engine)
+    if "kube_clusters" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("kube_clusters")}
+    missing = [entry for entry in EXPECTED_KUBE_CLUSTER_COLUMNS if entry[0] not in existing]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for name, default in missing:
+            ddl_type, literal = _kube_cluster_ddl(name, default)
+            conn.execute(text(f"ALTER TABLE kube_clusters ADD COLUMN {name} {ddl_type} DEFAULT {literal}"))
 
 
 def _ensure_shell_favorites_unique() -> None:
@@ -381,11 +417,60 @@ async def _log_shipping_loop(interval: int) -> None:
             continue
 
 
+async def _k8s_log_shipping_loop(interval: int) -> None:
+    """Periodically tail Kubernetes pod logs into Loki, for clusters with shipping enabled.
+
+    Mirrors _log_shipping_loop: runs in a worker thread (the kube client + Loki push are blocking),
+    each pass with its own DB session, every failure swallowed, cancellation-clean on shutdown.
+    """
+    from app.core.crypto import decrypt_secret
+    from app.services.k8s_log_shipper import ship_cluster_once
+
+    def _conn(cluster: KubeCluster) -> dict:
+        return {
+            "auth_method": cluster.auth_method,
+            "api_server_url": cluster.api_server_url,
+            "kubeconfig": decrypt_secret(cluster.encrypted_kubeconfig),
+            "token": decrypt_secret(cluster.encrypted_token),
+            "ca_cert": cluster.ca_cert,
+            "verify_tls": bool(cluster.verify_tls),
+        }
+
+    loki_url = (settings.loki_url or "").strip()
+    while True:
+        try:
+            await asyncio.sleep(interval)
+
+            def _run() -> None:
+                with SessionLocal() as db:
+                    clusters = db.scalars(
+                        select(KubeCluster).where(KubeCluster.log_shipping_enabled.is_(True))
+                    ).all()
+                    for cluster in clusters:
+                        try:
+                            namespaces = json.loads(cluster.log_namespaces_json or "[]")
+                            if not isinstance(namespaces, list):
+                                namespaces = []
+                        except (ValueError, TypeError):
+                            namespaces = []
+                        try:
+                            ship_cluster_once(_conn(cluster), cluster.public_id, cluster.name, namespaces, loki_url)
+                        except Exception:
+                            continue
+
+            await asyncio.to_thread(_run)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            continue
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
     _migrate_server_columns()
     _migrate_db_connection_columns()
+    _migrate_kube_cluster_columns()
     _ensure_shell_favorites_unique()
     _backfill_public_ids()
     _seed_defaults()
@@ -398,15 +483,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     interval = settings.log_ship_interval_seconds
     if (settings.loki_url or "").strip() and interval > 0:
         ship_task = asyncio.create_task(_log_shipping_loop(interval))
+    # Kubernetes pod-log driver: same gating, its own interval. Only ships from clusters that have
+    # log shipping enabled (the loop no-ops otherwise), so it is cheap to leave running.
+    k8s_ship_task: asyncio.Task | None = None
+    k8s_interval = settings.k8s_log_ship_interval_seconds
+    if (settings.loki_url or "").strip() and k8s_interval > 0:
+        k8s_ship_task = asyncio.create_task(_k8s_log_shipping_loop(k8s_interval))
     try:
         yield
     finally:
-        if ship_task is not None:
-            ship_task.cancel()
-            try:
-                await ship_task
-            except asyncio.CancelledError:
-                pass
+        for task in (ship_task, k8s_ship_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)

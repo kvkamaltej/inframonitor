@@ -1302,6 +1302,10 @@ export type KubeCluster = {
   // credentials are write-only: the API never echoes the kubeconfig/token back, so the read
   // shape reports whether any are stored rather than the values themselves
   has_credentials: boolean;
+  // feature/k8s-log-shipping: whether this cluster's pod logs are tailed into Loki, and which
+  // namespaces ([] = all).
+  log_shipping_enabled: boolean;
+  log_namespaces: string[];
   created_at: string;
 };
 
@@ -1712,5 +1716,80 @@ export async function setServerLogShipping(
   return request<ServerMonitoringActionResult>(`/servers/${encodeURIComponent(serverId)}/monitoring/log-shipping`, token, {
     method: "PUT",
     body: JSON.stringify({ enabled, sources })
+  });
+}
+
+// --- detected log capabilities (feature/log-capabilities) ----------------------------------
+// One SSH probe per server: which log-producing systems it runs, plus suggested log sources
+// (e.g. nginx access/error files) the log-shipping picker can offer.
+export type ServerLogCapabilities = {
+  nginx: boolean;
+  docker: boolean;
+  podman: boolean;
+  kubernetes: boolean;
+  suggested_sources: ServerLogSource[];
+};
+
+export async function getServerLogCapabilities(token: string, serverId: string): Promise<ServerLogCapabilities> {
+  return request<ServerLogCapabilities>(`/servers/${encodeURIComponent(serverId)}/log-capabilities`, token);
+}
+
+// --- user-defined Prometheus alert rules (feature/custom-alerts) ----------------------------
+export type AlertRule = {
+  name: string;
+  expr: string;
+  for: string;
+  severity: string;
+  summary: string;
+  description: string;
+};
+
+// A prefillable template returned by the API. `requires` is present when the rule needs an
+// exporter that may not be installed (e.g. the nginx timeout rule).
+export type AlertTemplate = {
+  key: string;
+  name: string;
+  expr: string;
+  for: string;
+  severity: string;
+  summary: string;
+  description: string;
+  requires?: string;
+};
+
+export async function listAlertRules(token: string): Promise<AlertRule[]> {
+  return request<AlertRule[]>("/monitoring/alerts/rules", token);
+}
+
+export async function getAlertTemplates(token: string): Promise<AlertTemplate[]> {
+  return request<AlertTemplate[]>("/monitoring/alerts/templates", token);
+}
+
+export async function addAlertRule(
+  token: string,
+  rule: { name: string; expr: string; for_duration: string; severity: string; summary: string; description: string }
+): Promise<{ ok: boolean; message: string }> {
+  return request<{ ok: boolean; message: string }>("/monitoring/alerts/rules", token, {
+    method: "POST",
+    body: JSON.stringify(rule)
+  });
+}
+
+export async function deleteAlertRule(token: string, name: string): Promise<{ ok: boolean; message: string }> {
+  return request<{ ok: boolean; message: string }>(`/monitoring/alerts/rules/${encodeURIComponent(name)}`, token, {
+    method: "DELETE"
+  });
+}
+
+// --- kubernetes cluster log shipping (feature/k8s-log-shipping) ------------------------------
+export async function setClusterLogShipping(
+  token: string,
+  clusterId: string,
+  enabled: boolean,
+  namespaces: string[]
+): Promise<KubeCluster> {
+  return request<KubeCluster>(`/kube/clusters/${encodeURIComponent(clusterId)}/log-shipping`, token, {
+    method: "PUT",
+    body: JSON.stringify({ enabled, namespaces })
   });
 }

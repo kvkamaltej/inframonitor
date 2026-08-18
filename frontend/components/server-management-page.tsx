@@ -135,12 +135,15 @@ function compareIp(left: string, right: string): number {
 }
 
 function distinctValues(servers: Server[], pick: (server: Server) => string): string[] {
-  const seen = new Set<string>();
+  // Dedupe case-insensitively — "Production" and "production" are the same environment, so the
+  // filter dropdown must list it once. Keep the first display label seen for each value; a plain
+  // Set keyed on the raw string would let case variants through as visible duplicates.
+  const byKey = new Map<string, string>();
   servers.forEach((server) => {
     const value = (pick(server) || "").trim();
-    if (value) seen.add(value);
+    if (value && !byKey.has(value.toLowerCase())) byKey.set(value.toLowerCase(), value);
   });
-  return Array.from(seen).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  return Array.from(byKey.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 }
 
 // Pure sort, returning a new array so it can be applied per-group without mutating shared state.

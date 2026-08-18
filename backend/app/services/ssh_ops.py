@@ -431,7 +431,8 @@ if command -v systemctl >/dev/null 2>&1; then
       'mssql-server*.service' 'oracle*.service' 'clickhouse-server*.service' \
       'cassandra*.service' 'influxd*.service' 'couchdb*.service' 'elasticsearch*.service' \
       'rabbitmq-server*.service' 'kafka*.service' 'nginx*.service' 'apache2*.service' \
-      'httpd*.service' 'haproxy*.service' 2>/dev/null
+      'httpd*.service' 'haproxy*.service' 'kubelet.service' 'k3s.service' \
+      'k3s-agent.service' 'containerd.service' 'crio.service' 2>/dev/null
   }
   # The first field of list-units can be a status bullet, so pick the .service field rather
   # than assuming column 1; drop bare templates, which cannot be queried for state.
@@ -2694,6 +2695,54 @@ def service_logs(server: Server, credentials: CredentialPayload, source: str, na
         inner = f"tail -n {safe_tail} -- $LOGPATH"
         output = run_command(server, credentials, f"LOGPATH={_q(name_or_path)} sh -c {_q(inner)}")
     return output.splitlines()
+
+
+# One cheap probe that reports which log-producing systems a host runs, so the log-shipping
+# picker can pre-offer sources. Every check is guarded (`command -v`, `test -f`,
+# `2>/dev/null || true`) so a missing binary or unreadable path never aborts the snippet, and
+# the whole thing stays in a single round trip. kubernetes counts if any of kubectl, k3s or an
+# active kubelet is present. The nginx log-path checks are fixed literals, never request input.
+_LOG_CAPS_SH = r"""
+command -v nginx  >/dev/null 2>&1 && echo NGINX=1  || echo NGINX=0
+command -v docker >/dev/null 2>&1 && echo DOCKER=1 || echo DOCKER=0
+command -v podman >/dev/null 2>&1 && echo PODMAN=1 || echo PODMAN=0
+if command -v kubectl >/dev/null 2>&1 || command -v k3s >/dev/null 2>&1 \
+   || systemctl is-active --quiet kubelet 2>/dev/null; then echo KUBERNETES=1; else echo KUBERNETES=0; fi
+test -f /var/log/nginx/access.log && echo NGINX_ACCESS=1 || echo NGINX_ACCESS=0
+test -f /var/log/nginx/error.log  && echo NGINX_ERROR=1  || echo NGINX_ERROR=0
+"""
+
+
+def detect_log_capabilities(server: Server, credentials: CredentialPayload) -> dict:
+    """Report which log-producing systems a host runs, plus concrete log sources to offer.
+
+    Runs a single cheap SSH probe. Returns a dict of booleans (``nginx``, ``docker``,
+    ``podman``, ``kubernetes``) and a ``suggested_sources`` list of ready-to-use picks
+    (``{"source", "name_or_path", "label"}``). Container runtimes set only their boolean --
+    enumerating containers is a separate call. Never raises: any SSH failure yields the
+    all-false shape with no suggestions.
+    """
+    caps = {"nginx": False, "docker": False, "podman": False, "kubernetes": False}
+    suggested: list[dict] = []
+    try:
+        output = run_command(server, credentials, f"sh -c {_q(_LOG_CAPS_SH)}")
+    except SshOperationError:
+        return {**caps, "suggested_sources": suggested}
+    flags: dict[str, str] = {}
+    for line in output.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            flags[key.strip()] = value.strip()
+    caps["nginx"] = flags.get("NGINX") == "1"
+    caps["docker"] = flags.get("DOCKER") == "1"
+    caps["podman"] = flags.get("PODMAN") == "1"
+    caps["kubernetes"] = flags.get("KUBERNETES") == "1"
+    if caps["nginx"]:
+        if flags.get("NGINX_ACCESS") == "1":
+            suggested.append({"source": "file", "name_or_path": "/var/log/nginx/access.log", "label": "nginx access log"})
+        if flags.get("NGINX_ERROR") == "1":
+            suggested.append({"source": "file", "name_or_path": "/var/log/nginx/error.log", "label": "nginx error log"})
+    return {**caps, "suggested_sources": suggested}
 
 
 def restart_container(server: Server, credentials: CredentialPayload, runtime: str, container: str) -> str:
