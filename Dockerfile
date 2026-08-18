@@ -38,6 +38,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# postgresql-client provides pg_dump / pg_restore / psql for the database backup & restore feature
+# (app/services/db_backup.py shells out to them). Installed lean: no recommends, apt lists removed.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -11,8 +11,10 @@ import {
   ChevronRight,
   Copy,
   DownloadCloud,
+  FileSpreadsheet,
   Loader2,
-  Table2
+  Table2,
+  Timer
 } from "lucide-react";
 import { downloadTextFile } from "@/lib/download";
 import type { DbQueryResult } from "@/lib/api";
@@ -73,6 +75,45 @@ function buildJson(columns: string[], rows: unknown[][]): string {
     return obj;
   });
   return JSON.stringify(objects, null, 2);
+}
+
+// Escape a value for embedding in HTML. Used by the Excel export, which is an HTML <table> saved
+// with a .xls extension — a format Excel opens natively without any third-party library.
+function htmlEscape(value: unknown): string {
+  const text = isNull(value) ? "" : cellText(value);
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// Build a SpreadsheetML-flavoured HTML workbook. The MSO XML comment names the worksheet; Excel
+// (and LibreOffice) parse the <table> for the data. `mso-number-format:'@'` keeps every cell as
+// text so long numeric ids aren't reformatted into scientific notation on open.
+function buildExcelHtml(columns: string[], rows: unknown[][]): string {
+  const head = columns.map((c) => `<th style="background:#f0f0f0;font-weight:bold">${htmlEscape(c)}</th>`).join("");
+  const body = rows
+    .map((row) => `<tr>${columns.map((_, i) => `<td style="mso-number-format:'\\@'">${htmlEscape(row[i])}</td>`).join("")}</tr>`)
+    .join("");
+  return (
+    `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" ` +
+    `xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8">` +
+    `<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>` +
+    `<x:Name>Query Result</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>` +
+    `</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--></head><body>` +
+    `<table border="1"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></body></html>`
+  );
+}
+
+// Download arbitrary text as a blob of the given mimetype. downloadTextFile hardcodes text/plain,
+// so the Excel export needs its own path to set application/vnd.ms-excel.
+function downloadBlob(filename: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 // Copy text to the clipboard, falling back to a hidden textarea + execCommand for plain
@@ -154,18 +195,30 @@ export function DbResultGrid({ result, error, onFetchAll, fetching }: DbResultGr
     return copy;
   }, [rows, sortCol, sortDir]);
 
+  // Reset to the first page when the result identity, page size, or sort changes. Done DURING render
+  // (the "derive from props" pattern) rather than in a post-commit useEffect: the old effect reset
+  // page a frame late, so replacing a result while on a high page painted a stale (clamped-to-the-
+  // new-last) page for one frame before snapping to page 1, and the raw `page` state could drift out
+  // of range of the Prev/Next handlers. Tracking the trigger here keeps `page` in range every render.
+  const sortKey = `${sortCol}:${sortDir}`;
+  const [prevResult, setPrevResult] = useState(result);
+  const [prevPageSize, setPrevPageSize] = useState<PageSize>(pageSize);
+  const [prevSortKey, setPrevSortKey] = useState(sortKey);
+  if (result !== prevResult || pageSize !== prevPageSize || sortKey !== prevSortKey) {
+    setPrevResult(result);
+    setPrevPageSize(pageSize);
+    setPrevSortKey(sortKey);
+    setPage(0);
+  }
+
   // --- client-side pagination over the fetched (and sorted) rows ---
   const perPage = pageSize === "all" ? sortedRows.length || 1 : Number(pageSize);
   const totalPages = pageSize === "all" ? 1 : Math.max(1, Math.ceil(sortedRows.length / perPage));
-  const clampedPage = Math.min(page, totalPages - 1);
+  // Clamp into [0, totalPages-1] every render so a stranded `page` can never over-run the data.
+  const clampedPage = Math.max(0, Math.min(page, totalPages - 1));
   const startIdx = pageSize === "all" ? 0 : clampedPage * perPage;
   const endIdx = pageSize === "all" ? sortedRows.length : Math.min(startIdx + perPage, sortedRows.length);
   const pageRows = pageSize === "all" ? sortedRows : sortedRows.slice(startIdx, endIdx);
-
-  // A new result set, a page-size change, or a re-sort resets to the first page.
-  useEffect(() => {
-    setPage(0);
-  }, [result, pageSize, sortCol, sortDir]);
 
   function toggleSort(index: number) {
     if (sortCol !== index) {
@@ -233,12 +286,23 @@ export function DbResultGrid({ result, error, onFetchAll, fetching }: DbResultGr
           <Braces size={14} />
           JSON
         </ToolbarButton>
+        <ToolbarButton
+          onClick={() => downloadBlob("query-result.xls", buildExcelHtml(columns, sortedRows), "application/vnd.ms-excel")}
+          title="Export Excel (.xls)"
+        >
+          <FileSpreadsheet size={14} />
+          Excel
+        </ToolbarButton>
       </div>
 
       <div className="max-h-[55vh] overflow-auto">
         <table className="w-full border-collapse text-left">
           <thead className="sticky top-0 z-10 bg-surface text-xs uppercase tracking-wider text-muted">
             <tr>
+              {/* leading row-number column: not sortable, visually muted, excluded from exports */}
+              <th className="w-12 select-none whitespace-nowrap border-b border-r border-edge px-3 py-2 text-right font-semibold text-muted/70">
+                #
+              </th>
               {columns.map((col, index) => {
                 const active = sortCol === index;
                 return (
@@ -261,6 +325,10 @@ export function DbResultGrid({ result, error, onFetchAll, fetching }: DbResultGr
           <tbody>
             {pageRows.map((row, rIndex) => (
               <tr key={startIdx + rIndex} className="odd:bg-elevated/40 hover:bg-elevated">
+                {/* 1-based row number continuing across pages via the current page offset */}
+                <td className="w-12 select-none whitespace-nowrap border-b border-r border-edge px-3 py-1.5 text-right font-mono text-xs tabular-nums text-muted/70">
+                  {startIdx + rIndex + 1}
+                </td>
                 {columns.map((_, cIndex) => {
                   const value = row[cIndex];
                   if (isNull(value)) {
@@ -287,9 +355,10 @@ export function DbResultGrid({ result, error, onFetchAll, fetching }: DbResultGr
         </table>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-edge px-3 py-2 text-xs text-muted">
-        <span className="font-medium text-fg">
-          {result.row_count} rows • {result.elapsed_ms} ms
+      <div className="sticky bottom-0 z-20 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-edge bg-surface px-3 py-2 text-xs text-muted">
+        <span className="font-medium text-fg">{result.row_count} rows</span>
+        <span className="inline-flex items-center gap-1 font-medium text-fg" title="Query execution time">
+          <Timer size={13} className="text-muted" /> {result.elapsed_ms} ms
         </span>
         {sortedRows.length > 0 ? (
           <span>
@@ -330,7 +399,7 @@ export function DbResultGrid({ result, error, onFetchAll, fetching }: DbResultGr
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              onClick={() => setPage(Math.max(0, clampedPage - 1))}
               disabled={clampedPage <= 0}
               title="Previous page"
               className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted ring-1 ring-edge transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40"
@@ -342,7 +411,7 @@ export function DbResultGrid({ result, error, onFetchAll, fetching }: DbResultGr
             </span>
             <button
               type="button"
-              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              onClick={() => setPage(Math.min(totalPages - 1, clampedPage + 1))}
               disabled={clampedPage >= totalPages - 1}
               title="Next page"
               className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted ring-1 ring-edge transition-colors hover:bg-elevated hover:text-fg disabled:opacity-40"

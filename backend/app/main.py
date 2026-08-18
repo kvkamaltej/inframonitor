@@ -86,21 +86,47 @@ def _migrate_server_columns() -> None:
             )
 
 
+# (column name, SQL default) for db_connections columns added after the first release. The DDL
+# *type* is compiled from the ORM column for the connected dialect, exactly like the servers loop
+# above, so the same statements are correct on SQLite and PostgreSQL.
+EXPECTED_DB_CONNECTION_COLUMNS: list[tuple[str, str]] = [
+    ("environment", "''"),
+    # feature/db-connect follow-on: browse every database on the server, not just the connection's
+    # own `database`. A boolean, so the DEFAULT literal is dialect-specific -- see _db_connection_ddl.
+    ("show_all_databases", "0"),
+]
+
+
+def _db_connection_ddl(name: str, default: str) -> tuple[str, str]:
+    # Render the DDL type from the ORM column, and fix up the default literal for the dialect: a
+    # BOOLEAN column takes DEFAULT false on PostgreSQL and DEFAULT 0 on SQLite/MySQL, so a bare "0"
+    # would be rejected by PostgreSQL. Text/varchar defaults ('') are spelled the same everywhere.
+    column = DbConnection.__table__.columns.get(name)
+    if column is None:
+        return "VARCHAR(32)", default
+    ddl_type = column.type.compile(dialect=engine.dialect)
+    literal = default
+    if column.type.python_type is bool and default in ("0", "false", "False"):
+        literal = "false" if engine.dialect.name == "postgresql" else "0"
+    return ddl_type, literal
+
+
 def _migrate_db_connection_columns() -> None:
-    # db_connections is created by create_all() on a fresh install (with the environment column
-    # already present), but a database whose db_connections table predates the column needs it
-    # ALTERed in. Same compile-the-type-from-the-ORM approach as _migrate_server_columns so the
-    # DDL is correct on SQLite and PostgreSQL alike. A no-op once the column exists.
+    # db_connections is created by create_all() on a fresh install (with all columns already
+    # present), but a database whose db_connections table predates a column needs it ALTERed in.
+    # Same compile-the-type-from-the-ORM approach as _migrate_server_columns so the DDL is correct
+    # on SQLite and PostgreSQL alike. A no-op once every column exists.
     inspector = inspect(engine)
     if "db_connections" not in inspector.get_table_names():
         return
     existing = {column["name"] for column in inspector.get_columns("db_connections")}
-    if "environment" in existing:
+    missing = [entry for entry in EXPECTED_DB_CONNECTION_COLUMNS if entry[0] not in existing]
+    if not missing:
         return
-    column = DbConnection.__table__.columns.get("environment")
-    ddl_type = column.type.compile(dialect=engine.dialect) if column is not None else "VARCHAR(32)"
     with engine.begin() as conn:
-        conn.execute(text(f"ALTER TABLE db_connections ADD COLUMN environment {ddl_type} DEFAULT ''"))
+        for name, default in missing:
+            ddl_type, literal = _db_connection_ddl(name, default)
+            conn.execute(text(f"ALTER TABLE db_connections ADD COLUMN {name} {ddl_type} DEFAULT {literal}"))
 
 
 def _ensure_shell_favorites_unique() -> None:

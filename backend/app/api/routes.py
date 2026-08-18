@@ -6,8 +6,10 @@ from typing import Any
 from urllib.parse import quote
 
 import json
+import os
 import posixpath
 import re
+import tempfile
 import threading
 import uuid
 
@@ -16,7 +18,8 @@ import asyncio
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -26,6 +29,7 @@ from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_KEYS, ROLE_MENUS
 from app.core.security import SEEDED_GUEST_EMAIL, create_access_token, decode_token, guest_claims, hash_password, is_loopback_client, require_admin, require_admin_not_guest, require_admin_or_developer, require_user, require_user_not_guest, verify_password
 from app.services.secrets import VaultError, get_vault_config, load_credentials, save_vault_config, store_credentials, test_vault
 from app.services import db_backend
+from app.services import db_backup
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, DbQueryHistory, Folder, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
@@ -58,6 +62,7 @@ from app.schemas.contracts import (
     DbQueryResult,
     DbRoutine,
     DbSchema,
+    DbSchemaRenameRequest,
     DbTable,
     FolderCreate,
     FolderRead,
@@ -2308,7 +2313,7 @@ _DB_MAX_ROW_LIMIT = 5000
 def _db_engine_or_400(engine: str) -> str:
     normalized = (engine or "").strip().lower()
     if normalized not in ENGINES:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Engine must be postgres, mysql, or sqlite")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Engine must be postgres, mysql, sqlite, or mssql")
     return normalized
 
 
@@ -2374,6 +2379,7 @@ def _db_connection_read(db: Session, conn: DbConnection) -> DbConnectionRead:
         username=conn.username,
         database=conn.database,
         environment=conn.environment or "",
+        show_all_databases=bool(conn.show_all_databases),
         group=_db_connection_group_name(db, conn),
         has_password=bool(conn.encrypted_password),
         created_at=conn.created_at,
@@ -2410,6 +2416,7 @@ def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_
         encrypted_password=encrypt_secret(payload.password),
         database=payload.database,
         environment=(payload.environment or "").strip(),
+        show_all_databases=bool(payload.show_all_databases),
         folder_id=_resolve_group_to_folder_id(db, payload.group),
     )
     db.add(conn)
@@ -2463,6 +2470,8 @@ def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dic
         conn.database = data["database"]
     if "environment" in data and data["environment"] is not None:
         conn.environment = data["environment"].strip()
+    if "show_all_databases" in data and data["show_all_databases"] is not None:
+        conn.show_all_databases = bool(data["show_all_databases"])
     # password: only overwrite when a non-empty value is supplied, so an edit that leaves the box
     # blank keeps the stored credential instead of wiping it (mirrors the kube secret handling).
     if data.get("password"):
@@ -2667,6 +2676,146 @@ def generate_db_connection_sql(connection_id: str, payload: DbGenerateSqlRequest
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return DbGenerateSqlResult(sql=sql)
+
+
+# --- schema rename / backup / restore (admin DDL + pg client) -------------------------------
+#
+# Mutating operations, so unlike the read-only browsing routes above these require an admin (not a
+# desktop guest). Schema rename is PostgreSQL-only DDL; backup/restore shell out to the pg client
+# binaries via app.services.db_backup. Every other engine returns a clean 400.
+
+# A schema name is a plain SQL identifier once validated; this is stricter than the SQL grammar on
+# purpose (no spaces, no quotes) so the value can be safely quoted into an ALTER SCHEMA statement.
+_DB_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# hard cap on an uploaded restore file, enforced while streaming it to a temp file.
+_DB_RESTORE_MAX_BYTES = 200 * 1024 * 1024
+
+
+@router.post("/db/connections/{connection_id}/schemas/{schema}/rename", response_model=ActionResult)
+def rename_db_connection_schema(
+    connection_id: str,
+    schema: str,
+    payload: DbSchemaRenameRequest,
+    database: str | None = None,
+    claims: dict = Depends(require_admin_not_guest),
+    db: Session = Depends(get_db),
+) -> ActionResult:
+    conn = _db_connection_or_404(db, connection_id)
+    if conn.engine != "postgres":
+        # mysql schemas are databases; sqlite/mssql schema rename is not offered here.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Renaming a schema is not supported for {conn.engine}")
+    new_name = payload.new_name.strip()
+    if not _DB_IDENT_RE.match(new_name) or len(new_name) > 63:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New schema name must be a plain identifier (letters, digits, underscore)")
+    # new_name is validated above; schema comes from the URL. Both are double-quoted (with any
+    # embedded quote doubled) so the statement is a safe, exact identifier rename.
+    quoted_old = '"' + schema.replace('"', '""') + '"'
+    quoted_new = '"' + new_name.replace('"', '""') + '"'
+    sql = f"ALTER SCHEMA {quoted_old} RENAME TO {quoted_new}"
+    try:
+        db_console.execute_ddl(*_db_meta_args(conn, database), sql)
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    db.add(AuditLog(
+        actor=claims.get("sub", ""),
+        action="db.schema.rename",
+        resource_type="db_connection",
+        resource_id=conn.public_id,
+        details=f"Renamed schema {schema} to {new_name} on {conn.name}"[:2000],
+        server_id=None,
+    ))
+    db.commit()
+    return ActionResult(ok=True, message=f"Schema {schema} renamed to {new_name}")
+
+
+def _db_backup_fields(conn: DbConnection) -> dict:
+    return {
+        "host": conn.host,
+        "port": conn.port,
+        "username": conn.username,
+        "password": decrypt_secret(conn.encrypted_password),
+    }
+
+
+@router.post("/db/connections/{connection_id}/backup")
+def backup_db_connection(
+    connection_id: str,
+    database: str | None = None,
+    claims: dict = Depends(require_admin_not_guest),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    conn = _db_connection_or_404(db, connection_id)
+    if conn.engine != "postgres":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Backup is not supported for {conn.engine}")
+    effective_database = database or conn.database
+    try:
+        path, filename = db_backup.backup(_db_backup_fields(conn), effective_database)
+    except DbConsoleError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    db.add(AuditLog(
+        actor=claims.get("sub", ""),
+        action="db.backup",
+        resource_type="db_connection",
+        resource_id=conn.public_id,
+        details=f"Backed up database {effective_database} on {conn.name}"[:2000],
+        server_id=None,
+    ))
+    db.commit()
+    # stream the dump as an attachment and delete the temp file once the response is finished.
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=filename,
+        background=BackgroundTask(db_backup._safe_remove, path),
+    )
+
+
+@router.post("/db/connections/{connection_id}/restore", response_model=ActionResult)
+def restore_db_connection(
+    connection_id: str,
+    database: str | None = None,
+    file: UploadFile = File(...),
+    claims: dict = Depends(require_admin_not_guest),
+    db: Session = Depends(get_db),
+) -> ActionResult:
+    conn = _db_connection_or_404(db, connection_id)
+    if conn.engine != "postgres":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Restore is not supported for {conn.engine}")
+    effective_database = database or conn.database
+
+    # stream the upload to a temp file with a hard size cap, so a huge upload cannot exhaust memory
+    # or disk. The temp file is always removed, success or failure.
+    fd, tmp_path = tempfile.mkstemp(prefix="pgrestore_", suffix=".dump")
+    total = 0
+    try:
+        with os.fdopen(fd, "wb") as out:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _DB_RESTORE_MAX_BYTES:
+                    raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Upload exceeds the maximum restore size")
+                out.write(chunk)
+        if total == 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
+        try:
+            message = db_backup.restore(_db_backup_fields(conn), effective_database, tmp_path)
+        except DbConsoleError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    finally:
+        db_backup._safe_remove(tmp_path)
+
+    db.add(AuditLog(
+        actor=claims.get("sub", ""),
+        action="db.restore",
+        resource_type="db_connection",
+        resource_id=conn.public_id,
+        details=f"Restored database {effective_database} on {conn.name} ({total} bytes)"[:2000],
+        server_id=None,
+    ))
+    db.commit()
+    return ActionResult(ok=True, message=message)
 
 
 # --- database query history (feature/db-connect follow-on) ----------------------------------

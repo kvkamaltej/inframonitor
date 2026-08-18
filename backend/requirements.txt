@@ -18,6 +18,10 @@ hvac==2.3.0
 psycopg[binary]==3.2.3
 # Database console (feature/db-connect): MySQL driver. psycopg above already covers PostgreSQL.
 pymysql==1.1.1
+# SQL Server driver for the mssql engine. Imported lazily inside app/services/db_console.py, so
+# the module imports without it; its manylinux wheels bundle FreeTDS, so no system libraries are
+# needed at runtime.
+pymssql==2.3.2
 # Kubernetes clusters (feature/kubernetes): official client for the live cluster reads/actions.
 # Imported lazily inside app/services/kube.py, so the lite profile only needs it when the feature
 # is used; PyYAML (already pulled in) parses pasted kubeconfig YAML.

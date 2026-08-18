@@ -1361,7 +1361,7 @@ export function ShellPanel({
                   if (isVisible) activateSession(session.key);
                 }}
                 style={style}
-                className={`absolute flex flex-col ${immersive ? "p-0" : "p-2"} ${place} ${outline} ${
+                className={`absolute flex flex-col ${immersive ? "pl-2" : "p-2"} ${place} ${outline} ${
                   isVisible ? "z-10" : "invisible z-0 pointer-events-none"
                 }`}
               >

@@ -23,9 +23,9 @@ CONNECT_TIMEOUT_SECONDS = 8
 STATEMENT_TIMEOUT_MS = 30_000
 STATEMENT_TIMEOUT_SECONDS = 30
 
-ENGINES = ("postgres", "mysql", "sqlite")
+ENGINES = ("postgres", "mysql", "sqlite", "mssql")
 # SQLite is a local file, not a networked server, so it has no default port; callers fall back to 0.
-DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306}
+DEFAULT_PORTS = {"postgres": 5432, "mysql": 3306, "mssql": 1433}
 
 # JSON-safe scalar types that can go straight into the response; everything else (datetime,
 # Decimal, bytes, UUID, ...) is stringified so the result always serialises.
@@ -240,9 +240,15 @@ def _jsonable(value: Any) -> Any:
 # --- PostgreSQL (psycopg 3) -----------------------------------------------------------------
 
 
-def _pg_connect(host: str, port: int, username: str, password: str, database: str):
+def _pg_connect(host: str, port: int, username: str, password: str, database: str, read_only: bool = True):
     import psycopg
 
+    # default_transaction_read_only makes the session refuse writes even in autocommit mode. It is
+    # dropped for the admin DDL path (execute_ddl), which must be able to run e.g. ALTER SCHEMA;
+    # statement_timeout still bounds a runaway statement in both modes.
+    options = f"-c statement_timeout={STATEMENT_TIMEOUT_MS}"
+    if read_only:
+        options += " -c default_transaction_read_only=on"
     return psycopg.connect(
         host=host,
         port=port,
@@ -251,9 +257,7 @@ def _pg_connect(host: str, port: int, username: str, password: str, database: st
         dbname=database or None,
         connect_timeout=CONNECT_TIMEOUT_SECONDS,
         autocommit=True,
-        # statement_timeout bounds a runaway query; default_transaction_read_only makes the
-        # session refuse writes even in autocommit mode.
-        options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS} -c default_transaction_read_only=on",
+        options=options,
     )
 
 
@@ -332,16 +336,74 @@ def _sqlite_connect(database: str):
     return _SqliteConnection(conn)
 
 
-def _connect(engine: str, host: str, port: int, username: str, password: str, database: str):
+# --- SQL Server (pymssql) -------------------------------------------------------------------
+#
+# pymssql is imported lazily inside this branch so the module imports without it installed (its
+# manylinux wheels bundle FreeTDS, so no system libraries are needed at runtime). pymssql has no
+# session-level read-only switch, so unlike postgres/mysql the connection is not forced read-only;
+# the multiple-statement guard and row cap in run_query still apply.
+
+
+def _mssql_connect(host: str, port: int, username: str, password: str, database: str):
+    import pymssql
+
+    return pymssql.connect(
+        server=host,
+        port=int(port or 1433),
+        user=username or None,
+        password=password or None,
+        database=database or None,
+        login_timeout=CONNECT_TIMEOUT_SECONDS,
+        timeout=STATEMENT_TIMEOUT_SECONDS,
+    )
+
+
+def _connect(engine: str, host: str, port: int, username: str, password: str, database: str, read_only: bool = True):
     if engine == "postgres":
-        return _pg_connect(host, port, username, password, database)
+        return _pg_connect(host, port, username, password, database, read_only=read_only)
     if engine == "sqlite":
         return _sqlite_connect(database)
+    if engine == "mssql":
+        return _mssql_connect(host, port, username, password, database)
     return _mysql_connect(host, port, username, password, database)
 
 
+def execute_ddl(engine: str, host: str, port: int, username: str, password: str, database: str, sql: str) -> None:
+    """Run a single non-SELECT statement (e.g. ALTER SCHEMA), commit, and close.
+
+    run_query is SELECT-oriented (it rejects multiple statements and caps returned rows), so a
+    dedicated helper is cleaner for the admin DDL routes. The connection is opened writable
+    (read_only=False) so PostgreSQL does not refuse the write. Raises DbConsoleError on failure.
+    """
+    conn = None
+    try:
+        conn = _connect(engine, host, port, username, password, database, read_only=False)
+        with conn.cursor() as cur:
+            cur.execute(sql)
+        try:
+            conn.commit()
+        except Exception:
+            # autocommit connections (postgres) have nothing to commit; never let this mask success
+            pass
+    except DbConsoleError:
+        raise
+    except Exception as exc:
+        raise DbConsoleError(_clean_message(exc)) from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def _server_version(engine: str, conn) -> str:
-    version_sql = "SELECT sqlite_version()" if engine == "sqlite" else "SELECT version()"
+    if engine == "sqlite":
+        version_sql = "SELECT sqlite_version()"
+    elif engine == "mssql":
+        version_sql = "SELECT @@VERSION"
+    else:
+        version_sql = "SELECT version()"
     try:
         with conn.cursor() as cur:
             cur.execute(version_sql)
@@ -373,6 +435,8 @@ def test_connection(engine: str, host: str, port: int, username: str, password: 
             label, where = "SQLite", (database or "")
         elif engine == "postgres":
             label, where = "PostgreSQL", f"{host}:{port}"
+        elif engine == "mssql":
+            label, where = "SQL Server", f"{host}:{port}"
         else:
             label, where = "MySQL", f"{host}:{port}"
         return f"Connected to {label} at {where}" + (f" — {version}" if version else "")
@@ -455,6 +519,11 @@ _LIST_TABLES_SQL = {
     "sqlite": (
         "SELECT '' AS table_schema, name AS table_name, type AS table_type "
         "FROM sqlite_master WHERE type IN ('table','view') ORDER BY name"
+    ),
+    # SQL Server: INFORMATION_SCHEMA.TABLES spans every schema in the connected database.
+    "mssql": (
+        "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES "
+        "ORDER BY TABLE_SCHEMA, TABLE_NAME"
     ),
 }
 

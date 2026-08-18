@@ -234,6 +234,11 @@ class DbConnection(Base):
     # free-form environment tag ("dev" | "qa" | "uat" | "prod" | ""), so the UI can badge and
     # group saved connections the way servers are tagged. "" means unspecified.
     environment: Mapped[str] = mapped_column(String(32), default="")
+    # when true the schema browser lists every database on the server (not just the connection's
+    # own `database`), so an operator can browse siblings without editing the saved connection.
+    # Persisted per connection; defaults False. Added after first release -> see the startup
+    # migration in app/main.py.
+    show_all_databases: Mapped[bool] = mapped_column(Boolean, default=False)
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

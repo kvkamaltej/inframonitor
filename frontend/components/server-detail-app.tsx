@@ -486,11 +486,16 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
 
 
   async function removeServer() {
+    // Typed-phrase gate: the operator must type the exact hostname before Delete enables, so an
+    // irreversible removal (host + stored credentials + access grants) can never be a misclick.
+    // Fall back to "delete" only if the hostname is somehow unknown, so the gate is never empty.
+    const phrase = server?.hostname || "delete";
     if (!(await confirm({
       title: `Delete ${server?.hostname ?? "this server"}?`,
       message: "It is removed from Infra Monitor along with its stored credentials and access grants. This cannot be undone.",
       confirmLabel: "Delete server",
-      danger: true
+      danger: true,
+      requirePhrase: phrase
     }))) return;
     await deleteServer(token, serverId);
     window.location.href = "/";

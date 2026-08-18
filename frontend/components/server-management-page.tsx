@@ -96,12 +96,14 @@ function diskPercent(server: Server): number {
   return Number.isFinite(n) ? Math.round(n) : -1;
 }
 
-// -1 means never sampled, which must not render as a healthy 0%
+// -1 means never sampled, which must not render as a healthy 0%. Neutral tones now flow from
+// the theme tokens (text-muted / text-fg) so the column re-skins with the palette; the
+// danger/warn usage tints are intentionally kept fixed so a hot host reads the same everywhere.
 function usageTone(percent: number): string {
-  if (percent < 0) return "text-slate-400 dark:text-slate-500";
+  if (percent < 0) return "text-muted";
   if (percent >= 90) return "text-danger dark:text-red-400";
   if (percent >= 75) return "text-warn dark:text-amber-400";
-  return "text-slate-700 dark:text-slate-300";
+  return "text-fg";
 }
 
 // Returns the four octets when value is a dotted-quad IPv4 literal, otherwise null.
@@ -173,7 +175,7 @@ function SortHeader({ label, column, sortKey, sortDir, onSort, className }: { la
       <button
         onClick={() => onSort(column)}
         title={`Sort by ${label.toLowerCase()}`}
-        className={`inline-flex items-center gap-1 uppercase tracking-wider transition-colors hover:text-slate-700 dark:hover:text-slate-200 ${active ? "text-slate-700 dark:text-slate-200" : ""}`}
+        className={`inline-flex items-center gap-1 uppercase tracking-wider transition-colors hover:text-fg ${active ? "text-fg" : ""}`}
       >
         {label}
         <Icon size={12} className={active ? "text-accent" : "opacity-40"} />
@@ -602,27 +604,27 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   const renderRow = (server: Server) => {
     const OsGlyph = osIcon(server);
     return (
-    <tr key={server.id} className="transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50">
+    <tr key={server.id} className="transition-colors hover:bg-page">
       <td className="px-3 py-3 align-top">
         <Link href={`/server/?id=${encodeURIComponent(server.id)}`} className="block truncate font-semibold text-accent" title={server.hostname}>{server.hostname}</Link>
-        {server.tags.length ? <div className="mt-0.5 truncate text-xs font-medium text-slate-500 dark:text-slate-400" title={server.tags.join(", ")}>{server.tags.join(", ")}</div> : null}
+        {server.tags.length ? <div className="mt-0.5 truncate text-xs font-medium text-muted" title={server.tags.join(", ")}>{server.tags.join(", ")}</div> : null}
       </td>
-      <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-slate-700 dark:text-slate-300">{server.ip_address}</td>
-      <td className="px-3 py-3 align-top font-medium text-slate-700 dark:text-slate-300" title={osDetail(server) || undefined}>
+      <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-fg">{server.ip_address}</td>
+      <td className="px-3 py-3 align-top font-medium text-fg" title={osDetail(server) || undefined}>
         <span className="flex items-center gap-1.5">
-          <OsGlyph size={14} className="shrink-0 text-slate-400 dark:text-slate-500" />
+          <OsGlyph size={14} className="shrink-0 text-muted" />
           <span className="truncate">{osLabel(server)}</span>
         </span>
       </td>
-      <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-slate-700 dark:text-slate-300">{uptimeLabel(server.uptime_seconds)}</td>
-      <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(server.cpu_percent)}`}>{server.cpu_percent < 0 ? "-" : `${server.cpu_percent}%`}{server.cpu ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{server.cpu} cores</div> : null}</td>
-      <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(ramPercent(server))}`}>{ramLabel(server)}{ramPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{ramPercent(server)}% used</div> : null}</td>
-      <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(diskPercent(server))}`}>{diskLabel(server)}{diskPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">{diskPercent(server)}% used</div> : null}</td>
+      <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-fg">{uptimeLabel(server.uptime_seconds)}</td>
+      <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(server.cpu_percent)}`}>{server.cpu_percent < 0 ? "-" : `${server.cpu_percent}%`}{server.cpu ? <div className="mt-0.5 text-xs font-medium text-muted">{server.cpu} cores</div> : null}</td>
+      <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(ramPercent(server))}`}>{ramLabel(server)}{ramPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-muted">{ramPercent(server)}% used</div> : null}</td>
+      <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(diskPercent(server))}`}>{diskLabel(server)}{diskPercent(server) >= 0 ? <div className="mt-0.5 text-xs font-medium text-muted">{diskPercent(server)}% used</div> : null}</td>
       <td className="px-3 py-3 align-top">
         <div className="flex flex-col items-start gap-1">
           {server.server_type ? <Chip label={server.server_type} tone="accent" /> : null}
           {server.environment ? <Chip label={server.environment} tone="slate" /> : null}
-          {!server.server_type && !server.environment ? <span className="font-medium text-slate-400 dark:text-slate-500">-</span> : null}
+          {!server.server_type && !server.environment ? <span className="font-medium text-muted">-</span> : null}
         </div>
       </td>
       <td className="px-3 py-3 align-top"><StatusPill status={server.status} /></td>
@@ -661,7 +663,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
           <col className="w-[9%]" />
           {isAdmin ? <col className="w-[6%]" /> : null}
         </colgroup>
-        <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500 dark:bg-slate-800/50 dark:text-slate-400">
+        <thead className="bg-elevated text-xs uppercase tracking-wider text-muted">
           <tr>
             <SortHeader label="Host" column="hostname" sortKey={sKey} sortDir={sDir} onSort={onSort} />
             <SortHeader label="IP" column="ip" sortKey={sKey} sortDir={sDir} onSort={onSort} />
@@ -675,7 +677,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
             {isAdmin ? <th className="px-3 py-3 font-semibold">Actions</th> : null}
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-100 dark:divide-slate-800/50">
+        <tbody className="divide-y divide-edge">
           {rows.map((server) => renderRow(server))}
         </tbody>
       </table>
@@ -723,8 +725,8 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
           servers={servers.filter((server) => server.has_credentials)}
         />
       ) : null}
-      <div className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-200 dark:bg-[#1e1e1e] dark:ring-slate-800">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-white px-6 py-5 font-semibold text-slate-900 dark:border-slate-800 dark:bg-[#1e1e1e] dark:text-slate-100">
+      <div className="overflow-hidden rounded-3xl bg-surface shadow-sm ring-1 ring-edge">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-edge bg-elevated px-6 py-5 font-semibold text-fg">
           <div className="flex items-center gap-3">
             <MonitorDot size={18} className="text-accent" />
             <h2 className="text-base font-semibold">Server Inventory</h2>
@@ -743,21 +745,21 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
               {actionsMenuOpen && (
                 <>
                   <button aria-label="Close menu" onClick={() => setActionsMenuOpen(false)} className="fixed inset-0 z-30 cursor-default" />
-                  <div className="absolute right-0 z-40 mt-2 w-56 overflow-hidden rounded-2xl bg-white py-1 text-slate-700 shadow-xl ring-1 ring-slate-200 dark:bg-[#1e1e1e] dark:text-slate-200 dark:ring-slate-800">
-                    <button disabled={refreshing || visibleServers.length === 0} onClick={() => { setActionsMenuOpen(false); void refreshAllVitals(); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-slate-100 disabled:opacity-50 dark:hover:bg-slate-800">
+                  <div className="absolute right-0 z-40 mt-2 w-56 overflow-hidden rounded-2xl bg-elevated py-1 text-fg shadow-xl ring-1 ring-edge">
+                    <button disabled={refreshing || visibleServers.length === 0} onClick={() => { setActionsMenuOpen(false); void refreshAllVitals(); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page disabled:opacity-50">
                       <Activity size={16} className={refreshing ? "animate-pulse text-accent" : "text-accent"} /> {refreshing ? "Probing…" : `Refresh vitals${filtersActive && visibleServers.length ? ` (${visibleServers.length})` : ""}`}
                     </button>
-                    <button onClick={() => { setGrouped((value) => !value); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-slate-100 dark:hover:bg-slate-800">
-                      {grouped ? <><List size={16} className="text-slate-400" /> Show all (flat)</> : <><FolderTree size={16} className="text-slate-400" /> Group view</>}
+                    <button onClick={() => { setGrouped((value) => !value); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page">
+                      {grouped ? <><List size={16} className="text-muted" /> Show all (flat)</> : <><FolderTree size={16} className="text-muted" /> Group view</>}
                     </button>
                     {role === "admin" && (
                       <>
-                        <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
-                        <button onClick={() => { setShowFolderManager((value) => !value); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-slate-100 dark:hover:bg-slate-800">
-                          <FolderIcon size={16} className="text-slate-400" /> {showFolderManager ? "Close groups" : "Manage groups"}
+                        <div className="my-1 border-t border-edge" />
+                        <button onClick={() => { setShowFolderManager((value) => !value); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page">
+                          <FolderIcon size={16} className="text-muted" /> {showFolderManager ? "Close groups" : "Manage groups"}
                         </button>
-                        <button onClick={() => { setShowImport(!showImport); setShowAddForm(false); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-slate-100 dark:hover:bg-slate-800">
-                          <FileUp size={16} className="text-slate-400" /> {showImport ? "Cancel import" : "Import from CSV"}
+                        <button onClick={() => { setShowImport(!showImport); setShowAddForm(false); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page">
+                          <FileUp size={16} className="text-muted" /> {showImport ? "Cancel import" : "Import from CSV"}
                         </button>
                       </>
                     )}
@@ -769,17 +771,17 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
         </div>
 
         {role === "admin" && showAddForm && (
-          <div className="border-b border-slate-100 bg-slate-50 p-6 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="border-b border-edge bg-elevated p-6">
             <AddServerForm token={token} onAdded={() => { setShowAddForm(false); void load(); }} />
           </div>
         )}
         {role === "admin" && showImport && (
-          <div className="border-b border-slate-100 bg-slate-50 p-6 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="border-b border-edge bg-elevated p-6">
             <CsvImportPanel token={token} onImported={() => void load()} />
           </div>
         )}
         {role === "admin" && showFolderManager && (
-          <div className="space-y-4 border-b border-slate-100 bg-slate-50 p-6 dark:border-slate-800 dark:bg-slate-900/50">
+          <div className="space-y-4 border-b border-edge bg-elevated p-6">
             <form onSubmit={(event) => void submitNewFolder(event)} className="flex flex-wrap items-center gap-2">
               <input
                 value={newFolderName}
@@ -812,8 +814,8 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
             )}
           </div>
         )}
-        <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 bg-slate-50 px-6 py-3 dark:border-slate-800 dark:bg-slate-800/50">
-          <Filter size={16} className="text-slate-400 dark:text-slate-500" />
+        <div className="flex flex-wrap items-center gap-3 border-b border-edge bg-elevated px-6 py-3">
+          <Filter size={16} className="text-muted" />
           <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} aria-label="Filter by server type" className={selectClass}>
             <option value={ALL}>All types</option>
             {serverTypes.map((value) => <option key={value} value={value}>{value}</option>)}
@@ -832,20 +834,20 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
               <X size={14} /> Clear
             </button>
           ) : null}
-          <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Showing {visibleServers.length} of {servers.length} {servers.length === 1 ? "server" : "servers"}</span>
+          <span className="text-xs font-medium text-muted">Showing {visibleServers.length} of {servers.length} {servers.length === 1 ? "server" : "servers"}</span>
         </div>
         {/* Empty states first, then the inventory itself. Grouped view renders one titled
             section per group (each with its own table), so a group name — Unassigned included —
             reads as a section heading, never as a row crammed under the column header. */}
         {servers.length === 0 ? (
-          <div className="px-6 py-6 text-sm text-slate-500 dark:text-slate-400">{loadError ? `Unable to load inventory: ${loadError}` : "No servers in inventory yet."}</div>
+          <div className="px-6 py-6 text-sm text-muted">{loadError ? `Unable to load inventory: ${loadError}` : "No servers in inventory yet."}</div>
         ) : visibleServers.length === 0 ? (
-          <div className="px-6 py-6 text-sm text-slate-500 dark:text-slate-400">
+          <div className="px-6 py-6 text-sm text-muted">
             <span className="font-medium">No servers match the current filters.</span>{" "}
             <button onClick={clearFilters} className="font-semibold text-accent hover:underline">Clear filters</button> to see all {servers.length}.
           </div>
         ) : grouped ? (
-          <div className="divide-y divide-slate-200 dark:divide-slate-800">
+          <div className="divide-y divide-edge">
             {groups.map((group) => {
               const gsort = groupSort[group.key] ?? NO_SORT;
               const isCollapsed = collapsed.has(group.key);
@@ -856,12 +858,12 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
                     onClick={() => toggleCollapse(group.key)}
                     aria-expanded={!isCollapsed}
                     title={isCollapsed ? "Expand group" : "Collapse group"}
-                    className="flex w-full items-center gap-2 px-6 py-3 text-left transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/40"
+                    className="flex w-full items-center gap-2 px-6 py-3 text-left transition-colors hover:bg-page"
                   >
-                    {isCollapsed ? <ChevronRight size={16} className="shrink-0 text-slate-400" /> : <ChevronDown size={16} className="shrink-0 text-slate-400" />}
-                    {group.key ? <FolderIcon size={16} className="text-accent" /> : <MonitorDot size={16} className="text-slate-400 dark:text-slate-500" />}
-                    <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-100">{group.name}</h3>
-                    <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">{group.count}</span>
+                    {isCollapsed ? <ChevronRight size={16} className="shrink-0 text-muted" /> : <ChevronDown size={16} className="shrink-0 text-muted" />}
+                    {group.key ? <FolderIcon size={16} className="text-accent" /> : <MonitorDot size={16} className="text-muted" />}
+                    <h3 className="text-sm font-semibold text-fg">{group.name}</h3>
+                    <span className="rounded-full bg-page px-2 py-0.5 text-[11px] font-semibold text-muted">{group.count}</span>
                   </button>
                   {isCollapsed ? null : serverTable(sortRows(group.rows, gsort.key, gsort.dir), gsort.key, gsort.dir, (column) => toggleGroupSort(group.key, column))}
                 </div>

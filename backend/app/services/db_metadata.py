@@ -103,6 +103,14 @@ def list_databases(engine: str, host: str, port: int, username: str, password: s
     if engine == "sqlite":
         base = os.path.basename(database) if database else ""
         return [{"name": base or "main"}]
+    if engine == "mssql":
+        # sys.databases lists every database; database_id 1-4 are the system databases
+        # (master/tempdb/model/msdb), skipped so only user databases surface.
+        rows = _run(
+            engine, host, port, username, password, database,
+            "SELECT name FROM sys.databases WHERE database_id > 4 ORDER BY name",
+        )
+        return [{"name": _s(row[0])} for row in rows]
     # mysql: SHOW DATABASES, hiding the server-internal schemas
     rows = _run(engine, host, port, username, password, database, "SHOW DATABASES")
     excluded = {"information_schema", "mysql", "performance_schema", "sys"}
@@ -120,6 +128,15 @@ def list_schemas(engine: str, host: str, port: int, username: str, password: str
             "WHERE schema_name NOT IN ('pg_catalog','information_schema') "
             "AND schema_name NOT LIKE 'pg_toast%' AND schema_name NOT LIKE 'pg_temp%' "
             "ORDER BY schema_name"
+        )
+    elif engine == "mssql":
+        # sys.schemas carries the built-in roles/system schemas alongside user schemas; the
+        # fixed database roles and sys/INFORMATION_SCHEMA/guest are noise in a browsing tree.
+        sql = (
+            "SELECT name FROM sys.schemas WHERE name NOT IN "
+            "('sys','INFORMATION_SCHEMA','guest','db_owner','db_accessadmin','db_securityadmin',"
+            "'db_ddladmin','db_backupoperator','db_datareader','db_datawriter','db_denydatareader',"
+            "'db_denydatawriter') ORDER BY name"
         )
     else:
         sql = (
@@ -294,6 +311,32 @@ def list_indexes(engine: str, host: str, port: int, username: str, password: str
             if col and col not in entry["columns"]:
                 entry["columns"].append(col)
         return list(grouped.values())
+    if engine == "mssql":
+        # SQL Server has no information_schema.statistics: sys.indexes + sys.index_columns carry
+        # the index rows, joined to sys.tables/sys.schemas to scope by schema.table. Heap and the
+        # unnamed default rows (name IS NULL, is_hypothetical) are excluded.
+        sql = (
+            "SELECT i.name AS index_name, c.name AS column_name, i.is_unique, i.is_primary_key, "
+            "       ic.key_ordinal "
+            "FROM sys.indexes i "
+            "JOIN sys.tables t ON t.object_id = i.object_id "
+            "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
+            "JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+            "WHERE i.name IS NOT NULL AND s.name = %s AND t.name = %s "
+            "ORDER BY i.name, ic.key_ordinal"
+        )
+        rows = _run(engine, host, port, username, password, database, sql, (schema, table))
+        grouped = {}
+        for row in rows:
+            name = _s(row[0])
+            entry = grouped.setdefault(name, {
+                "name": name, "columns": [], "unique": bool(row[2]), "primary": bool(row[3]),
+            })
+            col = _s(row[1])
+            if col and col not in entry["columns"]:
+                entry["columns"].append(col)
+        return list(grouped.values())
     # mysql: information_schema.statistics, one row per (index, column) with SEQ_IN_INDEX ordering
     sql = (
         "SELECT index_name, column_name, non_unique, seq_in_index "
@@ -407,6 +450,33 @@ def list_foreign_keys(engine: str, host: str, port: int, username: str, password
             entry["columns"].append(_s(row[1]))
             entry["ref_columns"].append(_s(row[4]))
         return list(grouped.values())
+    if engine == "mssql":
+        # SQL Server: sys.foreign_keys + sys.foreign_key_columns map each constrained column to its
+        # referenced column; joins to sys.tables/sys.columns/sys.schemas resolve the names.
+        sql = (
+            "SELECT fk.name, pc.name AS column_name, rs.name AS ref_schema, rt.name AS ref_table, "
+            "       rc.name AS ref_column, fkc.constraint_column_id "
+            "FROM sys.foreign_keys fk "
+            "JOIN sys.tables pt ON pt.object_id = fk.parent_object_id "
+            "JOIN sys.schemas ps ON ps.schema_id = pt.schema_id "
+            "JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id "
+            "JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id "
+            "JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id "
+            "JOIN sys.schemas rs ON rs.schema_id = rt.schema_id "
+            "JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id "
+            "WHERE ps.name = %s AND pt.name = %s "
+            "ORDER BY fk.name, fkc.constraint_column_id"
+        )
+        rows = _run(engine, host, port, username, password, database, sql, (schema, table))
+        grouped = {}
+        for row in rows:
+            name = _s(row[0])
+            entry = grouped.setdefault(name, {
+                "name": name, "columns": [], "ref_schema": _s(row[2]), "ref_table": _s(row[3]), "ref_columns": [],
+            })
+            entry["columns"].append(_s(row[1]))
+            entry["ref_columns"].append(_s(row[4]))
+        return list(grouped.values())
     # mysql: key_column_usage carries the referenced schema/table/column for FK rows
     sql = (
         "SELECT constraint_name, column_name, referenced_table_schema, referenced_table_name, "
@@ -431,9 +501,12 @@ def list_foreign_keys(engine: str, host: str, port: int, username: str, password
 
 
 def _quote_ident(engine: str, name: str) -> str:
-    """Quote an identifier for the engine, escaping the quote char (pg/sqlite: "..", mysql: `..`)."""
+    """Quote an identifier for the engine, escaping the quote char (pg/sqlite: "..", mysql: `..`,
+    mssql: [..] with a doubled closing bracket)."""
     if engine in ("postgres", "sqlite"):
         return '"' + name.replace('"', '""') + '"'
+    if engine == "mssql":
+        return "[" + name.replace("]", "]]") + "]"
     return "`" + name.replace("`", "``") + "`"
 
 
@@ -472,6 +545,9 @@ def generate_sql(engine: str, host: str, port: int, username: str, password: str
 
     if normalized == "select":
         cols = ", ".join(q(c) for c in col_names)
+        # SQL Server has no LIMIT clause; the row cap goes at the front as SELECT TOP N.
+        if engine == "mssql":
+            return f"SELECT TOP 200 {cols}\nFROM {qualified};"
         return f"SELECT {cols}\nFROM {qualified}\nLIMIT 200;"
 
     if normalized == "insert":

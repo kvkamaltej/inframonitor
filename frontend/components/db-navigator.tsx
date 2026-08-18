@@ -6,7 +6,9 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
+  type ChangeEvent,
   type FormEvent,
   type MouseEvent as ReactMouseEvent
 } from "react";
@@ -33,6 +35,7 @@ import {
   Table2
 } from "lucide-react";
 import {
+  backupDbConnection,
   createDbConnection,
   deleteDbConnection,
   getDbColumns,
@@ -44,6 +47,8 @@ import {
   getDbSchemas,
   getDbSchemaRoutines,
   getDbSchemaTables,
+  renameDbSchema,
+  restoreDbConnection,
   testDbConnection,
   testDbConnectionById,
   updateDbConnection,
@@ -79,7 +84,7 @@ type DbNavigatorProps = {
 type ConnStatus = "unknown" | "testing" | "healthy" | "error";
 
 // sqlite is file-backed and has no port; 0 stands in and is never sent for a sqlite connection.
-const DEFAULT_PORTS: Record<DbConnEngine, number> = { postgres: 5432, mysql: 3306, sqlite: 0 };
+const DEFAULT_PORTS: Record<DbConnEngine, number> = { postgres: 5432, mysql: 3306, sqlite: 0, mssql: 1433 };
 
 const inputClass =
   "h-11 w-full rounded-xl border-none bg-surface px-4 text-sm font-medium text-fg outline-none ring-1 ring-edge transition-colors focus:ring-2 focus:ring-accent";
@@ -88,7 +93,7 @@ const inputClass =
 // Lifted so a node can invoke a workspace callback, open the connection dialog, or find out which
 // menu is currently open without threading a dozen props through every recursion level.
 
-type MenuKind = "connection" | "schema" | "table" | null;
+type MenuKind = "connection" | "database" | "schema" | "table" | null;
 
 type NavContextValue = {
   token: string;
@@ -99,6 +104,14 @@ type NavContextValue = {
   testConnection: (id: string) => void;
   openConnDialog: (conn: DbConnection | null) => void;
   deleteConnection: (conn: DbConnection) => void;
+  // postgres-only maintenance: dump a database to a file, or restore one from an uploaded dump
+  backupConnection: (connId: string, database?: string) => void;
+  restoreConnection: (connId: string, database?: string) => void;
+  // prompt-and-rename a schema, then reload the owning connection's subtree
+  renameSchema: (connId: string, schema: string) => void;
+  // force a connection node to drop its cached children and refetch (schema rename, reconnect)
+  reloadKeys: Record<string, number>;
+  reloadConnection: (connId: string) => void;
   // which node's context menu is open (a node's stable id), and its cursor anchor
   openMenuId: string | null;
   menuAnchor: { x: number; y: number };
@@ -326,6 +339,7 @@ function buildDatabaseNode(token: string, connId: string, connCtx: DbNavigatorCt
     kind: "database",
     label: dbName,
     ctx: dbCtx,
+    menuKind: "database",
     loadChildren: () => buildSchemaNodes(token, connId, dbCtx)
   };
 }
@@ -437,11 +451,28 @@ function TreeNode({ node, depth }: { node: TreeNodeDescriptor; depth: number }) 
       : children;
 
   const menuItems: MenuItem[] = useMemo(() => {
-    if (node.menuKind === "schema") {
-      return [
+    if (node.menuKind === "database") {
+      const items: MenuItem[] = [
         { label: "Open SQL Editor", onClick: () => nav.onOpenEditor(node.ctx) },
         { label: "Refresh", onClick: refresh }
       ];
+      // Backup/restore are postgres-only (pg_dump/pg_restore); hide them for other engines.
+      if (node.ctx.engine === "postgres") {
+        items.push({ label: "Backup", onClick: () => nav.backupConnection(node.ctx.connectionId, node.ctx.database) });
+        items.push({ label: "Restore", danger: true, onClick: () => nav.restoreConnection(node.ctx.connectionId, node.ctx.database) });
+      }
+      return items;
+    }
+    if (node.menuKind === "schema") {
+      const items: MenuItem[] = [
+        { label: "Open SQL Editor", onClick: () => nav.onOpenEditor(node.ctx) }
+      ];
+      // Rename schema is postgres-only server-side; offer it only where it can succeed.
+      if (node.ctx.engine === "postgres") {
+        items.push({ label: "Rename schema", onClick: () => nav.renameSchema(node.ctx.connectionId, node.ctx.schema || "") });
+      }
+      items.push({ label: "Refresh", onClick: refresh });
+      return items;
     }
     if (node.menuKind === "table") {
       return [
@@ -509,7 +540,7 @@ function statusDotClass(status: ConnStatus): string {
     case "testing":
       return "bg-amber-400 animate-pulse";
     default:
-      return "bg-slate-400/60";
+      return "bg-muted/60";
   }
 }
 
@@ -572,6 +603,21 @@ function ConnectionNode({ conn }: { conn: DbConnection }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showAll]);
 
+  // Reconnect / schema-rename bump this key: drop cached metadata and re-establish the subtree so a
+  // stale or closed connection is re-opened. Skip the first run (mount) so nothing loads unbidden.
+  const reloadKey = nav.reloadKeys[conn.id] ?? 0;
+  const firstReloadRef = useRef(true);
+  useEffect(() => {
+    if (firstReloadRef.current) {
+      firstReloadRef.current = false;
+      return;
+    }
+    setChildren(null);
+    setExpanded(true);
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadKey]);
+
   const toggle = useCallback(() => {
     const next = !expanded;
     setExpanded(next);
@@ -588,9 +634,18 @@ function ConnectionNode({ conn }: { conn: DbConnection }) {
 
   const menuItems: MenuItem[] = [
     { label: "Open SQL Editor", onClick: () => nav.onOpenEditor(ctx) },
+    // Reconnect: re-probe the stored credentials (updates the status dot) and rebuild the subtree.
+    { label: "Reconnect", onClick: () => { nav.testConnection(conn.id); refresh(); } },
     { label: "Test connection", onClick: () => nav.testConnection(conn.id) },
     { label: showAll ? "Show only default database" : "Show all databases", onClick: () => nav.toggleShowAllDb(conn.id) },
     { label: "Refresh", onClick: refresh },
+    // Backup/restore are postgres-only (pg_dump/pg_restore); hide them for other engines.
+    ...(conn.engine === "postgres"
+      ? [
+          { label: "Backup", onClick: () => nav.backupConnection(conn.id, conn.database) },
+          { label: "Restore", danger: true, onClick: () => nav.restoreConnection(conn.id, conn.database) }
+        ]
+      : []),
     { label: "Edit", onClick: () => nav.openConnDialog(conn) },
     { label: "Delete", danger: true, onClick: () => nav.deleteConnection(conn) }
   ];
@@ -657,6 +712,7 @@ function ConnectionDialog({
   const [database, setDatabase] = useState(editing?.database ?? "");
   const [environment, setEnvironment] = useState(editing?.environment ?? "");
   const [group, setGroup] = useState(editing?.group ?? "");
+  const [showAllDatabases, setShowAllDatabases] = useState<boolean>(editing?.show_all_databases ?? false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [note, setNote] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -681,7 +737,8 @@ function ConnectionDialog({
         username: "",
         database: database.trim(),
         environment: environment || "",
-        group: group.trim() ? group.trim() : null
+        group: group.trim() ? group.trim() : null,
+        show_all_databases: showAllDatabases
       };
     }
     return {
@@ -692,7 +749,8 @@ function ConnectionDialog({
       username,
       database: database.trim(),
       environment: environment || "",
-      group: group.trim() ? group.trim() : null
+      group: group.trim() ? group.trim() : null,
+      show_all_databases: showAllDatabases
     };
   }
 
@@ -752,6 +810,7 @@ function ConnectionDialog({
           <select value={engine} onChange={(e) => changeEngine(e.target.value as DbConnEngine)} className={inputClass}>
             <option value="postgres">PostgreSQL</option>
             <option value="mysql">MySQL</option>
+            <option value="mssql">SQL Server</option>
             <option value="sqlite">SQLite</option>
           </select>
         </label>
@@ -811,6 +870,20 @@ function ConnectionDialog({
           Group
           <input value={group} onChange={(e) => setGroup(e.target.value)} placeholder="Optional" className={inputClass} />
         </label>
+        {!isSqlite && (
+          <label className="flex items-center gap-2.5 md:col-span-2">
+            <input
+              type="checkbox"
+              checked={showAllDatabases}
+              onChange={(e) => setShowAllDatabases(e.target.checked)}
+              className="h-4 w-4 shrink-0 rounded border-edge text-accent focus:ring-accent"
+            />
+            <span className="text-sm font-medium text-fg">
+              Show all databases
+              <span className="ml-1.5 font-normal text-muted">— browse every database on the server, not just the default</span>
+            </span>
+          </label>
+        )}
 
         <div className="flex flex-wrap items-center gap-3 md:col-span-2">
           <button
@@ -882,9 +955,34 @@ export function DbNavigator(props: DbNavigatorProps) {
     setShowAllDb((prev) => ({ ...prev, [id]: !prev[id] }));
   }, []);
 
+  // Bumped per-connection to force a connection node to drop its cached metadata and reconnect.
+  const [reloadKeys, setReloadKeys] = useState<Record<string, number>>({});
+  const reloadConnection = useCallback((id: string) => {
+    setReloadKeys((prev) => ({ ...prev, [id]: (prev[id] ?? 0) + 1 }));
+  }, []);
+
+  // Transient status toast for backup/restore/rename results (success + failure).
+  const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const showNotice = useCallback((kind: "ok" | "error", text: string) => {
+    setNotice({ kind, text });
+    window.setTimeout(() => setNotice(null), 5000);
+  }, []);
+
+  // Hidden file input drives the restore flow: an action stashes its target here, then clicks it.
+  const restoreInputRef = useRef<HTMLInputElement | null>(null);
+  const restoreTargetRef = useRef<{ connId: string; database?: string } | null>(null);
+
   const loadConnections = useCallback(async () => {
     try {
-      setConnections(await getDbConnections(token));
+      const conns = await getDbConnections(token);
+      setConnections(conns);
+      // Seed each connection's "Show all databases" navigator state from its persisted default,
+      // without clobbering any explicit in-session toggle the user has already made.
+      setShowAllDb((prev) => {
+        const next = { ...prev };
+        for (const c of conns) if (!(c.id in next)) next[c.id] = c.show_all_databases;
+        return next;
+      });
       setListError("");
     } catch (e) {
       setListError(e instanceof Error ? e.message : "Unable to load connections");
@@ -936,6 +1034,73 @@ export function DbNavigator(props: DbNavigatorProps) {
     [confirm, token, loadConnections]
   );
 
+  const backupConnection = useCallback(
+    async (connId: string, database?: string) => {
+      showNotice("ok", "Preparing backup…");
+      try {
+        await backupDbConnection(token, connId, database);
+        showNotice("ok", "Backup downloaded.");
+      } catch (e) {
+        showNotice("error", e instanceof Error ? e.message : "Backup failed");
+      }
+    },
+    [token, showNotice]
+  );
+
+  // Opening the restore picker: stash the target, then click the hidden input. The upload happens in
+  // onRestoreFile once a file is chosen (and confirmed).
+  const restoreConnection = useCallback((connId: string, database?: string) => {
+    restoreTargetRef.current = { connId, database };
+    restoreInputRef.current?.click();
+  }, []);
+
+  const onRestoreFile = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      // Reset so picking the same file twice still fires a change event next time.
+      event.target.value = "";
+      const target = restoreTargetRef.current;
+      restoreTargetRef.current = null;
+      if (!file || !target) return;
+      const label = target.database ? ` "${target.database}"` : "";
+      if (
+        !(await confirm({
+          title: "Restore database?",
+          message: `This OVERWRITES the current contents of${label || " the database"} with the uploaded dump. This cannot be undone.`,
+          confirmLabel: "Restore",
+          danger: true
+        }))
+      )
+        return;
+      showNotice("ok", "Restoring…");
+      try {
+        const res = await restoreDbConnection(token, target.connId, file, target.database);
+        showNotice(res.ok ? "ok" : "error", res.message || (res.ok ? "Restore complete." : "Restore failed"));
+        if (res.ok) reloadConnection(target.connId);
+      } catch (e) {
+        showNotice("error", e instanceof Error ? e.message : "Restore failed");
+      }
+    },
+    [confirm, token, showNotice, reloadConnection]
+  );
+
+  const renameSchema = useCallback(
+    async (connId: string, schema: string) => {
+      const next = window.prompt(`Rename schema "${schema}" to:`, schema);
+      if (next === null) return;
+      const trimmed = next.trim();
+      if (!trimmed || trimmed === schema) return;
+      try {
+        const res = await renameDbSchema(token, connId, schema, trimmed);
+        showNotice(res.ok ? "ok" : "error", res.message || (res.ok ? "Schema renamed." : "Rename failed"));
+        if (res.ok) reloadConnection(connId);
+      } catch (e) {
+        showNotice("error", e instanceof Error ? e.message : "Rename failed");
+      }
+    },
+    [token, showNotice, reloadConnection]
+  );
+
   const navValue: NavContextValue = useMemo(
     () => ({
       token,
@@ -946,6 +1111,11 @@ export function DbNavigator(props: DbNavigatorProps) {
       testConnection,
       openConnDialog,
       deleteConnection,
+      backupConnection,
+      restoreConnection,
+      renameSchema,
+      reloadKeys,
+      reloadConnection,
       openMenuId,
       menuAnchor,
       openMenu: (id, x, y) => {
@@ -966,6 +1136,11 @@ export function DbNavigator(props: DbNavigatorProps) {
       testConnection,
       openConnDialog,
       deleteConnection,
+      backupConnection,
+      restoreConnection,
+      renameSchema,
+      reloadKeys,
+      reloadConnection,
       openMenuId,
       menuAnchor,
       filter,
@@ -977,6 +1152,28 @@ export function DbNavigator(props: DbNavigatorProps) {
   return (
     <NavContext.Provider value={navValue}>
       {confirmDialog}
+      {/* hidden picker for the postgres restore flow */}
+      <input
+        ref={restoreInputRef}
+        type="file"
+        accept=".sql,.dump,.tar,.gz,.backup"
+        className="hidden"
+        onChange={onRestoreFile}
+      />
+      {notice && (
+        <div
+          className={`fixed bottom-4 left-1/2 z-[97] flex max-w-md -translate-x-1/2 items-start gap-2 rounded-xl px-4 py-3 text-sm font-medium shadow-xl ring-1 ${
+            notice.kind === "ok" ? "bg-elevated text-fg ring-edge" : "bg-danger/10 text-danger ring-danger/40"
+          }`}
+        >
+          {notice.kind === "ok" ? (
+            <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-500" />
+          ) : (
+            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          )}
+          <span className="break-words">{notice.text}</span>
+        </div>
+      )}
       {dialogOpen && (
         <ConnectionDialog
           token={token}

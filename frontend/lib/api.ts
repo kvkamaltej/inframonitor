@@ -916,9 +916,10 @@ export async function sftpDownload(token: string, serverId: string, path: string
 export type DbEngine = "postgres" | "mysql";
 
 // Stored connections additionally support file-backed SQLite (its `database` field carries a FILE
-// PATH; host/port/username/password are unused). Kept separate from DbEngine so the ad-hoc console,
+// PATH; host/port/username/password are unused) and SQL Server (mssql, default port 1433, same
+// host/port/user/password shape as postgres). Kept separate from DbEngine so the ad-hoc console,
 // which only opens postgres/mysql, is unaffected.
-export type DbConnEngine = "postgres" | "mysql" | "sqlite";
+export type DbConnEngine = "postgres" | "mysql" | "sqlite" | "mssql";
 
 export type DbConnectionParams = {
   engine: DbEngine;
@@ -962,6 +963,8 @@ export async function dbQuery(token: string, params: DbConnectionParams & { sql:
 export type DbConnection = {
   id: string;
   name: string;
+  // typed DbEngine for backward compatibility with the ad-hoc console call sites; stored sqlite/
+  // mssql connections carry those literal values at runtime (the navigator reads engine as a string)
   engine: DbEngine;
   host: string;
   port: number;
@@ -972,6 +975,9 @@ export type DbConnection = {
   // the production-safety guardrails in the workspace: a "prod" connection warns before executing
   // and requires a typed database-name confirmation for destructive statements.
   environment: string;
+  // persisted default for the navigator's "Show all databases" mode: when true the connection
+  // expands to every database on the server rather than only its stored default database.
+  show_all_databases: boolean;
   has_password: boolean;
   created_at: string;
 };
@@ -987,6 +993,8 @@ export type DbConnectionInput = {
   database?: string;
   group?: string | null;
   environment?: string;
+  // persisted "Show all databases" default; optional so older callers stay backward-compatible
+  show_all_databases?: boolean;
 };
 
 export type DbTable = {
@@ -1080,6 +1088,63 @@ export async function runConnectionQuery(token: string, id: string, sql: string,
     method: "POST",
     body: JSON.stringify({ sql, limit })
   });
+}
+
+// Renames a schema on a stored connection. Postgres-only server-side; the navigator only offers it
+// for schemas under a connection whose engine supports it.
+export async function renameDbSchema(
+  token: string,
+  id: string,
+  schema: string,
+  newName: string
+): Promise<{ ok: boolean; message: string }> {
+  return request(`/db/connections/${encodeURIComponent(id)}/schemas/${encodeURIComponent(schema)}/rename`, token, {
+    method: "POST",
+    body: JSON.stringify({ new_name: newName })
+  });
+}
+
+// Streams a database dump as a file download. Deliberately NOT routed through request<T>: the body
+// is raw dump bytes, so response.json() would throw. Mirrors sftpDownload's blob-download pattern;
+// the filename honours the server's Content-Disposition when present.
+export async function backupDbConnection(token: string, id: string, database?: string): Promise<void> {
+  const suffix = database ? `?database=${encodeURIComponent(database)}` : "";
+  const response = await fetch(`${API_URL}/db/connections/${encodeURIComponent(id)}/backup${suffix}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store"
+  });
+  // Errors (403, 400 for a non-postgres engine, 500 from pg_dump) come back as JSON/text, not bytes.
+  if (!response.ok) throw new ApiError(response.status, await response.text());
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filenameFromDisposition(response.headers.get("Content-Disposition")) || `${database || "database"}.dump.sql`;
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  }
+}
+
+// Restores a database from an uploaded dump. Multipart (field "file"), like the other upload
+// helpers. Destructive: the caller guards it behind a confirmation.
+export async function restoreDbConnection(
+  token: string,
+  id: string,
+  file: File,
+  database?: string
+): Promise<{ ok: boolean; message: string }> {
+  const suffix = database ? `?database=${encodeURIComponent(database)}` : "";
+  const body = new FormData();
+  body.append("file", file, file.name);
+  return upload(`/db/connections/${encodeURIComponent(id)}/restore${suffix}`, token, body);
 }
 
 // --- database metadata + query history (feature/db-workspace) ------------------------------

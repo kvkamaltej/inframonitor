@@ -18,7 +18,10 @@ export const metadata: Metadata = {
 // React components use, and applyTheme() re-stamps both on every change after hydration.
 const themeInitScript = `(function () {
   try {
-    var DARK = { "comfortable-dark": 1, "dracula": 1, "nord": 1, "solarized-dark": 1, "one-dark": 1 };
+    // Must list EVERY dark theme in lib/theme.ts THEMES: a saved name missing from both maps
+    // fails the recognition check below and is silently discarded pre-paint, reverting the
+    // operator's choice (this is what stranded "vanta-black" on reload). Keep in lockstep.
+    var DARK = { "comfortable-dark": 1, "vanta-black": 1, "dracula": 1, "nord": 1, "solarized-dark": 1, "one-dark": 1 };
     var LIGHT = { "soft-light": 1 };
     var saved = localStorage.getItem("inframonitor-theme-name");
     var name;

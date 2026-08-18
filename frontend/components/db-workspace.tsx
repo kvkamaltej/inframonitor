@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import {
   AlertTriangle,
   Database,
+  FolderOpen,
   History,
   Maximize2,
   Minimize2,
@@ -12,6 +13,7 @@ import {
   Play,
   PlayCircle,
   Plus,
+  Save,
   Sparkles,
   X
 } from "lucide-react";
@@ -25,6 +27,7 @@ import {
   type DbQueryHistory,
   type DbQueryResult
 } from "@/lib/api";
+import { downloadTextFile, safeFilename } from "@/lib/download";
 import { DbNavigator, type DbNavigatorCtx } from "@/components/db-navigator";
 import { DbSqlEditor } from "@/components/db-sql-editor";
 import { DbResultGrid } from "@/components/db-result-grid";
@@ -159,23 +162,27 @@ export function DbWorkspace({ token }: { token: string }) {
     [connections]
   );
 
-  const addTab = useCallback(
-    (tab: Omit<QueryTab, "id" | "result" | "error" | "running">) => {
-      const id = newTabId();
-      const full: QueryTab = { ...tab, id, result: null, error: "", running: false };
-      setTabs((prev) => [...prev, full]);
-      setActiveId(id);
-      return id;
-    },
-    []
-  );
-
   // Keep a ref to the latest tabs so execute()/runTab() (stable callbacks) can read current tab
   // state without being torn down and recreated on every keystroke.
   const tabsRef = useRef<QueryTab[]>(tabs);
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
+
+  const addTab = useCallback(
+    (tab: Omit<QueryTab, "id" | "result" | "error" | "running">) => {
+      const id = newTabId();
+      const full: QueryTab = { ...tab, id, result: null, error: "", running: false };
+      setTabs((prev) => [...prev, full]);
+      // Keep tabsRef in sync SYNCHRONOUSLY. The effect above only resyncs after the next render, so
+      // a caller that adds a tab and immediately runs it (View Data auto-run, deep link) would find
+      // runTab/execute unable to see the new tab yet. Appending here closes that gap.
+      tabsRef.current = [...tabsRef.current, full];
+      setActiveId(id);
+      return id;
+    },
+    []
+  );
 
   // --- query execution ---
   const execute = useCallback(
@@ -379,6 +386,63 @@ export function DbWorkspace({ token }: { token: string }) {
     });
   }
 
+  // Bulk close helpers for the tab context menu. Each keeps a subset around `anchorId` and re-points
+  // the active tab if the current one was closed.
+  const keepTabs = useCallback(
+    (keep: (t: QueryTab, idx: number, anchorIdx: number) => boolean, anchorId: string) => {
+      setTabs((prev) => {
+        const anchorIdx = prev.findIndex((t) => t.id === anchorId);
+        if (anchorIdx < 0) return prev;
+        const next = prev.filter((t, idx) => keep(t, idx, anchorIdx));
+        if (!next.some((t) => t.id === activeId)) {
+          setActiveId(next.some((t) => t.id === anchorId) ? anchorId : next[0]?.id ?? "");
+        }
+        return next;
+      });
+    },
+    [activeId]
+  );
+
+  const closeOtherTabs = useCallback((id: string) => keepTabs((t) => t.id === id, id), [keepTabs]);
+  const closeTabsToRight = useCallback((id: string) => keepTabs((_t, idx, anchorIdx) => idx <= anchorIdx, id), [keepTabs]);
+  const closeTabsToLeft = useCallback((id: string) => keepTabs((_t, idx, anchorIdx) => idx >= anchorIdx, id), [keepTabs]);
+  const closeAllTabs = useCallback(() => {
+    setTabs([]);
+    setActiveId("");
+  }, []);
+
+  // Tab context menu: which tab it targets and where to anchor it.
+  const [tabMenu, setTabMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+
+  // --- save / open .sql scripts ---
+  const sqlFileInputRef = useRef<HTMLInputElement | null>(null);
+  function saveSqlFile() {
+    if (!activeTab) return;
+    const base = safeFilename(activeTab.title || "query", "query");
+    downloadTextFile(`${base}.sql`, activeTab.sql ?? "");
+  }
+  async function onOpenSqlFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const text = await file.text();
+    // Load into the active tab if it's empty; otherwise open a fresh tab so nothing is clobbered.
+    if (activeTab && !activeTab.sql.trim()) {
+      patchTab(activeTab.id, { sql: text, title: file.name });
+    } else {
+      queryCounter += 1;
+      addTab({
+        title: file.name,
+        connectionId: activeTab?.connectionId ?? "",
+        connectionName: activeTab?.connectionName ?? "",
+        engine: activeTab?.engine ?? "postgres",
+        environment: activeTab?.environment ?? "",
+        database: activeTab?.database ?? "",
+        sql: text
+      });
+    }
+  }
+
   function openBlankTab() {
     queryCounter += 1;
     addTab({
@@ -477,6 +541,9 @@ export function DbWorkspace({ token }: { token: string }) {
           : "flex h-[calc(100vh-4rem)] w-full overflow-hidden bg-page"
       }
     >
+      {/* hidden picker for "Open .sql" */}
+      <input ref={sqlFileInputRef} type="file" accept=".sql,.txt" className="hidden" onChange={onOpenSqlFile} />
+
       {navCollapsed ? (
         /* collapsed: thin strip with an expand affordance */
         <div className="flex h-full w-10 shrink-0 flex-col items-center gap-3 border-r border-edge bg-elevated py-3">
@@ -523,62 +590,122 @@ export function DbWorkspace({ token }: { token: string }) {
       {/* RIGHT: editor + results + history */}
       <div className="flex h-full min-w-0 flex-1">
         <div className="flex h-full min-w-0 flex-1 flex-col">
-          {/* tab bar */}
-          <div className="flex items-center gap-1 overflow-x-auto border-b border-edge bg-elevated px-2 py-1.5">
-            {tabs.map((tab) => (
-              <div
-                key={tab.id}
-                onClick={() => setActiveId(tab.id)}
-                className={`group flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                  tab.id === activeId ? "bg-surface text-fg ring-1 ring-edge" : "text-muted hover:bg-surface/60"
+          {/* tab bar: tabs scroll horizontally, but the History + Fullscreen cluster is pinned in a
+              non-scrolling section so it (and especially Exit in fullscreen) is always reachable */}
+          <div className="flex items-center gap-1 border-b border-edge bg-elevated px-2 py-1.5">
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+              {tabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  onClick={() => setActiveId(tab.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setActiveId(tab.id);
+                    setTabMenu({ id: tab.id, x: e.clientX, y: e.clientY });
+                  }}
+                  className={`group flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                    tab.id === activeId ? "bg-surface text-fg ring-1 ring-edge" : "text-muted hover:bg-surface/60"
+                  }`}
+                >
+                  <span className="max-w-[160px] truncate">{tab.title}</span>
+                  {tab.environment === "prod" && (
+                    <span className="rounded bg-danger/15 px-1 py-0.5 text-[9px] font-bold uppercase leading-none text-danger">prod</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeTab(tab.id);
+                    }}
+                    className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded text-muted opacity-60 transition-opacity hover:text-danger group-hover:opacity-100"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={openBlankTab}
+                title="New query"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-fg"
+              >
+                <Plus size={16} />
+              </button>
+            </div>
+            <div className="flex shrink-0 items-center gap-1 pl-2">
+              <button
+                type="button"
+                onClick={() => setHistoryOpen((v) => !v)}
+                title="Toggle query history"
+                className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors ${
+                  historyOpen ? "bg-accent text-white" : "text-muted ring-1 ring-edge hover:text-fg"
                 }`}
               >
-                <span className="max-w-[160px] truncate">{tab.title}</span>
-                {tab.environment === "prod" && (
-                  <span className="rounded bg-danger/15 px-1 py-0.5 text-[9px] font-bold uppercase leading-none text-danger">prod</span>
-                )}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeTab(tab.id);
-                  }}
-                  className="ml-0.5 inline-flex h-4 w-4 items-center justify-center rounded text-muted opacity-60 transition-opacity hover:text-danger group-hover:opacity-100"
-                >
-                  <X size={13} />
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              onClick={openBlankTab}
-              title="New query"
-              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface hover:text-fg"
-            >
-              <Plus size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => setHistoryOpen((v) => !v)}
-              title="Toggle query history"
-              className={`ml-auto inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors ${
-                historyOpen ? "bg-accent text-white" : "text-muted ring-1 ring-edge hover:text-fg"
-              }`}
-            >
-              <History size={14} /> History
-            </button>
-            <button
-              type="button"
-              onClick={() => setFullscreen((v) => !v)}
-              title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
-              className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors ${
-                fullscreen ? "bg-accent text-white" : "text-muted ring-1 ring-edge hover:text-fg"
-              }`}
-            >
-              {fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-              {fullscreen ? "Exit" : "Fullscreen"}
-            </button>
+                <History size={14} /> History
+              </button>
+              <button
+                type="button"
+                onClick={() => setFullscreen((v) => !v)}
+                title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
+                className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors ${
+                  fullscreen ? "bg-accent text-white" : "text-muted ring-1 ring-edge hover:text-fg"
+                }`}
+              >
+                {fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                {fullscreen ? "Exit" : "Fullscreen"}
+              </button>
+            </div>
           </div>
+
+          {/* tab context menu (close / others / right / left / all) */}
+          {tabMenu && (
+            <>
+              <button
+                aria-label="Close menu"
+                className="fixed inset-0 z-[95] cursor-default"
+                onClick={() => setTabMenu(null)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setTabMenu(null);
+                }}
+              />
+              <div
+                className="fixed z-[96] min-w-[200px] overflow-hidden rounded-xl border border-edge bg-elevated py-1 shadow-xl"
+                style={{
+                  left: Math.max(4, Math.min(tabMenu.x, (typeof window !== "undefined" ? window.innerWidth : 9999) - 220)),
+                  top: Math.max(4, Math.min(tabMenu.y, (typeof window !== "undefined" ? window.innerHeight : 9999) - 200))
+                }}
+              >
+                {(() => {
+                  const idx = tabs.findIndex((t) => t.id === tabMenu.id);
+                  const items: { label: string; danger?: boolean; disabled?: boolean; onClick: () => void }[] = [
+                    { label: "Close", onClick: () => closeTab(tabMenu.id) },
+                    { label: "Close others", disabled: tabs.length <= 1, onClick: () => closeOtherTabs(tabMenu.id) },
+                    { label: "Close tabs to the right", disabled: idx >= tabs.length - 1, onClick: () => closeTabsToRight(tabMenu.id) },
+                    { label: "Close tabs to the left", disabled: idx <= 0, onClick: () => closeTabsToLeft(tabMenu.id) },
+                    { label: "Close all", danger: true, onClick: () => closeAllTabs() }
+                  ];
+                  return items.map((item, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      disabled={item.disabled}
+                      onClick={() => {
+                        setTabMenu(null);
+                        item.onClick();
+                      }}
+                      className={`flex w-full items-center px-3 py-1.5 text-left text-sm font-medium transition-colors hover:bg-surface disabled:cursor-not-allowed disabled:opacity-40 ${
+                        item.danger ? "text-danger" : "text-fg"
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ));
+                })()}
+              </div>
+            </>
+          )}
 
           {!activeTab ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-sm text-muted">
@@ -618,6 +745,23 @@ export function DbWorkspace({ token }: { token: string }) {
                   className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-surface px-3 text-sm font-semibold text-fg ring-1 ring-edge transition-colors hover:text-accent disabled:opacity-50"
                 >
                   <Sparkles size={15} /> Format
+                </button>
+                <button
+                  type="button"
+                  onClick={saveSqlFile}
+                  disabled={!activeTab.sql.trim()}
+                  title="Download this tab's SQL as a .sql file"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-surface px-3 text-sm font-semibold text-fg ring-1 ring-edge transition-colors hover:text-accent disabled:opacity-50"
+                >
+                  <Save size={15} /> Save .sql
+                </button>
+                <button
+                  type="button"
+                  onClick={() => sqlFileInputRef.current?.click()}
+                  title="Open a .sql file into a query tab"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-surface px-3 text-sm font-semibold text-fg ring-1 ring-edge transition-colors hover:text-accent"
+                >
+                  <FolderOpen size={15} /> Open .sql
                 </button>
 
                 {/* connection picker / label */}

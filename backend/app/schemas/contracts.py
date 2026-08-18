@@ -575,6 +575,9 @@ class DbConnectionCreate(BaseModel):
     # deployment environment tag: "dev" | "qa" | "uat" | "prod" | "" (unspecified). Free-form and
     # not validated so a new value can be introduced without a code change.
     environment: str = Field(default="", max_length=32)
+    # when true the schema browser lists every database on the server, not just this connection's
+    # own `database`. Persisted on the connection; defaults False.
+    show_all_databases: bool = False
     # folder name (the "group"); resolved to an existing Folder in the route, else left unassigned.
     group: str | None = None
 
@@ -590,6 +593,7 @@ class DbConnectionUpdate(BaseModel):
     password: str | None = None
     database: str | None = None
     environment: str | None = Field(default=None, max_length=32)
+    show_all_databases: bool | None = None
     group: str | None = None
 
 
@@ -604,6 +608,7 @@ class DbConnectionRead(BaseModel):
     username: str = ""
     database: str = ""
     environment: str = ""
+    show_all_databases: bool = False
     group: str | None = None
     has_password: bool = False
     created_at: datetime
@@ -686,6 +691,12 @@ class DbGenerateSqlRequest(BaseModel):
 
 class DbGenerateSqlResult(BaseModel):
     sql: str
+
+
+class DbSchemaRenameRequest(BaseModel):
+    # the target schema name. Validated in the route as a plain identifier (letters/digits/
+    # underscore) before it is quoted into an ALTER SCHEMA statement.
+    new_name: str = Field(min_length=1, max_length=63)
 
 
 # --- database query history (feature/db-connect follow-on) ----------------------------------
