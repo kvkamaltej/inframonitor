@@ -48,7 +48,13 @@ services:
       # reachable. That is also why binding the host side of those ports to
       # 127.0.0.1 below does not break the integrations panel.
       PROMETHEUS_URL: http://prometheus:9090
-      GRAFANA_URL: http://grafana:3000
+      # Grafana is the ONE URL the browser follows directly (the "Open in Grafana" link) rather
+      # than the app proxying it, so the in-network `grafana:3000` is unreachable from a user's
+      # browser. Override GRAFANA_URL in .env with the host-facing URL (e.g.
+      # http://<host-ip>:13000) to make the link work; the server-side /api/health probe still
+      # succeeds because the app container can reach the host's published 13000. Defaults to the
+      # in-network name so a plain full-mode bring-up still probes healthy.
+      GRAFANA_URL: ${GRAFANA_URL:-http://grafana:3000}
       LOKI_URL: http://loki:3100
       ALERTMANAGER_URL: http://alertmanager:9093
     depends_on:
