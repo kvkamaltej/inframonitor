@@ -77,6 +77,9 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   const [runtime, setRuntime] = useState("docker");
   const [tail, setTail] = useState(200);
   const [containers, setContainers] = useState<ContainerInfo[]>([]);
+  // Containers are loaded with `docker ps -a` (stopped ones included); this filters the table to
+  // just the running ones (status starts with "Up" for both docker and podman).
+  const [runningOnly, setRunningOnly] = useState(false);
   const [tomcat, setTomcat] = useState<TomcatInstance[] | null>(null);
   const [logPicker, setLogPicker] = useState("");
   const [detailPicker, setDetailPicker] = useState("");
@@ -1099,6 +1102,18 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
               icon={<Boxes size={18} />}
               action={
                 <>
+                  {/* Show only running containers (status starts with "Up"). A label-wrapped checkbox
+                      so the whole control toggles; disabled when nothing is loaded yet. */}
+                  <label className={`inline-flex h-9 items-center gap-2 rounded-full bg-slate-100 px-3 text-xs font-semibold text-slate-700 dark:bg-slate-800/50 dark:text-slate-300 ${containers.length === 0 ? "opacity-50" : "cursor-pointer"}`}>
+                    <input
+                      type="checkbox"
+                      checked={runningOnly}
+                      disabled={containers.length === 0}
+                      onChange={(event) => setRunningOnly(event.target.checked)}
+                      className="h-4 w-4 cursor-pointer accent-accent"
+                    />
+                    Running only
+                  </label>
                   {/* only shown when the host really runs both, so podman stays reachable */}
                   {bothRuntimes ? (
                     <select value={runtime} onChange={(event) => setRuntime(event.target.value)} className="h-9 cursor-pointer rounded-full border-none bg-slate-100 px-3 text-xs font-semibold text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100">
@@ -1112,7 +1127,10 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:bg-slate-800/40 dark:text-slate-400"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Image</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Ports</th><th className="px-4 py-3">Actions</th></tr></thead>
                 <tbody>
-                  {containers.map((container) => (
+                  {(() => {
+                  const visible = containers.filter((c) => !runningOnly || /^up\b/i.test((c.status || "").trim()));
+                  return (<>
+                  {visible.map((container) => (
                     <tr key={container.id} className="border-t border-line dark:border-slate-700">
                       <td className="px-4 py-3 font-medium">{container.name}</td>
                       <td className="px-4 py-3">{container.image}</td>
@@ -1128,7 +1146,9 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                       </td>
                     </tr>
                   ))}
-                  {containers.length === 0 ? <tr><td className="px-4 py-6 text-slate-500" colSpan={5}>Load Docker or Podman containers.</td></tr> : null}
+                  {visible.length === 0 ? <tr><td className="px-4 py-6 text-slate-500" colSpan={5}>{containers.length === 0 ? "Load Docker or Podman containers." : "No running containers."}</td></tr> : null}
+                  </>);
+                  })()}
                 </tbody>
               </table>
             </Panel>
