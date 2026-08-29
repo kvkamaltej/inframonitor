@@ -26,6 +26,9 @@ pymssql==2.3.2
 # Imported lazily inside app/services/kube.py, so the lite profile only needs it when the feature
 # is used; PyYAML (already pulled in) parses pasted kubeconfig YAML.
 kubernetes==31.0.0
+# Inventory export to Excel (GET /api/servers/export.xlsx). Pure-python wheel, no system
+# libraries; imported lazily in the route so the app still starts without it.
+openpyxl==3.1.5
 prometheus-client==0.21.1
 python-multipart==0.0.20
 pytest==8.3.4

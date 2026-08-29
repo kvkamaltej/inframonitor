@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, TerminalSquare, Trash2, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileSpreadsheet, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, TerminalSquare, Trash2, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AddServerForm } from "@/components/add-server-form";
 import { matchDistroLogo, OsLogo } from "@/components/os-logo";
@@ -11,7 +11,7 @@ import { useConfirm } from "@/components/confirm-dialog";
 import { CsvImportPanel } from "@/components/csv-import-panel";
 import { ShellPanel } from "@/components/shell-panel";
 import { StatusPill } from "@/components/status-pill";
-import { assignServerFolder, createFolder, deleteFolder, getFolders, getServers, refreshVitals, Folder, Server } from "@/lib/api";
+import { assignServerFolder, createFolder, deleteFolder, exportServersXlsx, getFolders, getServers, refreshVitals, Folder, Server } from "@/lib/api";
 
 const ALL = "__all__";
 
@@ -396,6 +396,10 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // The filter controls are hidden until the Filter button (next to Add Server) is clicked, so
   // the inventory header stays a single compact row until filtering is actually wanted.
   const [showFilters, setShowFilters] = useState(false);
+  // Excel export runs against the server (it re-reads the inventory there), so the button needs
+  // its own in-flight flag rather than reusing the vitals one.
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
   // Per-server vitals refresh in flight (ids), the row whose group-assignment dialog is open,
   // per-group sort overrides, and which group sections are collapsed. Sort and collapse are
   // keyed by group key ("" is the Unassigned bucket, same sentinel used everywhere else).
@@ -599,6 +603,20 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
     }
     setSortKey(column);
     setSortDir("asc");
+  }
+
+  // The export always covers the whole visible inventory, not the current filter: a filtered
+  // spreadsheet silently missing rows is a worse failure than one extra column of noise.
+  async function exportInventory() {
+    setExporting(true);
+    setExportError("");
+    try {
+      await exportServersXlsx(token);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
   }
 
   function clearFilters() {
@@ -809,6 +827,9 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
                     <button onClick={() => { setGrouped((value) => !value); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page">
                       {grouped ? <><List size={16} className="text-muted" /> Show all (flat)</> : <><FolderTree size={16} className="text-muted" /> Group view</>}
                     </button>
+                    <button disabled={exporting || servers.length === 0} onClick={() => { setActionsMenuOpen(false); void exportInventory(); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page disabled:opacity-50" title="Download the full inventory as an Excel workbook">
+                      <FileSpreadsheet size={16} className="text-muted" /> {exporting ? "Preparing…" : "Export to Excel"}
+                    </button>
                     {role === "admin" && (
                       <>
                         <div className="my-1 border-t border-edge" />
@@ -827,6 +848,9 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
           </div>
         </div>
 
+        {exportError ? (
+          <div className="border-b border-edge bg-danger/5 px-6 py-2 text-xs font-medium text-danger dark:text-red-400">Export failed: {exportError}</div>
+        ) : null}
         {role === "admin" && showAddForm && (
           <div className="border-b border-edge bg-elevated p-6">
             <AddServerForm token={token} onAdded={() => { setShowAddForm(false); void load(); }} />

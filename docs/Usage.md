@@ -78,8 +78,27 @@ Two things to keep in mind:
 - Import does **not** run SSH discovery. Imported servers land with status `unknown` and no OS/service
   data until you run discovery on each one.
 
+- A `group` column puts each row straight into a group, creating the group if it does not exist yet,
+  so a fleet arrives already organised rather than all in **Unassigned**.
+
 Full column list, defaults, the `;` convention for tags, the `\n` convention for private keys,
 duplicate handling, and a worked example are in [CsvImport.md](CsvImport.md).
+
+## Export the inventory to Excel
+
+**Server Management -> ... -> Export to Excel** downloads the whole inventory you can see as an `.xlsx`
+workbook (`server-inventory-<timestamp>.xlsx`). Available to every role, not just admins; a non-admin
+gets exactly the servers they have access to, the same rule the inventory table follows.
+
+The sheet has a frozen, filterable header row and one row per server: hostname, alias, IP, SSH port,
+username, group, environment, type, status, OS, kernel, architecture, CPU and CPU %, RAM and RAM used,
+disk, uptime in hours, health score, Docker version, tags, business owner, support contact, whether
+metrics are enabled, and when it was last checked.
+
+**Passwords and private keys are never exported.** The only credential information in the file is a
+`Credentials` column reading `Yes`/`No`, so the workbook is safe to hand to someone who should not hold
+the fleet's secrets. The export ignores the current filters on purpose -- a spreadsheet quietly missing
+rows is a worse failure than a few extra ones.
 
 ## The inventory table
 

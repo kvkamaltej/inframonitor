@@ -55,3 +55,9 @@ Thumbs.db
 
 # Monitoring http_sd bearer token (created per-deploy, matches MONITORING_SD_TOKEN)
 monitoring/prometheus/sd_token
+
+# Local credential scratch file -- never commit.
+.secrets
+
+# The fleet mapping sheet: internal hostnames/IPs, not part of the product.
+Static Mapping.csv

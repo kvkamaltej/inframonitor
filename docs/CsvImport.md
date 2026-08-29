@@ -45,12 +45,25 @@ mark is tolerated, so a CSV saved from Excel works.
 | `tags` | no | *(none)* | **Semicolon**-separated. See below. |
 | `business_owner` | no | `""` | |
 | `support_contact` | no | `""` | |
+| `group` | no | *(unassigned)* | Group (folder) name. Matched case-insensitively against existing groups; **created if it does not exist**. `folder` and `group_name` are accepted as synonyms. |
 
 Full header line:
 
 ```
-hostname,ip_address,username,password,private_key,ssh_port,environment,server_type,alias,tags,business_owner,support_contact
+hostname,ip_address,username,password,private_key,ssh_port,environment,server_type,alias,tags,business_owner,support_contact,group
 ```
+
+### Groups
+
+`group` lets one file carry its own grouping, so a fleet onboards in a single pass instead of every
+server being moved by hand afterwards. A name that matches an existing group (ignoring case) joins
+it; a name that does not exist is created as part of the import. An empty or absent `group` leaves
+the row in **Unassigned**.
+
+Hostname uniqueness is scoped to the group, so the same hostname may appear once per group -- `dev`
+in `BH` and `dev` in `MH` are two different servers. IP addresses stay globally unique, so a repeat
+IP is skipped as a duplicate regardless of group. That makes re-running the same file safe: every
+row comes back `skipped`, never duplicated.
 
 Supply `password`, `private_key`, both, or neither. A row with no credentials is still imported — it
 just becomes an inventory-only record until an admin saves credentials on the server detail page.

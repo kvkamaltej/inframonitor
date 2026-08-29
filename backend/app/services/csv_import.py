@@ -8,7 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.crypto import encrypt_secret
-from app.models.entities import Server, ServerStatus
+from app.models.entities import Folder, Server, ServerStatus
 from app.schemas.contracts import ServerImportResult, ServerImportRow
 from app.services.validation import validate_host_address
 
@@ -25,7 +25,15 @@ CSV_HEADERS = [
     "tags",
     "business_owner",
     "support_contact",
+    # Optional group (folder) name. A group that does not exist yet is created by the import, so
+    # a fleet CSV that already carries its own grouping column onboards in one pass instead of
+    # needing every server moved by hand afterwards.
+    "group",
 ]
+
+# "group" is the documented spelling; "folder" and "group_name" are accepted as synonyms because
+# an inventory export from elsewhere is as likely to use either.
+_FIELD_ALIASES = {"folder": "group", "group_name": "group"}
 
 _KNOWN_FIELDS = set(CSV_HEADERS)
 _REQUIRED_FIELDS = ("hostname", "ip_address", "username")
@@ -38,6 +46,7 @@ _MAX_LENGTHS = {
     "server_type": 64,
     "business_owner": 255,
     "support_contact": 255,
+    "group": 128,
 }
 _MAX_TAGS_LENGTH = 512
 _MAX_ROWS = 1000
@@ -58,7 +67,10 @@ class _RowError(ValueError):
 def _normalise_field(name: object) -> str:
     if not isinstance(name, str):
         return ""
-    return name.strip().lower().replace(" ", "_").replace("-", "_")
+    # Excel-quoted headers arrive as '"""IP_ADDR"""' once csv has unwrapped one layer, so stray
+    # quotes are stripped before matching -- otherwise a perfectly good column silently vanishes.
+    cleaned = name.strip().strip('"').strip().lower().replace(" ", "_").replace("-", "_")
+    return _FIELD_ALIASES.get(cleaned, cleaned)
 
 
 def _cell(value: object) -> str:
@@ -116,14 +128,18 @@ def _reader(csv_text: str) -> csv.DictReader:
     return reader
 
 
-def _existing_identifiers(db: Session) -> tuple[set[str], set[str]]:
+def _existing_identifiers(db: Session) -> tuple[set[tuple[int | None, str]], set[str]]:
     rows = db.execute(select(Server.hostname, Server.ip_address, Server.folder_id)).all()
-    # Imported servers land in the "Unassigned" group (folder_id NULL). Hostname uniqueness is
-    # scoped to the group, so a hostname only clashes with other UNASSIGNED servers; the same
-    # hostname living inside a folder is a different bucket and is not a collision. IPs stay global.
-    hostnames = {row[0].lower() for row in rows if row[0] and row[2] is None}
+    # Hostname uniqueness is scoped to the group, so the key is (folder_id, hostname): the same
+    # hostname in two different groups is two different servers, not a collision. Rows with no
+    # group share the NULL bucket. IP addresses stay globally unique.
+    hostnames = {(row[2], row[0].lower()) for row in rows if row[0]}
     ip_addresses = {row[1].lower() for row in rows if row[1]}
     return hostnames, ip_addresses
+
+
+def _folders_by_name(db: Session) -> dict[str, Folder]:
+    return {folder.name.strip().lower(): folder for folder in db.scalars(select(Folder)).all()}
 
 
 def _build_server(fields: dict[str, str]) -> Server:
@@ -166,7 +182,12 @@ def _build_server(fields: dict[str, str]) -> Server:
 def import_servers(db: Session, csv_text: str, dry_run: bool = False) -> ServerImportResult:
     reader = _reader(csv_text)
     existing_hostnames, existing_ips = _existing_identifiers(db)
-    seen_hostnames: set[str] = set()
+    # Groups named in the CSV are resolved case-insensitively against the existing ones and
+    # created on demand. `pending_folders` holds the ones this import invents, so several rows
+    # naming the same new group share a single Folder rather than each making their own.
+    known_folders = _folders_by_name(db)
+    pending_folders: dict[str, Folder] = {}
+    seen_hostnames: set[tuple[int | None, str]] = set()
     seen_ips: set[str] = set()
     rows: list[ServerImportRow] = []
     pending: list[Server] = []
@@ -188,7 +209,16 @@ def import_servers(db: Session, csv_text: str, dry_run: bool = False) -> ServerI
         hostname = fields.get("hostname", "")
         try:
             server = _build_server(fields)
-            hostname_key = server.hostname.lower()
+            group_name = fields.get("group", "").strip()
+            group_key = group_name.lower()
+            folder = known_folders.get(group_key) or pending_folders.get(group_key) if group_key else None
+            if group_key and folder is None:
+                folder = Folder(name=group_name, public_id=str(uuid.uuid4()))
+                pending_folders[group_key] = folder
+            # A brand-new folder has no primary key yet, so it cannot take part in the id-keyed
+            # dedup; its name stands in as the bucket instead, which is just as unique.
+            bucket: int | None | str = folder.id if (folder is not None and folder.id) else (group_key or None)
+            hostname_key = (bucket, server.hostname.lower())
             ip_key = server.ip_address.lower()
             if hostname_key in existing_hostnames or ip_key in existing_ips or hostname_key in seen_hostnames or ip_key in seen_ips:
                 skipped += 1
@@ -200,6 +230,8 @@ def import_servers(db: Session, csv_text: str, dry_run: bool = False) -> ServerI
             if dry_run:
                 rows.append(ServerImportRow(row=index, hostname=hostname, status="valid", message=_VALID_HINT))
                 continue
+            if folder is not None:
+                server.folder = folder
             pending.append(server)
             rows.append(
                 ServerImportRow(
@@ -218,6 +250,8 @@ def import_servers(db: Session, csv_text: str, dry_run: bool = False) -> ServerI
             failed += 1
             rows.append(ServerImportRow(row=index, hostname=hostname, status="failed", message="Row could not be imported"))
     if pending:
+        for folder in pending_folders.values():
+            db.add(folder)
         for server in pending:
             db.add(server)
         try:

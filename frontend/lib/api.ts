@@ -937,6 +937,31 @@ export async function sftpDownload(token: string, serverId: string, path: string
   }
 }
 
+// Downloads the whole visible inventory as an .xlsx. Same blob-download shape as sftpDownload,
+// and for the same reason: the body is spreadsheet bytes, not JSON.
+export async function exportServersXlsx(token: string): Promise<void> {
+  const response = await fetch(`${API_URL}/servers/export.xlsx`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store"
+  });
+  if (!response.ok) throw new ApiError(response.status, await response.text());
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filenameFromDisposition(response.headers.get("Content-Disposition")) || "server-inventory.xlsx";
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  }
+}
+
 // --- database console (feature/db-connect) -------------------------------------------------
 // A standalone SQL console: the caller supplies connection params + credentials on every call,
 // and the backend opens a fresh PostgreSQL/MySQL connection, runs the work, and closes it.

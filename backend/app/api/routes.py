@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Any
 from urllib.parse import quote
 
+import io
 import json
 import os
 import posixpath
@@ -1037,6 +1038,121 @@ def list_servers(claims: dict = Depends(require_user), db: Session = Depends(get
         return InventoryService(db).list_servers()
     user = _current_user(db, claims)
     return InventoryService(db).list_servers(_accessible_server_ids(db, user))
+
+
+# --- inventory export -----------------------------------------------------------------------
+#
+# One .xlsx of everything the caller can see, for the reporting and hand-over asks that a screen
+# cannot serve. It is deliberately a NON-SENSITIVE export: the SSH username is included because it
+# is operational detail, but passwords and private keys never are -- only a yes/no "Credentials"
+# column. Non-admins get exactly the servers they have access to, same rule as GET /servers.
+
+_EXPORT_COLUMNS: list[tuple[str, str]] = [
+    ("Hostname", "hostname"),
+    ("Alias", "alias"),
+    ("IP Address", "ip_address"),
+    ("SSH Port", "ssh_port"),
+    ("Username", "username"),
+    ("Group", "__group__"),
+    ("Environment", "environment"),
+    ("Server Type", "server_type"),
+    ("Status", "status"),
+    ("Operating System", "__os__"),
+    ("Kernel", "kernel"),
+    ("Architecture", "architecture"),
+    ("CPU", "cpu"),
+    ("CPU %", "__cpu_percent__"),
+    ("RAM (MB)", "ram_mb"),
+    ("RAM Used (MB)", "ram_used_mb"),
+    ("Disk (GB)", "disk_gb"),
+    ("Uptime (hours)", "__uptime_hours__"),
+    ("Health Score", "health_score"),
+    ("Docker", "docker_version"),
+    ("Tags", "__tags__"),
+    ("Business Owner", "business_owner"),
+    ("Support Contact", "support_contact"),
+    ("Credentials", "__has_credentials__"),
+    ("Metrics Enabled", "__metrics__"),
+    ("Last Checked", "__checked__"),
+]
+
+
+def _export_cell(server: ServerRead, key: str, group_name: str) -> object:
+    if key == "__group__":
+        return group_name or "Unassigned"
+    if key == "__os__":
+        return " ".join(part for part in [server.os_distro or server.operating_system, server.os_version] if part)
+    if key == "__tags__":
+        return ", ".join(server.tags)
+    # cpu_percent is -1 when the host has never been sampled; an empty cell says "unknown" in a
+    # spreadsheet, where -1 would be read as a real reading.
+    if key == "__cpu_percent__":
+        return "" if server.cpu_percent < 0 else server.cpu_percent
+    if key == "__uptime_hours__":
+        return round(server.uptime_seconds / 3600, 1) if server.uptime_seconds else ""
+    if key == "__has_credentials__":
+        return "Yes" if server.has_credentials else "No"
+    if key == "__metrics__":
+        return "Yes" if server.metrics_enabled else "No"
+    if key == "__checked__":
+        value = getattr(server, "vitals_checked_at", None) or getattr(server, "last_health_check", None)
+        return str(value) if value else ""
+    return getattr(server, key, "")
+
+
+@router.get("/servers/export.xlsx")
+def export_servers_xlsx(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> StreamingResponse:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError as exc:  # pragma: no cover - only when the optional wheel is missing
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Excel export needs the openpyxl package. Install backend requirements and restart.",
+        ) from exc
+
+    if _is_admin(claims):
+        servers = InventoryService(db).list_servers()
+    else:
+        servers = InventoryService(db).list_servers(_accessible_server_ids(db, _current_user(db, claims)))
+    # One id->name lookup for the Group column, rather than a folder query per row.
+    group_names = {
+        public_id: name
+        for public_id, name in db.execute(select(Server.public_id, Folder.name).join(Folder, Server.folder_id == Folder.id)).all()
+    }
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Server Inventory"
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="1F3B57")
+    for column, (label, _key) in enumerate(_EXPORT_COLUMNS, start=1):
+        cell = sheet.cell(row=1, column=column, value=label)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(vertical="center")
+    for row_index, server in enumerate(servers, start=2):
+        group_name = group_names.get(server.id, "")
+        for column, (_label, key) in enumerate(_EXPORT_COLUMNS, start=1):
+            sheet.cell(row=row_index, column=column, value=_export_cell(server, key, group_name))
+    # Freeze the header and size each column to its widest cell (capped), so the sheet is readable
+    # the moment it opens rather than after a manual column-drag.
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(_EXPORT_COLUMNS))}{max(len(servers) + 1, 1)}"
+    for column, (label, _key) in enumerate(_EXPORT_COLUMNS, start=1):
+        widest = max([len(label)] + [len(str(sheet.cell(row=r, column=column).value or "")) for r in range(2, len(servers) + 2)])
+        sheet.column_dimensions[get_column_letter(column)].width = min(max(widest + 2, 10), 42)
+
+    buffer = io.BytesIO()
+    book.save(buffer)
+    buffer.seek(0)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="server-inventory-{stamp}.xlsx"'},
+    )
 
 
 def _validate_address_or_400(value: str) -> None:
