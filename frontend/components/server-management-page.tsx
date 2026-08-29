@@ -2,9 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, CircleDot, Cpu, ExternalLink, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, HardDrive, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, Server as ServerIcon, TerminalSquare, Trash2, X } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, TerminalSquare, Trash2, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AddServerForm } from "@/components/add-server-form";
 import { AppShell } from "@/components/app-shell";
 import { useConfirm } from "@/components/confirm-dialog";
@@ -38,14 +37,35 @@ function osDetail(server: Server): string {
   return [server.os_family, server.package_manager].filter(Boolean).join(" / ");
 }
 
-// lucide has no distro logos, so map the OS family to a sensible generic glyph. Anything
-// unrecognised (or missing) falls back to a plain server icon.
-function osIcon(server: Server): LucideIcon {
-  const family = `${server.os_family || server.os_distro || ""}`.toLowerCase();
-  if (/(ubuntu|debian|mint)/.test(family)) return CircleDot;
-  if (/(rhel|centos|fedora|rocky|alma|red\s*hat|suse)/.test(family)) return ServerIcon;
-  if (/(alpine|arch|gentoo)/.test(family)) return Cpu;
-  return HardDrive;
+// lucide has no distro logos, so each known distro gets a coloured letter badge in its brand
+// colour (Ubuntu orange, RHEL red, Debian crimson, …). The OS name itself is dropped from the
+// cell and moved to the hover tooltip, keeping the column narrow and scannable.
+type OsBadge = { letter: string; bg: string; fg: string };
+
+function osBadge(server: Server): OsBadge {
+  const key = `${server.os_distro || ""} ${server.os_family || ""} ${server.operating_system || ""}`.toLowerCase();
+  if (/ubuntu/.test(key)) return { letter: "U", bg: "#E95420", fg: "#ffffff" };
+  if (/debian/.test(key)) return { letter: "D", bg: "#A80030", fg: "#ffffff" };
+  if (/(red\s*hat|rhel)/.test(key)) return { letter: "R", bg: "#EE0000", fg: "#ffffff" };
+  if (/centos/.test(key)) return { letter: "C", bg: "#932279", fg: "#ffffff" };
+  if (/rocky/.test(key)) return { letter: "R", bg: "#10B981", fg: "#ffffff" };
+  if (/alma/.test(key)) return { letter: "A", bg: "#0F4266", fg: "#ffffff" };
+  if (/fedora/.test(key)) return { letter: "F", bg: "#51A2DA", fg: "#ffffff" };
+  if (/(suse|sles)/.test(key)) return { letter: "S", bg: "#73BA25", fg: "#ffffff" };
+  if (/alpine/.test(key)) return { letter: "A", bg: "#0D597F", fg: "#ffffff" };
+  if (/arch/.test(key)) return { letter: "A", bg: "#1793D1", fg: "#ffffff" };
+  if (/(oracle)/.test(key)) return { letter: "O", bg: "#C74634", fg: "#ffffff" };
+  if (/mint/.test(key)) return { letter: "M", bg: "#87CF3E", fg: "#ffffff" };
+  if (/windows/.test(key)) return { letter: "W", bg: "#0078D4", fg: "#ffffff" };
+  if (/(mac|darwin)/.test(key)) return { letter: "M", bg: "#333333", fg: "#ffffff" };
+  return { letter: "?", bg: "#94A3B8", fg: "#ffffff" };
+}
+
+// The full OS string plus family/package-manager detail, used as the cell's hover tooltip now
+// that the visible cell is icon-only.
+function osTooltip(server: Server): string {
+  const detail = osDetail(server);
+  return detail ? `${osLabel(server)} (${detail})` : osLabel(server);
 }
 
 function uptimeLabel(seconds: number): string {
@@ -213,25 +233,49 @@ function RowActions({ server, canShell, vitalsBusy, onShell, onRefreshVitals, on
   onMoveToGroup: () => void;
 }) {
   const router = useRouter();
+  // `ready` gates painting: the menu is rendered invisibly at a first-guess spot, measured, then
+  // pinned to its real position. Measuring beats the old fixed height estimate, which left the
+  // menu floating far from the button whenever the guess was taller than the actual menu.
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const [ready, setReady] = useState(false);
   const btnRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const WIDTH = 224;
-  // Approx. height of the five items + divider; only used to decide whether to flip upward.
-  const EST_HEIGHT = 236;
+  const GAP = 4;
+  const MARGIN = 8;
 
   function openMenu() {
     const box = btnRef.current?.getBoundingClientRect();
     if (!box) return;
-    const x = Math.max(8, Math.min(box.right - WIDTH, window.innerWidth - WIDTH - 8));
-    // Flip the menu above the button when there isn't room below it in the viewport.
-    const openUp = box.bottom + 4 + EST_HEIGHT > window.innerHeight && box.top - 4 - EST_HEIGHT > 0;
-    const y = openUp ? Math.max(8, box.top - 4 - EST_HEIGHT) : box.bottom + 4;
-    setPos({ x, y });
+    const x = Math.max(MARGIN, Math.min(box.right - WIDTH, window.innerWidth - WIDTH - MARGIN));
+    setReady(false);
+    setPos({ x, y: box.bottom + GAP });
   }
+
+  function closeMenu() {
+    setPos(null);
+    setReady(false);
+  }
+
+  // Correct the vertical position against the menu's measured height: keep it directly below the
+  // button whenever it fits, flip it directly above when it does not, and only as a last resort
+  // clamp it into the viewport.
+  useLayoutEffect(() => {
+    if (!pos || ready) return;
+    const box = btnRef.current?.getBoundingClientRect();
+    const height = menuRef.current?.offsetHeight ?? 0;
+    if (!box || !height) { setReady(true); return; }
+    const below = box.bottom + GAP;
+    const fitsBelow = below + height <= window.innerHeight - MARGIN;
+    const above = box.top - GAP - height;
+    const y = fitsBelow ? below : (above >= MARGIN ? above : Math.max(MARGIN, window.innerHeight - MARGIN - height));
+    setReady(true);
+    if (y !== pos.y) setPos({ x: pos.x, y });
+  }, [pos, ready]);
 
   useEffect(() => {
     if (!pos) return;
-    const close = () => setPos(null);
+    const close = () => closeMenu();
     window.addEventListener("scroll", close, true);
     window.addEventListener("resize", close);
     return () => {
@@ -245,7 +289,7 @@ function RowActions({ server, canShell, vitalsBusy, onShell, onRefreshVitals, on
     <>
       <button
         ref={btnRef}
-        onClick={() => (pos ? setPos(null) : openMenu())}
+        onClick={() => (pos ? closeMenu() : openMenu())}
         aria-haspopup="menu"
         aria-expanded={Boolean(pos)}
         title={`Actions for ${server.hostname}`}
@@ -255,22 +299,22 @@ function RowActions({ server, canShell, vitalsBusy, onShell, onRefreshVitals, on
       </button>
       {pos ? (
         <>
-          <button aria-label="Dismiss actions" onClick={() => setPos(null)} className="fixed inset-0 z-40 cursor-default" />
-          <div role="menu" style={{ left: pos.x, top: pos.y, width: WIDTH }} className="fixed z-50 max-h-80 overflow-auto rounded-2xl border border-line bg-panel py-1 text-left shadow-lg dark:border-slate-700 dark:bg-slate-900">
-            <button role="menuitem" className={item} onClick={() => { setPos(null); router.push(`/server/?id=${encodeURIComponent(server.id)}`); }}>
+          <button aria-label="Dismiss actions" onClick={closeMenu} className="fixed inset-0 z-40 cursor-default" />
+          <div ref={menuRef} role="menu" style={{ left: pos.x, top: pos.y, width: WIDTH, visibility: ready ? "visible" : "hidden" }} className="fixed z-50 max-h-80 overflow-auto rounded-2xl border border-line bg-panel py-1 text-left shadow-lg dark:border-slate-700 dark:bg-slate-900">
+            <button role="menuitem" className={item} onClick={() => { closeMenu(); router.push(`/server/?id=${encodeURIComponent(server.id)}`); }}>
               <ExternalLink size={14} className="text-accent" /> Open server
             </button>
-            <button role="menuitem" className={item} onClick={() => { setPos(null); router.push(`/server/?id=${encodeURIComponent(server.id)}&edit=1`); }}>
+            <button role="menuitem" className={item} onClick={() => { closeMenu(); router.push(`/server/?id=${encodeURIComponent(server.id)}&edit=1`); }}>
               <Pencil size={14} className="text-accent" /> Edit details
             </button>
-            <button role="menuitem" disabled={vitalsBusy} className={item} onClick={() => { setPos(null); onRefreshVitals(); }} title="Probe this server's live vitals over SSH">
+            <button role="menuitem" disabled={vitalsBusy} className={item} onClick={() => { closeMenu(); onRefreshVitals(); }} title="Probe this server's live vitals over SSH">
               <RefreshCw size={14} className="text-accent" /> Refresh vitals
             </button>
-            <button role="menuitem" disabled={!canShell} className={item} onClick={() => { setPos(null); onShell(); }} title={canShell ? "Open an interactive shell" : "No stored credentials for this server"}>
+            <button role="menuitem" disabled={!canShell} className={item} onClick={() => { closeMenu(); onShell(); }} title={canShell ? "Open an interactive shell" : "No stored credentials for this server"}>
               <TerminalSquare size={14} className="text-accent" /> Open shell
             </button>
             <div className="my-1 border-t border-line dark:border-slate-700" />
-            <button role="menuitem" className={item} onClick={() => { setPos(null); onMoveToGroup(); }}>
+            <button role="menuitem" className={item} onClick={() => { closeMenu(); onMoveToGroup(); }}>
               <FolderIcon size={14} className="text-accent" /> Move to group…
             </button>
           </div>
@@ -364,13 +408,19 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // Grouped-by-folder is the default view the feature is meant to deliver; the toggle drops back
   // to the original flat "all servers" table for anyone who wants it.
   const [grouped, setGrouped] = useState(true);
+  // The filter controls are hidden until the Filter button (next to Add Server) is clicked, so
+  // the inventory header stays a single compact row until filtering is actually wanted.
+  const [showFilters, setShowFilters] = useState(false);
   // Per-server vitals refresh in flight (ids), the row whose group-assignment dialog is open,
   // per-group sort overrides, and which group sections are collapsed. Sort and collapse are
   // keyed by group key ("" is the Unassigned bucket, same sentinel used everywhere else).
   const [vitalsBusyIds, setVitalsBusyIds] = useState<Set<string>>(new Set());
   const [assignFor, setAssignFor] = useState<Server | null>(null);
   const [groupSort, setGroupSort] = useState<Record<string, GroupSort>>({});
+  // Groups start collapsed; `collapseSeeded` makes that a one-time default on first load rather
+  // than a rule that would re-collapse groups the user has since opened.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [collapseSeeded, setCollapseSeeded] = useState(false);
   const [showFolderManager, setShowFolderManager] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [folderBusy, setFolderBusy] = useState(false);
@@ -541,6 +591,13 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   }, [filteredServers, folders]);
 
   // A type or environment can disappear from the inventory (renamed, or its last server
+  // Collapse every group the first time the grouped view has something to show.
+  useEffect(() => {
+    if (collapseSeeded || groups.length === 0) return;
+    setCollapsed(new Set(groups.map((group) => group.key)));
+    setCollapseSeeded(true);
+  }, [groups, collapseSeeded]);
+
   // deleted). Without this the table would silently show zero rows against a filter value
   // that no longer exists anywhere.
   useEffect(() => {
@@ -605,7 +662,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // One row renderer shared by the grouped and flat views, so the columns can never drift apart
   // between the two. Admin-only controls (Shell, folder assignment) live in the trailing cell.
   const renderRow = (server: Server) => {
-    const OsGlyph = osIcon(server);
+    const badge = osBadge(server);
     return (
     <tr key={server.id} className="transition-colors hover:bg-page">
       <td className="px-3 py-3 align-top">
@@ -613,10 +670,14 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
         {server.tags.length ? <div className="mt-0.5 truncate text-xs font-medium text-muted" title={server.tags.join(", ")}>{server.tags.join(", ")}</div> : null}
       </td>
       <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-fg">{server.ip_address}</td>
-      <td className="px-3 py-3 align-top font-medium text-fg" title={osDetail(server) || undefined}>
-        <span className="flex items-center gap-1.5">
-          <OsGlyph size={14} className="shrink-0 text-muted" />
-          <span className="truncate">{osLabel(server)}</span>
+      <td className="px-3 py-3 align-top font-medium text-fg">
+        <span
+          title={osTooltip(server)}
+          aria-label={osTooltip(server)}
+          style={{ backgroundColor: badge.bg, color: badge.fg }}
+          className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[11px] font-bold leading-none"
+        >
+          {badge.letter}
         </span>
       </td>
       <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-fg">{uptimeLabel(server.uptime_seconds)}</td>
@@ -651,13 +712,15 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // flat view (global sort) and once per section in the grouped view (each section's own sort),
   // so a group's name renders as a *section heading above its own table* and each group sorts
   // independently of the others.
-  const serverTable = (rows: Server[], sKey: SortKey | null, sDir: SortDir, onSort: (column: SortKey) => void) => (
-    <div className="overflow-x-auto">
+  const serverTable = (rows: Server[], sKey: SortKey | null, sDir: SortDir, onSort: (column: SortKey) => void, indent = false) => (
+    // `indent` pads a group's table so its first column lines up with the group heading text
+    // above it, instead of sitting flush against the card edge.
+    <div className={`overflow-x-auto ${indent ? "px-3" : ""}`}>
       <table className="w-full table-fixed text-left text-sm">
         <colgroup>
-          <col className="w-[16%]" />
+          <col className="w-[21%]" />
           <col className="w-[11%]" />
-          <col className="w-[13%]" />
+          <col className="w-[6%]" />
           <col className="w-[8%]" />
           <col className="w-[8%]" />
           <col className="w-[12%]" />
@@ -740,6 +803,15 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
                 {showAddForm ? <><X size={16} /> Cancel</> : <><Plus size={16} /> Add Server</>}
               </button>
             )}
+            <button
+              onClick={() => setShowFilters((value) => !value)}
+              aria-expanded={showFilters}
+              title={showFilters ? "Hide filters" : "Show filters"}
+              className={`inline-flex h-9 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold transition-colors ${showFilters || filtersActive ? "bg-accent/10 text-accent hover:bg-accent/20 dark:bg-accent/20 dark:hover:bg-accent/30" : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"}`}
+            >
+              <Filter size={16} /> Filter{filtersActive ? <span className="rounded-full bg-accent px-1.5 text-[10px] font-bold text-white">on</span> : null}
+              {showFilters ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            </button>
             {/* Everything else is tucked into a ⋮ menu to keep the inventory header minimal. */}
             <div className="relative">
               <button onClick={() => setActionsMenuOpen((v) => !v)} aria-label="Inventory actions" aria-expanded={actionsMenuOpen} title="Actions" className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
@@ -817,8 +889,8 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
             )}
           </div>
         )}
+        {showFilters ? (
         <div className="flex flex-wrap items-center gap-3 border-b border-edge bg-elevated px-6 py-3">
-          <Filter size={16} className="text-muted" />
           <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} aria-label="Filter by server type" className={selectClass}>
             <option value={ALL}>All types</option>
             {serverTypes.map((value) => <option key={value} value={value}>{value}</option>)}
@@ -839,6 +911,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
           ) : null}
           <span className="text-xs font-medium text-muted">Showing {visibleServers.length} of {servers.length} {servers.length === 1 ? "server" : "servers"}</span>
         </div>
+        ) : null}
         {/* Empty states first, then the inventory itself. Grouped view renders one titled
             section per group (each with its own table), so a group name — Unassigned included —
             reads as a section heading, never as a row crammed under the column header. */}
@@ -868,7 +941,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
                     <h3 className="text-sm font-semibold text-fg">{group.name}</h3>
                     <span className="rounded-full bg-page px-2 py-0.5 text-[11px] font-semibold text-muted">{group.count}</span>
                   </button>
-                  {isCollapsed ? null : serverTable(sortRows(group.rows, gsort.key, gsort.dir), gsort.key, gsort.dir, (column) => toggleGroupSort(group.key, column))}
+                  {isCollapsed ? null : serverTable(sortRows(group.rows, gsort.key, gsort.dir), gsort.key, gsort.dir, (column) => toggleGroupSort(group.key, column), true)}
                 </div>
               );
             })}
