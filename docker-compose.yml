@@ -91,6 +91,16 @@ services:
       # Where the app writes user-defined Prometheus alert rules (shared custom_rules volume in
       # full mode). Harmless in lite mode -- nothing reads it when Prometheus is not running.
       CUSTOM_RULES_PATH: ${CUSTOM_RULES_PATH:-/app/custom-rules/custom.yml}
+      # Optional Keycloak (OIDC) login. When ALL of OIDC_ISSUER + OIDC_CLIENT_ID + OIDC_CLIENT_SECRET
+      # are set, the login screen offers "Sign in with Keycloak" and the backend brokers the flow;
+      # when empty (the default -- lite/standalone/desktop, SQLite) OIDC is OFF and only local login
+      # works. Listed here so Compose forwards them (Compose only passes the keys named in this block).
+      # OIDC_ISSUER e.g. http://192.168.1.50:8080/realms/ecil ; APP_PUBLIC_URL is the browser-facing
+      # base used to build the OIDC redirect_uri (must match a Keycloak client redirect URI).
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-}
     ports:
       - "${APP_PORT:-8088}:8000"
     volumes:

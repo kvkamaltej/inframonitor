@@ -1,6 +1,6 @@
 from collections import deque
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 from urllib.parse import quote
@@ -9,17 +9,21 @@ import json
 import os
 import posixpath
 import re
+import secrets
 import tempfile
 import threading
 import uuid
 
 import asyncio
 
+from jose import jwt
+
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
-from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -31,6 +35,7 @@ from app.services.secrets import VaultError, get_vault_config, load_credentials,
 from app.services import alert_rules
 from app.services import db_backend
 from app.services import db_backup
+from app.services import oidc
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, DbQueryHistory, Folder, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     AccessPolicyCreate,
@@ -274,6 +279,119 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     return TokenResponse(access_token=create_access_token(user.email, user.role.value))
+
+
+# --- optional Keycloak / OIDC single sign-on (Authorization Code + PKCE, BFF) -------------------
+# All three routes are PUBLIC (no auth dependency) and inert when OIDC is unconfigured: /status
+# reports enabled:false and /login redirects back to the SPA with #oidc_error=disabled. The state,
+# PKCE verifier, and nonce are carried across the round-trip in a short-lived signed cookie so the
+# backend stays stateless. Everything below is additive -- /auth/login above is unchanged.
+_OIDC_FLOW_COOKIE = "oidc_flow"
+_OIDC_COOKIE_PATH = "/api/auth/oidc"
+_OIDC_FLOW_MAX_AGE = 300  # 5 minutes
+
+
+def _oidc_app_base() -> str:
+    return get_settings().app_public_url.rstrip("/")
+
+
+def _oidc_error_redirect(message: str) -> RedirectResponse:
+    return RedirectResponse(f"{_oidc_app_base()}/#oidc_error={quote(message)}", status_code=302)
+
+
+@router.get("/auth/oidc/status")
+def oidc_status() -> dict:
+    return {"enabled": oidc.configured()}
+
+
+@router.get("/auth/oidc/login")
+def oidc_login() -> RedirectResponse:
+    if not oidc.configured():
+        return RedirectResponse(f"{_oidc_app_base()}/#oidc_error=disabled", status_code=302)
+    settings = get_settings()
+    state = secrets.token_urlsafe(24)
+    verifier, challenge = oidc.make_pkce()
+    nonce = secrets.token_urlsafe(16)
+    flow = jwt.encode(
+        {
+            "state": state,
+            "verifier": verifier,
+            "nonce": nonce,
+            "exp": datetime.now(timezone.utc) + timedelta(seconds=_OIDC_FLOW_MAX_AGE),
+        },
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
+    resp = RedirectResponse(oidc.build_authorize_url(state, challenge, nonce), status_code=302)
+    resp.set_cookie(
+        _OIDC_FLOW_COOKIE,
+        flow,
+        max_age=_OIDC_FLOW_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path=_OIDC_COOKIE_PATH,
+    )
+    return resp
+
+
+@router.get("/auth/oidc/callback")
+def oidc_callback(request: Request, db: Session = Depends(get_db)) -> RedirectResponse:
+    if not oidc.configured():
+        return RedirectResponse(f"{_oidc_app_base()}/#oidc_error=disabled", status_code=302)
+
+    # 1. Recover and verify the signed flow cookie (state + PKCE verifier + nonce).
+    cookie = request.cookies.get(_OIDC_FLOW_COOKIE)
+    if not cookie:
+        return _oidc_error_redirect("expired")
+    try:
+        flow = jwt.decode(cookie, get_settings().jwt_secret, algorithms=["HS256"])
+    except Exception:
+        return _oidc_error_redirect("expired")
+
+    # 2. Guard the callback: an IdP-reported error, or a state that does not match, is a hard stop.
+    params = request.query_params
+    if params.get("error") or params.get("state") != flow.get("state"):
+        return _oidc_error_redirect("state")
+    code = params.get("code")
+    if not code:
+        return _oidc_error_redirect("state")
+
+    # 3. Exchange the code, validate the access token, map claims to an app identity.
+    try:
+        tokens = oidc.exchange_code(code, flow.get("verifier", ""))
+        claims = oidc.validate_token(tokens["access_token"], flow.get("nonce"))
+        email, role = oidc.extract_identity(claims)
+    except oidc.OidcError as exc:
+        return _oidc_error_redirect(str(exc))
+    except Exception as exc:  # any unexpected shape from the IdP still surfaces cleanly to the SPA
+        return _oidc_error_redirect(str(exc))
+
+    # 4. Provision or sync the local user. Keycloak is the source of truth for the role.
+    from app.models.entities import Role
+
+    model_role = Role.administrator if role == "admin" else Role(role)
+    user = db.scalar(select(User).where(func.lower(User.email) == email.lower()))
+    if user is None:
+        full_name = str(claims.get("name") or claims.get("preferred_username") or email)
+        # Unusable local password: SSO users cannot fall back to /auth/login.
+        user = User(
+            email=email,
+            full_name=full_name,
+            password_hash=hash_password(secrets.token_urlsafe(32)),
+            role=model_role,
+        )
+        db.add(user)
+    else:
+        user.role = model_role
+    db.commit()
+    db.refresh(user)
+
+    # 5. Mint the app JWT and hand it to the SPA in the redirect fragment; clear the flow cookie.
+    app_jwt = create_access_token(user.email, user.role.value)
+    resp = RedirectResponse(f"{_oidc_app_base()}/#access_token={app_jwt}", status_code=302)
+    resp.delete_cookie(_OIDC_FLOW_COOKIE, path=_OIDC_COOKIE_PATH)
+    return resp
 
 
 def _configured_default_password() -> str:

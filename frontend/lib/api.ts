@@ -435,6 +435,27 @@ export async function getMe(token: string): Promise<Me> {
   return request<Me>("/auth/me", token);
 }
 
+// --- Keycloak OIDC (additive; off unless the backend enables it) ----------------------------
+// Unauthenticated status probe, mirroring login()'s tokenless fetch against API_URL. Any failure
+// (endpoint absent, network error, non-2xx, bad JSON) is swallowed to { enabled: false } so the
+// "Sign in with Keycloak" button simply never appears rather than breaking the login screen.
+export async function getOidcStatus(): Promise<{ enabled: boolean }> {
+  try {
+    const response = await fetch(`${API_URL}/auth/oidc/status`, { cache: "no-store" });
+    if (!response.ok) return { enabled: false };
+    const data = await response.json();
+    return { enabled: Boolean(data?.enabled) };
+  } catch {
+    return { enabled: false };
+  }
+}
+
+// The URL to send the browser to (full-page navigation, NOT fetch) to start the Keycloak flow.
+// Same API_URL base every other call uses, so it works same-origin or behind the env override.
+export function oidcLoginUrl(): string {
+  return `${API_URL}/auth/oidc/login`;
+}
+
 export async function changePassword(token: string, currentPassword: string, newPassword: string): Promise<{ ok: boolean; message: string }> {
   return request("/auth/change-password", token, {
     method: "POST",

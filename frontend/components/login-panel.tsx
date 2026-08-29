@@ -1,12 +1,31 @@
 "use client";
 
 import { LockKeyhole } from "lucide-react";
-import { FormEvent, useState } from "react";
-import { login } from "@/lib/api";
+import { FormEvent, useEffect, useState } from "react";
+import { getOidcStatus, login, oidcLoginUrl } from "@/lib/api";
 
-export function LoginPanel({ onLogin, onCancel }: { onLogin: (token: string) => void; onCancel?: () => void }) {
-  const [message, setMessage] = useState("");
+export function LoginPanel({ onLogin, onCancel, notice }: { onLogin: (token: string) => void; onCancel?: () => void; notice?: string }) {
+  // Seed with an externally-supplied notice (e.g. an OIDC callback error) so it shows on the gate;
+  // a local login attempt overwrites it via setMessage below.
+  const [message, setMessage] = useState(notice ?? "");
   const [loading, setLoading] = useState(false);
+  // Whether the backend has Keycloak OIDC enabled. Starts false so the screen is identical to
+  // today until the probe confirms it is on; a failed/absent probe leaves it false (button hidden).
+  const [oidcEnabled, setOidcEnabled] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    getOidcStatus()
+      .then((status) => {
+        if (active) setOidcEnabled(status.enabled);
+      })
+      .catch(() => {
+        // getOidcStatus already swallows to { enabled: false }; this is belt-and-suspenders.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -43,6 +62,22 @@ export function LoginPanel({ onLogin, onCancel }: { onLogin: (token: string) => 
             {loading ? "Signing in..." : "Sign in"}
           </button>
           {message ? <p className="mt-2 text-center text-sm font-medium text-red-600 dark:text-red-400">{message}</p> : null}
+          {oidcEnabled ? (
+            <>
+              <div className="mt-2 flex items-center gap-3">
+                <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+                <span className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">or</span>
+                <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+              </div>
+              <button
+                type="button"
+                onClick={() => window.location.assign(oidcLoginUrl())}
+                className="flex h-12 w-full items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                Sign in with Keycloak
+              </button>
+            </>
+          ) : null}
           {onCancel ? (
             <button type="button" onClick={onCancel} className="mt-1 text-center text-sm font-medium text-muted transition-colors hover:text-accent">
               Continue as guest

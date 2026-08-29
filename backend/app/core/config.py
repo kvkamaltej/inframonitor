@@ -66,6 +66,19 @@ class Settings(BaseSettings):
     # only used in the default-credentials banner, so the operator is told where to log in
     public_url: str = "http://localhost:8088"
 
+    # --- optional Keycloak / OIDC single sign-on -----------------------------------------
+    # All additive: when oidc_issuer/client_id/client_secret are unset the app behaves exactly
+    # as before (local bcrypt login only). Set all three to enable the Authorization Code + PKCE
+    # login (BFF) in app.services.oidc. oidc_issuer is the realm base, e.g.
+    # http://192.168.1.50:8080/realms/ecil (the /.well-known/openid-configuration lives under it).
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    # The browser-facing base URL of THIS app (e.g. http://192.168.1.41:8088). Used to build the
+    # OIDC redirect_uri and the post-login redirect back to the SPA. Distinct from public_url,
+    # which only feeds the default-credentials banner.
+    app_public_url: str = ""
+
     # upload cap for WAR deployment; also the cap for SFTP uploads
     max_war_mb: int = 512
 
@@ -120,6 +133,12 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def oidc_configured(self) -> bool:
+        # OIDC login is live only when all three secrets are present; any missing one leaves the
+        # app on the local-login-only path it has always had.
+        return bool(self.oidc_issuer.strip() and self.oidc_client_id.strip() and self.oidc_client_secret.strip())
 
 
 @lru_cache

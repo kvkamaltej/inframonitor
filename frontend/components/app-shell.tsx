@@ -159,6 +159,34 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
   }
 
   useEffect(() => {
+    // Client-only: the static export hydrates on the server where there is no window/localStorage.
+    if (typeof window === "undefined") return;
+
+    // Keycloak OIDC callback: the backend redirects the browser back to <app>/#access_token=<JWT>
+    // on success, or <app>/#oidc_error=<msg> on failure. Consume the fragment before the normal
+    // localStorage read so an OIDC login takes precedence, and clear it either way so a reload does
+    // not re-process it and the token never lingers in the address bar.
+    const hash = window.location.hash ?? "";
+    if (hash.includes("access_token=") || hash.includes("oidc_error=")) {
+      const params = new URLSearchParams(hash.slice(1));
+      const oidcToken = params.get("access_token");
+      const oidcError = params.get("oidc_error");
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+      if (oidcToken) {
+        // Same app JWT local login returns, so drive the exact same logged-in path: persist it,
+        // set token state, and load `me`.
+        localStorage.setItem("inframonitor-token", oidcToken);
+        setToken(oidcToken);
+        setLoading(true);
+        void load(oidcToken);
+        return;
+      }
+      if (oidcError) {
+        // Surface on the login gate and fall through to the normal (tokenless) load below.
+        setMessage(oidcError);
+      }
+    }
+
     const saved = localStorage.getItem("inframonitor-token") ?? "";
     setToken(saved);
     // Always attempt a load, even with no token, so desktop guest mode is entered automatically.
@@ -167,7 +195,7 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
 
   if (loading) return <div className="flex min-h-screen items-center justify-center bg-page"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
   // Not signed in and guest not available (server deployment) -> login gate.
-  if (!me) return <LoginPanel onLogin={handleLogin} />;
+  if (!me) return <LoginPanel onLogin={handleLogin} notice={message} />;
   // A guest chose to sign in -> login form with a "Continue as guest" escape.
   if (showLogin) return <LoginPanel onLogin={handleLogin} onCancel={() => setShowLogin(false)} />;
 
