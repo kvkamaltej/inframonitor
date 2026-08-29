@@ -40,7 +40,32 @@ def test_oidc_unconfigured_by_default():
 def test_status_reports_disabled(client):
     r = client.get("/api/auth/oidc/status")
     assert r.status_code == 200
-    assert r.json() == {"enabled": False}
+    # OIDC off => not enabled, and local login stays available (standalone/SQLite is the only way in).
+    assert r.json() == {"enabled": False, "local_login": True}
+
+
+def test_local_login_disabled_when_oidc_configured(client, monkeypatch):
+    # With OIDC configured and no break-glass, web sign-in is Keycloak-only: status.local_login is
+    # False and POST /auth/login is refused (can't be bypassed by hitting the API directly).
+    from app.core.config import get_settings
+    from app.services import oidc
+
+    monkeypatch.setattr(oidc, "configured", lambda: True)
+    monkeypatch.setattr(get_settings(), "allow_local_login", False)
+    status = client.get("/api/auth/oidc/status").json()
+    assert status == {"enabled": True, "local_login": False}
+    r = client.post("/api/auth/login", json={"email": "admin@inframonitor.local", "password": "ChangeMe123!"})
+    assert r.status_code == 403
+
+
+def test_break_glass_reenables_local_login(client, monkeypatch):
+    # ALLOW_LOCAL_LOGIN=true keeps local login available alongside Keycloak.
+    from app.core.config import get_settings
+    from app.services import oidc
+
+    monkeypatch.setattr(oidc, "configured", lambda: True)
+    monkeypatch.setattr(get_settings(), "allow_local_login", True)
+    assert client.get("/api/auth/oidc/status").json()["local_login"] is True
 
 
 def test_make_pkce_is_valid_s256():

@@ -12,15 +12,21 @@ export function LoginPanel({ onLogin, onCancel, notice }: { onLogin: (token: str
   // Whether the backend has Keycloak OIDC enabled. Starts false so the screen is identical to
   // today until the probe confirms it is on; a failed/absent probe leaves it false (button hidden).
   const [oidcEnabled, setOidcEnabled] = useState(false);
+  // Whether the backend permits local username/password login. Starts true so standalone/SQLite
+  // (and the pre-probe render) shows the form; when Keycloak is the only permitted sign-in the
+  // backend reports false and the form is hidden entirely (Keycloak-only).
+  const [localLoginAllowed, setLocalLoginAllowed] = useState(true);
 
   useEffect(() => {
     let active = true;
     getOidcStatus()
       .then((status) => {
-        if (active) setOidcEnabled(status.enabled);
+        if (!active) return;
+        setOidcEnabled(status.enabled);
+        setLocalLoginAllowed(status.local_login);
       })
       .catch(() => {
-        // getOidcStatus already swallows to { enabled: false }; this is belt-and-suspenders.
+        // getOidcStatus already swallows to a safe default; this is belt-and-suspenders.
       });
     return () => {
       active = false;
@@ -56,23 +62,33 @@ export function LoginPanel({ onLogin, onCancel, notice }: { onLogin: (token: str
           </div>
         </div>
         <div className="grid gap-4">
-          <input name="email" type="email" required defaultValue="admin@inframonitor.local" className="h-14 rounded-2xl border-none bg-slate-100 px-5 text-sm font-medium text-slate-900 outline-none transition-colors focus:bg-accent/5 focus:ring-2 focus:ring-accent dark:bg-slate-800 dark:text-slate-100 dark:focus:bg-accent/10" />
-          <input name="password" type="password" required placeholder="Password" className="h-14 rounded-2xl border-none bg-slate-100 px-5 text-sm font-medium text-slate-900 outline-none transition-colors focus:bg-accent/5 focus:ring-2 focus:ring-accent dark:bg-slate-800 dark:text-slate-100 dark:focus:bg-accent/10" />
-          <button disabled={loading} className="mt-4 flex h-12 w-full items-center justify-center rounded-full bg-accent text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">
-            {loading ? "Signing in..." : "Sign in"}
-          </button>
+          {localLoginAllowed ? (
+            <>
+              <input name="email" type="email" required defaultValue="admin@inframonitor.local" className="h-14 rounded-2xl border-none bg-slate-100 px-5 text-sm font-medium text-slate-900 outline-none transition-colors focus:bg-accent/5 focus:ring-2 focus:ring-accent dark:bg-slate-800 dark:text-slate-100 dark:focus:bg-accent/10" />
+              <input name="password" type="password" required placeholder="Password" className="h-14 rounded-2xl border-none bg-slate-100 px-5 text-sm font-medium text-slate-900 outline-none transition-colors focus:bg-accent/5 focus:ring-2 focus:ring-accent dark:bg-slate-800 dark:text-slate-100 dark:focus:bg-accent/10" />
+              <button disabled={loading} className="mt-4 flex h-12 w-full items-center justify-center rounded-full bg-accent text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">
+                {loading ? "Signing in..." : "Sign in"}
+              </button>
+            </>
+          ) : null}
           {message ? <p className="mt-2 text-center text-sm font-medium text-red-600 dark:text-red-400">{message}</p> : null}
           {oidcEnabled ? (
             <>
-              <div className="mt-2 flex items-center gap-3">
-                <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
-                <span className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">or</span>
-                <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
-              </div>
+              {localLoginAllowed ? (
+                <div className="mt-2 flex items-center gap-3">
+                  <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+                  <span className="text-xs font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">or</span>
+                  <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+                </div>
+              ) : null}
               <button
                 type="button"
                 onClick={() => window.location.assign(oidcLoginUrl())}
-                className="flex h-12 w-full items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                className={
+                  localLoginAllowed
+                    ? "flex h-12 w-full items-center justify-center rounded-full bg-slate-100 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                    : "mt-2 flex h-12 w-full items-center justify-center rounded-full bg-accent text-sm font-semibold text-white transition-colors hover:bg-accent/80"
+                }
               >
                 Sign in with Keycloak
               </button>

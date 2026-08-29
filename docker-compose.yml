@@ -101,6 +101,10 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-}
+      # When OIDC is configured, local username/password login is disabled (Keycloak-only web
+      # sign-in). Set ALLOW_LOCAL_LOGIN=true as a break-glass to re-enable it alongside Keycloak.
+      # Ignored when OIDC is not configured -- local login is always on then (the only way in).
+      ALLOW_LOCAL_LOGIN: ${ALLOW_LOCAL_LOGIN:-}
     ports:
       - "${APP_PORT:-8088}:8000"
     volumes:

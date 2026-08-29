@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # which only feeds the default-credentials banner.
     app_public_url: str = ""
 
+    # Break-glass switch for local username/password login. When OIDC is configured, local login is
+    # DISABLED by default (web sign-in is Keycloak-only) -- both the UI form is hidden and POST
+    # /auth/login is refused. Set ALLOW_LOCAL_LOGIN=true to re-enable local login alongside Keycloak
+    # (e.g. during a Keycloak outage). When OIDC is NOT configured (standalone/SQLite/desktop), local
+    # login is always available regardless of this flag -- it is the only way in.
+    allow_local_login: bool = False
+
     # upload cap for WAR deployment; also the cap for SFTP uploads
     max_war_mb: int = 512
 

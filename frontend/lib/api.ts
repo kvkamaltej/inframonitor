@@ -439,14 +439,16 @@ export async function getMe(token: string): Promise<Me> {
 // Unauthenticated status probe, mirroring login()'s tokenless fetch against API_URL. Any failure
 // (endpoint absent, network error, non-2xx, bad JSON) is swallowed to { enabled: false } so the
 // "Sign in with Keycloak" button simply never appears rather than breaking the login screen.
-export async function getOidcStatus(): Promise<{ enabled: boolean }> {
+export async function getOidcStatus(): Promise<{ enabled: boolean; local_login: boolean }> {
+  // Safe default is local_login:true so a failed probe (or an older backend) still shows the local
+  // form rather than locking the operator out. enabled:false hides the Keycloak button.
   try {
     const response = await fetch(`${API_URL}/auth/oidc/status`, { cache: "no-store" });
-    if (!response.ok) return { enabled: false };
+    if (!response.ok) return { enabled: false, local_login: true };
     const data = await response.json();
-    return { enabled: Boolean(data?.enabled) };
+    return { enabled: Boolean(data?.enabled), local_login: data?.local_login !== false };
   } catch {
-    return { enabled: false };
+    return { enabled: false, local_login: true };
   }
 }
 

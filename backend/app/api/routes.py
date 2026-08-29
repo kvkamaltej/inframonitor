@@ -273,8 +273,21 @@ def _server_or_404(db: Session, server_id: str, claims: dict | None = None) -> S
     return server
 
 
+def _local_login_allowed() -> bool:
+    # Local username/password login is available UNLESS Keycloak is configured -- then web sign-in
+    # is Keycloak-only, and local login is off unless the ALLOW_LOCAL_LOGIN break-glass is set. With
+    # no OIDC configured (standalone/SQLite/desktop) local login is always the way in.
+    settings = get_settings()
+    return (not oidc.configured()) or settings.allow_local_login
+
+
 @router.post("/auth/login", response_model=TokenResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    if not _local_login_allowed():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Local login is disabled. Sign in with Keycloak.",
+        )
     user = db.scalar(select(User).where(User.email == payload.email))
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
@@ -301,7 +314,9 @@ def _oidc_error_redirect(message: str) -> RedirectResponse:
 
 @router.get("/auth/oidc/status")
 def oidc_status() -> dict:
-    return {"enabled": oidc.configured()}
+    # `local_login` tells the login screen whether to render the email/password form at all: it is
+    # hidden when Keycloak is the only permitted sign-in (OIDC configured + break-glass off).
+    return {"enabled": oidc.configured(), "local_login": _local_login_allowed()}
 
 
 @router.get("/auth/oidc/login")
