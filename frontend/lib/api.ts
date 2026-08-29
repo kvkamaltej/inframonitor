@@ -458,6 +458,12 @@ export function oidcLoginUrl(): string {
   return `${API_URL}/auth/oidc/login`;
 }
 
+// Full-page navigation target that ends BOTH the app session and the Keycloak SSO session
+// (RP-initiated logout), then returns to the app. Navigating here (not fetch) is the point.
+export function oidcLogoutUrl(): string {
+  return `${API_URL}/auth/oidc/logout`;
+}
+
 export async function changePassword(token: string, currentPassword: string, newPassword: string): Promise<{ ok: boolean; message: string }> {
   return request("/auth/change-password", token, {
     method: "POST",

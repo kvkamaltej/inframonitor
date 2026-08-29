@@ -120,6 +120,25 @@ def build_authorize_url(state: str, code_challenge: str, nonce: str) -> str:
     return f"{endpoint}{sep}{query}"
 
 
+def end_session_url(post_logout_redirect_uri: str, id_token_hint: str | None = None) -> str:
+    """RP-initiated logout URL: ends the Keycloak SSO session and returns the browser to the app.
+
+    Without this, clearing the app's own token leaves the Keycloak session alive, so the next
+    sign-in is silent -- logout appears not to happen. client_id + id_token_hint let Keycloak skip
+    the logout-confirmation page; post_logout_redirect_uri must be registered on the client.
+    """
+    settings = get_settings()
+    endpoint = _discovery().get("end_session_endpoint")
+    if not endpoint:
+        raise OidcError("OIDC discovery document has no end_session_endpoint")
+    params = {"post_logout_redirect_uri": post_logout_redirect_uri, "client_id": settings.oidc_client_id}
+    if id_token_hint:
+        params["id_token_hint"] = id_token_hint
+    query = httpx.QueryParams(params)
+    sep = "&" if "?" in endpoint else "?"
+    return f"{endpoint}{sep}{query}"
+
+
 def exchange_code(code: str, code_verifier: str) -> dict:
     settings = get_settings()
     endpoint = _discovery().get("token_endpoint")

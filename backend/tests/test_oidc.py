@@ -58,6 +58,12 @@ def test_local_login_disabled_when_oidc_configured(client, monkeypatch):
     assert r.status_code == 403
 
 
+def test_logout_route_redirects_when_unconfigured(client):
+    # With OIDC off, /auth/oidc/logout is a harmless redirect (no Keycloak to end a session on).
+    r = client.get("/api/auth/oidc/logout", follow_redirects=False)
+    assert r.status_code == 302
+
+
 def test_break_glass_reenables_local_login(client, monkeypatch):
     # ALLOW_LOCAL_LOGIN=true keeps local login available alongside Keycloak.
     from app.core.config import get_settings

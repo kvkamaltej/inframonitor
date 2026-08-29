@@ -300,6 +300,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
 # PKCE verifier, and nonce are carried across the round-trip in a short-lived signed cookie so the
 # backend stays stateless. Everything below is additive -- /auth/login above is unchanged.
 _OIDC_FLOW_COOKIE = "oidc_flow"
+_OIDC_ID_COOKIE = "oidc_id"  # id_token stashed for RP-initiated logout (id_token_hint)
 _OIDC_COOKIE_PATH = "/api/auth/oidc"
 _OIDC_FLOW_MAX_AGE = 300  # 5 minutes
 
@@ -406,6 +407,31 @@ def oidc_callback(request: Request, db: Session = Depends(get_db)) -> RedirectRe
     app_jwt = create_access_token(user.email, user.role.value)
     resp = RedirectResponse(f"{_oidc_app_base()}/#access_token={app_jwt}", status_code=302)
     resp.delete_cookie(_OIDC_FLOW_COOKIE, path=_OIDC_COOKIE_PATH)
+    # Stash the id_token (httponly, same short OIDC path) so /auth/oidc/logout can pass it as
+    # id_token_hint and end the Keycloak session cleanly (no logout-confirmation prompt).
+    id_token = tokens.get("id_token")
+    if id_token:
+        resp.set_cookie(
+            _OIDC_ID_COOKIE, id_token, max_age=get_settings().access_token_expire_minutes * 60,
+            httponly=True, samesite="lax", secure=False, path=_OIDC_COOKIE_PATH,
+        )
+    return resp
+
+
+@router.get("/auth/oidc/logout")
+def oidc_logout(request: Request) -> RedirectResponse:
+    """End the Keycloak SSO session too, then return to the app. Without this, clearing the app's
+    own token leaves the IdP session alive and the next sign-in is silent (logout appears broken)."""
+    base = _oidc_app_base() or "/"
+    if not oidc.configured():
+        return RedirectResponse(base, status_code=302)
+    id_token = request.cookies.get(_OIDC_ID_COOKIE)
+    try:
+        target = oidc.end_session_url(base, id_token)
+    except Exception:
+        target = base
+    resp = RedirectResponse(target, status_code=302)
+    resp.delete_cookie(_OIDC_ID_COOKIE, path=_OIDC_COOKIE_PATH)
     return resp
 
 

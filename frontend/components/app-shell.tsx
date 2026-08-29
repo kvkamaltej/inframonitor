@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { LoginPanel } from "@/components/login-panel";
 import { Sidebar } from "@/components/sidebar";
-import { getMe, Me } from "@/lib/api";
+import { getMe, getOidcStatus, oidcLoginUrl, oidcLogoutUrl, Me } from "@/lib/api";
 
 const BANNER_DISMISS_KEY = "inframonitor-default-password-banner";
 const BANNER_DISMISS_MS = 24 * 60 * 60 * 1000;
@@ -117,6 +117,8 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
   const [loading, setLoading] = useState(true);
   // Guest signed in? -> show the login form over the app, with a way back to guest.
   const [showLogin, setShowLogin] = useState(false);
+  // OIDC config (for auto-login + proper logout). Defaults keep local-login behaviour until probed.
+  const [oidc, setOidc] = useState<{ enabled: boolean; local_login: boolean }>({ enabled: false, local_login: true });
 
   async function load(activeToken = token) {
     try {
@@ -145,6 +147,13 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
     // Signing out ends the dismissal window: two logins in the same second can mint a
     // byte-identical JWT, so the fingerprint alone would not notice the new session.
     clearDefaultPasswordDismissal();
+    if (oidc.enabled) {
+      // Clearing our token alone leaves the Keycloak SSO session alive, so the next sign-in is
+      // silent -- logout looks broken. Redirect through the backend to Keycloak's end-session,
+      // which kills the IdP session and returns to the app (then auto-login prompts for login).
+      window.location.assign(oidcLogoutUrl());
+      return;
+    }
     setToken("");
     // Desktop lands back in guest mode; the server shows the login gate. Reloading with an empty
     // token lets the backend decide which.
@@ -193,9 +202,28 @@ export function AppShell({ title, subtitle, children }: { title: string; subtitl
     void load(saved);
   }, []);
 
+  // Learn whether Keycloak is on and whether local login is even offered.
+  useEffect(() => {
+    getOidcStatus().then(setOidc).catch(() => undefined);
+  }, []);
+
+  // Auto-login: when signed out in Keycloak-ONLY mode (and no callback error to show), go straight
+  // to Keycloak instead of showing a one-button screen. Guarded on !message so an oidc_error does
+  // not bounce into an immediate redirect loop.
+  const autoLogin = oidc.enabled && !oidc.local_login && !message;
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (loading || me || showLogin) return;
+    if (autoLogin) window.location.assign(oidcLoginUrl());
+  }, [loading, me, showLogin, autoLogin]);
+
   if (loading) return <div className="flex min-h-screen items-center justify-center bg-page"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
-  // Not signed in and guest not available (server deployment) -> login gate.
-  if (!me) return <LoginPanel onLogin={handleLogin} notice={message} />;
+  // Not signed in and guest not available (server deployment) -> login gate. In Keycloak-only mode
+  // the effect above is redirecting to the IdP, so render a spinner rather than the empty gate.
+  if (!me) {
+    if (autoLogin) return <div className="flex min-h-screen items-center justify-center bg-page"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
+    return <LoginPanel onLogin={handleLogin} notice={message} />;
+  }
   // A guest chose to sign in -> login form with a "Continue as guest" escape.
   if (showLogin) return <LoginPanel onLogin={handleLogin} onCancel={() => setShowLogin(false)} />;
 
