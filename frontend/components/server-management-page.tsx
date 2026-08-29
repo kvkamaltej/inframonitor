@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, TerminalSquare, Trash2, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AddServerForm } from "@/components/add-server-form";
+import { matchDistroLogo, OsLogo } from "@/components/os-logo";
 import { AppShell } from "@/components/app-shell";
 import { useConfirm } from "@/components/confirm-dialog";
 import { CsvImportPanel } from "@/components/csv-import-panel";
@@ -37,32 +38,16 @@ function osDetail(server: Server): string {
   return [server.os_family, server.package_manager].filter(Boolean).join(" / ");
 }
 
-// lucide has no distro logos, so each known distro gets a coloured letter badge in its brand
-// colour (Ubuntu orange, RHEL red, Debian crimson, …). The OS name itself is dropped from the
-// cell and moved to the hover tooltip, keeping the column narrow and scannable.
-type OsBadge = { letter: string; bg: string; fg: string };
-
-function osBadge(server: Server): OsBadge {
-  const key = `${server.os_distro || ""} ${server.os_family || ""} ${server.operating_system || ""}`.toLowerCase();
-  if (/ubuntu/.test(key)) return { letter: "U", bg: "#E95420", fg: "#ffffff" };
-  if (/debian/.test(key)) return { letter: "D", bg: "#A80030", fg: "#ffffff" };
-  if (/(red\s*hat|rhel)/.test(key)) return { letter: "R", bg: "#EE0000", fg: "#ffffff" };
-  if (/centos/.test(key)) return { letter: "C", bg: "#932279", fg: "#ffffff" };
-  if (/rocky/.test(key)) return { letter: "R", bg: "#10B981", fg: "#ffffff" };
-  if (/alma/.test(key)) return { letter: "A", bg: "#0F4266", fg: "#ffffff" };
-  if (/fedora/.test(key)) return { letter: "F", bg: "#51A2DA", fg: "#ffffff" };
-  if (/(suse|sles)/.test(key)) return { letter: "S", bg: "#73BA25", fg: "#ffffff" };
-  if (/alpine/.test(key)) return { letter: "A", bg: "#0D597F", fg: "#ffffff" };
-  if (/arch/.test(key)) return { letter: "A", bg: "#1793D1", fg: "#ffffff" };
-  if (/(oracle)/.test(key)) return { letter: "O", bg: "#C74634", fg: "#ffffff" };
-  if (/mint/.test(key)) return { letter: "M", bg: "#87CF3E", fg: "#ffffff" };
-  if (/windows/.test(key)) return { letter: "W", bg: "#0078D4", fg: "#ffffff" };
-  if (/(mac|darwin)/.test(key)) return { letter: "M", bg: "#333333", fg: "#ffffff" };
-  return { letter: "?", bg: "#94A3B8", fg: "#ffffff" };
+// The OS cell shows the distro's own logo (vendored simple-icons path data, see
+// components/os-logo.tsx) with the name in the hover tooltip, so the column stays narrow.
+// `osMatchText` is everything we know about the OS, concatenated, so the matcher can key off
+// whichever field is actually populated.
+function osMatchText(server: Server): string {
+  return `${server.os_distro || ""} ${server.os_family || ""} ${server.operating_system || ""}`;
 }
 
 // The full OS string plus family/package-manager detail, used as the cell's hover tooltip now
-// that the visible cell is icon-only.
+// that the visible cell is logo-only.
 function osTooltip(server: Server): string {
   const detail = osDetail(server);
   return detail ? `${osLabel(server)} (${detail})` : osLabel(server);
@@ -662,7 +647,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // One row renderer shared by the grouped and flat views, so the columns can never drift apart
   // between the two. Admin-only controls (Shell, folder assignment) live in the trailing cell.
   const renderRow = (server: Server) => {
-    const badge = osBadge(server);
+    const hasLogo = matchDistroLogo(osMatchText(server)) !== null;
     return (
     <tr key={server.id} className="transition-colors hover:bg-page">
       <td className="px-3 py-3 align-top">
@@ -671,14 +656,13 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
       </td>
       <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-fg">{server.ip_address}</td>
       <td className="px-3 py-3 align-top font-medium text-fg">
-        <span
-          title={osTooltip(server)}
-          aria-label={osTooltip(server)}
-          style={{ backgroundColor: badge.bg, color: badge.fg }}
-          className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[11px] font-bold leading-none"
-        >
-          {badge.letter}
-        </span>
+        {hasLogo ? (
+          <OsLogo text={osMatchText(server)} size={18} title={osTooltip(server)} />
+        ) : (
+          // No logo for this OS (or none reported): fall back to the text label rather than an
+          // empty cell or a wrong mark.
+          <span className="truncate text-xs text-muted" title={osTooltip(server)}>{osLabel(server)}</span>
+        )}
       </td>
       <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-fg">{uptimeLabel(server.uptime_seconds)}</td>
       <td className={`whitespace-nowrap px-3 py-3 align-top font-medium ${usageTone(server.cpu_percent)}`}>{server.cpu_percent < 0 ? "-" : `${server.cpu_percent}%`}{server.cpu ? <div className="mt-0.5 text-xs font-medium text-muted">{server.cpu} cores</div> : null}</td>
@@ -712,15 +696,13 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // flat view (global sort) and once per section in the grouped view (each section's own sort),
   // so a group's name renders as a *section heading above its own table* and each group sorts
   // independently of the others.
-  const serverTable = (rows: Server[], sKey: SortKey | null, sDir: SortDir, onSort: (column: SortKey) => void, indent = false) => (
-    // `indent` pads a group's table so its first column lines up with the group heading text
-    // above it, instead of sitting flush against the card edge.
-    <div className={`overflow-x-auto ${indent ? "px-3" : ""}`}>
+  const serverTable = (rows: Server[], sKey: SortKey | null, sDir: SortDir, onSort: (column: SortKey) => void) => (
+    <div className="overflow-x-auto">
       <table className="w-full table-fixed text-left text-sm">
         <colgroup>
-          <col className="w-[21%]" />
+          <col className="w-[20%]" />
           <col className="w-[11%]" />
-          <col className="w-[6%]" />
+          <col className="w-[7%]" />
           <col className="w-[8%]" />
           <col className="w-[8%]" />
           <col className="w-[12%]" />
@@ -941,7 +923,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
                     <h3 className="text-sm font-semibold text-fg">{group.name}</h3>
                     <span className="rounded-full bg-page px-2 py-0.5 text-[11px] font-semibold text-muted">{group.count}</span>
                   </button>
-                  {isCollapsed ? null : serverTable(sortRows(group.rows, gsort.key, gsort.dir), gsort.key, gsort.dir, (column) => toggleGroupSort(group.key, column), true)}
+                  {isCollapsed ? null : serverTable(sortRows(group.rows, gsort.key, gsort.dir), gsort.key, gsort.dir, (column) => toggleGroupSort(group.key, column))}
                 </div>
               );
             })}
