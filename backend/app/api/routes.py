@@ -227,8 +227,13 @@ def _current_user(db: Session, claims: dict) -> User:
     return user
 
 
-def _is_admin(claims: dict) -> bool:
-    return claims.get("role") in {"admin", "administrator"}
+def _sees_all_servers(claims: dict) -> bool:
+    # Admins AND developers get full inventory visibility + access; support (and any other
+    # non-privileged role) sees only servers granted via UserServerAccess / access policies.
+    # A developer provisioned via Keycloak has no per-server grants, so gating them the same as
+    # support left them with ZERO servers -- developers are trusted with the whole inventory, and
+    # role-level checks (require_admin / require_admin_or_developer) still gate dangerous actions.
+    return claims.get("role") in {"admin", "administrator", "developer"}
 
 
 def _policy_applies(policy: AccessPolicy, server: Server) -> bool:
@@ -267,7 +272,7 @@ def _server_or_404(db: Session, server_id: str, claims: dict | None = None) -> S
         server = db.get(Server, int(server_id))
     if not server:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Server not found")
-    if claims and not _is_admin(claims):
+    if claims and not _sees_all_servers(claims):
         user = _current_user(db, claims)
         if server.id not in _accessible_server_ids(db, user):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Server is not assigned to this user")
@@ -1034,7 +1039,7 @@ def assign_server_folder(server_id: str, payload: ServerFolderUpdate, _: dict = 
 
 @router.get("/servers", response_model=list[ServerRead])
 def list_servers(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[ServerRead]:
-    if _is_admin(claims):
+    if _sees_all_servers(claims):
         return InventoryService(db).list_servers()
     user = _current_user(db, claims)
     return InventoryService(db).list_servers(_accessible_server_ids(db, user))
@@ -1112,7 +1117,7 @@ def export_servers_xlsx(claims: dict = Depends(require_user), db: Session = Depe
             detail="Excel export needs the openpyxl package. Install backend requirements and restart.",
         ) from exc
 
-    if _is_admin(claims):
+    if _sees_all_servers(claims):
         servers = InventoryService(db).list_servers()
     else:
         servers = InventoryService(db).list_servers(_accessible_server_ids(db, _current_user(db, claims)))
@@ -1857,7 +1862,7 @@ def restart_service_api(server_id: str, payload: ServiceRestartRequest, _: dict 
 
 @router.get("/dashboard/summary", response_model=Summary)
 def summary(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> Summary:
-    if _is_admin(claims):
+    if _sees_all_servers(claims):
         servers = db.scalars(select(Server)).all()
     else:
         ids = _accessible_server_ids(db, _current_user(db, claims))
