@@ -194,6 +194,18 @@ export type ContainerInfo = {
   image: string;
   status: string;
   ports: string;
+  // Externally reachable published host ports; each becomes an "open in browser"
+  // link http://<server-ip>:<port>. Optional for backward compatibility.
+  host_ports?: number[];
+};
+
+export type ImageInfo = {
+  runtime: string;
+  id: string;
+  repository: string;
+  tag: string;
+  size: string;
+  created: string;
 };
 
 export type Integration = {
@@ -731,6 +743,10 @@ export async function getContainers(token: string, serverId: string, runtime: st
   return request<ContainerInfo[]>(`/servers/${serverId}/containers/${runtime}`, token, { method: "POST", body: JSON.stringify(credentials) });
 }
 
+export async function getImages(token: string, serverId: string, runtime: string, credentials: unknown): Promise<ImageInfo[]> {
+  return request<ImageInfo[]>(`/servers/${serverId}/images/${runtime}`, token, { method: "POST", body: JSON.stringify(credentials) });
+}
+
 export async function getContainerLogs(token: string, serverId: string, runtime: string, container: string, credentials: unknown): Promise<string[]> {
   const data = await request<{ lines: string[] }>(`/servers/${serverId}/logs/${runtime}/${encodeURIComponent(container)}`, token, {
     method: "POST",
@@ -759,6 +775,14 @@ export async function getServiceLogs(token: string, serverId: string, payload: u
 
 export async function restartContainer(token: string, serverId: string, payload: unknown): Promise<{ ok: boolean; message: string }> {
   return request(`/servers/${serverId}/container-restart`, token, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function removeContainer(token: string, serverId: string, payload: unknown): Promise<{ ok: boolean; message: string }> {
+  return request(`/servers/${serverId}/container-remove`, token, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export async function removeImage(token: string, serverId: string, payload: unknown): Promise<{ ok: boolean; message: string }> {
+  return request(`/servers/${serverId}/image-remove`, token, { method: "POST", body: JSON.stringify(payload) });
 }
 
 export async function restartService(token: string, serverId: string, name: string, sudoPassword = ""): Promise<PrivilegedResult> {

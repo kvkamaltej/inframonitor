@@ -50,6 +50,7 @@ from app.schemas.contracts import (
     AlertWebhookResult,
     ConnectionResult,
     ContainerRead,
+    ImageRead,
     CredentialPayload,
     DbConnectionCreate,
     DbConnectionQueryRequest,
@@ -160,7 +161,10 @@ from app.services.ssh_ops import (
     discover_host,
     discover_tomcat,
     list_containers_with_ports,
+    list_images,
     probe_vitals,
+    remove_container,
+    remove_image,
     restart_container,
     restart_service,
     run_command,
@@ -1528,7 +1532,11 @@ def update_credentials(server_id: str, credentials: CredentialPayload, _: dict =
 def test_connection(server_id: str, credentials: CredentialPayload, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> ConnectionResult:
     server = _server_or_404(db, server_id, claims)
     try:
-        output = run_command(server, credentials, "hostname")
+        # Use the supplied credentials when the caller typed some (validate before saving);
+        # otherwise fall back to the stored ones so a plain "Test connection" checks the
+        # existing server without re-entering the password.
+        creds = credentials if (credentials.password or credentials.private_key) else _credentials_for(db, server, credentials)
+        output = run_command(server, creds, "hostname")
         return ConnectionResult(ok=True, message=f"Connected to {output.strip()}")
     except SshOperationError as exc:
         return ConnectionResult(ok=False, message=str(exc))
@@ -1554,6 +1562,17 @@ def containers(server_id: str, runtime: str, credentials: CredentialPayload, cla
     server = _server_or_404(db, server_id, claims)
     try:
         return list_containers_with_ports(server, _credentials_for(db, server,credentials), runtime)
+    except SshOperationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/servers/{server_id}/images/{runtime}", response_model=list[ImageRead])
+def images(server_id: str, runtime: str, credentials: CredentialPayload, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[ImageRead]:
+    if runtime not in {"docker", "podman"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Runtime must be docker or podman")
+    server = _server_or_404(db, server_id, claims)
+    try:
+        return list_images(server, _credentials_for(db, server, credentials), runtime)
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1844,6 +1863,27 @@ def restart_container_api(server_id: str, payload: OperationRequest, claims: dic
     try:
         result = restart_container(server, _credentials_for(db, server,CredentialPayload()), payload.runtime, payload.name)
         return ConnectionResult(ok=True, message=f"Restarted {result or payload.name}")
+    except SshOperationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+# Delete is destructive, so admin-only (stricter than restart's admin-or-developer).
+@router.post("/servers/{server_id}/container-remove", response_model=ConnectionResult)
+def remove_container_api(server_id: str, payload: OperationRequest, claims: dict = Depends(require_admin), db: Session = Depends(get_db)) -> ConnectionResult:
+    server = _server_or_404(db, server_id, claims)
+    try:
+        remove_container(server, _credentials_for(db, server, CredentialPayload()), payload.runtime, payload.name)
+        return ConnectionResult(ok=True, message=f"Removed container {payload.name}")
+    except SshOperationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/servers/{server_id}/image-remove", response_model=ConnectionResult)
+def remove_image_api(server_id: str, payload: OperationRequest, claims: dict = Depends(require_admin), db: Session = Depends(get_db)) -> ConnectionResult:
+    server = _server_or_404(db, server_id, claims)
+    try:
+        remove_image(server, _credentials_for(db, server, CredentialPayload()), payload.runtime, payload.name)
+        return ConnectionResult(ok=True, message=f"Removed image {payload.name}")
     except SshOperationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

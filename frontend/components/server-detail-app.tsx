@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, ChevronDown, ChevronRight, Clock, Coffee, Copy, Download, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, LayoutGrid, LineChart as LineChartIcon, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, PlugZap, RefreshCw, ScrollText, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, ChevronDown, ChevronRight, Clock, Coffee, Copy, Download, ExternalLink, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, Layers, LayoutGrid, LineChart as LineChartIcon, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, PlugZap, RefreshCw, ScrollText, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
@@ -10,6 +10,7 @@ import { serverMetricCharts } from "@/lib/monitoring-queries";
 import {
   assignServerFolder,
   ContainerInfo,
+  ImageInfo,
   deleteServer,
   discoverServer,
   refreshVitals,
@@ -17,6 +18,10 @@ import {
   getContainerEnv,
   getContainerLogs,
   getContainers,
+  getImages,
+  removeContainer,
+  removeImage,
+  testConnection,
   getFolders,
   getMe,
   getServer,
@@ -80,6 +85,10 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   // Containers are loaded with `docker ps -a` (stopped ones included); this filters the table to
   // just the running ones (status starts with "Up" for both docker and podman).
   const [runningOnly, setRunningOnly] = useState(false);
+  // Images share the Containers tab via a segmented toggle -- they're the same runtime surface.
+  const [images, setImages] = useState<ImageInfo[]>([]);
+  const [containerView, setContainerView] = useState<"containers" | "images">("containers");
+  const [imagesAutoLoaded, setImagesAutoLoaded] = useState(false);
   const [tomcat, setTomcat] = useState<TomcatInstance[] | null>(null);
   const [logPicker, setLogPicker] = useState("");
   const [detailPicker, setDetailPicker] = useState("");
@@ -162,7 +171,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   // opening the tab is the request. Guarded so it fires once per server: a load returning zero
   // containers must not re-fire, and switching away and back should not re-probe over SSH.
   const [containersAutoLoaded, setContainersAutoLoaded] = useState(false);
-  useEffect(() => setContainersAutoLoaded(false), [serverId]);
+  useEffect(() => { setContainersAutoLoaded(false); setImagesAutoLoaded(false); setContainerView("containers"); }, [serverId]);
   useEffect(() => {
     if (tab === "containers" && !containersAutoLoaded && server?.has_credentials) {
       setContainersAutoLoaded(true);
@@ -410,6 +419,61 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       await loadContainers();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to restart container", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function loadImages() {
+    setImagesAutoLoaded(true);
+    setBusy("busy");
+    notify("");
+    try {
+      setImages(await getImages(token, serverId, effectiveRuntime, { tail }));
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load images", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function removeSelectedContainer(containerName: string) {
+    if (!(await confirm({
+      title: `Delete container "${containerName}"?`,
+      message: `On ${server?.hostname ?? "this server"} (${effectiveRuntime}). Force-removes the container (stopping it first if running). This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true
+    }))) return;
+    setBusy(`rmc:${containerName}`);
+    try {
+      const result = await removeContainer(token, serverId, { runtime: effectiveRuntime, name: containerName });
+      report(result, `Removed ${containerName}`);
+      await loadContainers();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to delete container", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function removeSelectedImage(image: ImageInfo) {
+    // Prefer repo:tag; fall back to the id for dangling/untagged images.
+    const ref = image.repository && image.repository !== "<none>" && image.tag && image.tag !== "<none>"
+      ? `${image.repository}:${image.tag}`
+      : image.id;
+    if (!(await confirm({
+      title: `Delete image "${ref}"?`,
+      message: `On ${server?.hostname ?? "this server"} (${effectiveRuntime}). Fails if a container still uses it. This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true
+    }))) return;
+    setBusy(`rmi:${image.id}`);
+    try {
+      const result = await removeImage(token, serverId, { runtime: effectiveRuntime, name: ref });
+      report(result, `Removed image ${ref}`);
+      await loadImages();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to delete image", "error");
     } finally {
       setBusy("");
     }
@@ -761,6 +825,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
             await load();
             setCredentialsOpen(false);
           }}
+          onTest={(password, privateKey) => testConnection(token, serverId, { password, private_key: privateKey })}
         />
       ) : null}
 
@@ -1098,59 +1163,95 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
 
           {tab === "containers" ? (
             <Panel
-              title={`Containers${bothRuntimes ? "" : ` (${detectedRuntime})`}`}
-              icon={<Boxes size={18} />}
+              title={`${containerView === "images" ? "Images" : "Containers"}${bothRuntimes ? "" : ` (${detectedRuntime})`}`}
+              icon={containerView === "images" ? <Layers size={18} /> : <Boxes size={18} />}
               action={
                 <>
-                  {/* Show only running containers (status starts with "Up"). A label-wrapped checkbox
-                      so the whole control toggles; disabled when nothing is loaded yet. */}
-                  <label className={`inline-flex h-9 items-center gap-2 rounded-full bg-slate-100 px-3 text-xs font-semibold text-slate-700 dark:bg-slate-800/50 dark:text-slate-300 ${containers.length === 0 ? "opacity-50" : "cursor-pointer"}`}>
-                    <input
-                      type="checkbox"
-                      checked={runningOnly}
-                      disabled={containers.length === 0}
-                      onChange={(event) => setRunningOnly(event.target.checked)}
-                      className="h-4 w-4 cursor-pointer accent-accent"
-                    />
-                    Running only
-                  </label>
+                  {/* Containers | Images segmented toggle -- the same runtime surface, one screen. */}
+                  <div className="inline-flex h-9 items-center rounded-full bg-slate-100 p-0.5 text-xs font-semibold dark:bg-slate-800/50">
+                    <button onClick={() => setContainerView("containers")} className={`inline-flex h-8 items-center gap-1 rounded-full px-3 transition-colors ${containerView === "containers" ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100" : "text-slate-500 hover:text-slate-700 dark:text-slate-400"}`}><Boxes size={13} /> Containers</button>
+                    <button onClick={() => { setContainerView("images"); if (!imagesAutoLoaded) void loadImages(); }} className={`inline-flex h-8 items-center gap-1 rounded-full px-3 transition-colors ${containerView === "images" ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-slate-100" : "text-slate-500 hover:text-slate-700 dark:text-slate-400"}`}><Layers size={13} /> Images</button>
+                  </div>
+                  {/* Running-only only makes sense for containers. */}
+                  {containerView === "containers" ? (
+                    <label className={`inline-flex h-9 items-center gap-2 rounded-full bg-slate-100 px-3 text-xs font-semibold text-slate-700 dark:bg-slate-800/50 dark:text-slate-300 ${containers.length === 0 ? "opacity-50" : "cursor-pointer"}`}>
+                      <input
+                        type="checkbox"
+                        checked={runningOnly}
+                        disabled={containers.length === 0}
+                        onChange={(event) => setRunningOnly(event.target.checked)}
+                        className="h-4 w-4 cursor-pointer accent-accent"
+                      />
+                      Running only
+                    </label>
+                  ) : null}
                   {/* only shown when the host really runs both, so podman stays reachable */}
                   {bothRuntimes ? (
                     <select value={runtime} onChange={(event) => setRuntime(event.target.value)} className="h-9 cursor-pointer rounded-full border-none bg-slate-100 px-3 text-xs font-semibold text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100">
                       {runtimeOptions.map((option) => <option key={option} value={option}>{option}</option>)}
                     </select>
                   ) : null}
-                  <button disabled={loading} onClick={() => void loadContainers()} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-accent px-4 text-xs font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"><RefreshCw size={14} /> {loading ? "Loading..." : "Load"}</button>
+                  <button disabled={loading} onClick={() => void (containerView === "images" ? loadImages() : loadContainers())} className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-accent px-4 text-xs font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"><RefreshCw size={14} /> {loading ? "Loading..." : "Load"}</button>
                 </>
               }
             >
-              <table className="w-full text-left text-sm">
-                <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:bg-slate-800/40 dark:text-slate-400"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Image</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Ports</th><th className="px-4 py-3">Actions</th></tr></thead>
-                <tbody>
-                  {(() => {
-                  const visible = containers.filter((c) => !runningOnly || /^up\b/i.test((c.status || "").trim()));
-                  return (<>
-                  {visible.map((container) => (
-                    <tr key={container.id} className="border-t border-line dark:border-slate-700">
-                      <td className="px-4 py-3 font-medium">{container.name}</td>
-                      <td className="px-4 py-3">{container.image}</td>
-                      <td className="px-4 py-3">{container.status}</td>
-                      <td className="max-w-xs break-words px-4 py-3">{shortPorts(container.ports) || "-"}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex flex-wrap gap-2">
-                          <button onClick={() => void loadContainerLogs(container.name)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
-                          <button disabled={loading} onClick={() => void loadContainerEnv(container.name)} title="Show the container's .env file (or its runtime environment if none)" className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">{busy === `env:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />} .env</button>
-                          {isAdmin && server?.has_credentials ? <button onClick={() => setContainerShellFor(container.name)} title="Open an interactive shell inside this container" className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30"><Terminal size={12} /> Shell</button> : null}
-                          {canRestartContainer ? <button disabled={loading} onClick={() => void restartSelectedContainer(container.name)} className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">{busy === `container:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : null}Restart</button> : null}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {visible.length === 0 ? <tr><td className="px-4 py-6 text-slate-500" colSpan={5}>{containers.length === 0 ? "Load Docker or Podman containers." : "No running containers."}</td></tr> : null}
-                  </>);
-                  })()}
-                </tbody>
-              </table>
+              {containerView === "images" ? (
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:bg-slate-800/40 dark:text-slate-400"><tr><th className="px-4 py-3">Repository</th><th className="px-4 py-3">Tag</th><th className="px-4 py-3">Image ID</th><th className="px-4 py-3">Size</th><th className="px-4 py-3">Created</th><th className="px-4 py-3">Actions</th></tr></thead>
+                  <tbody>
+                    {images.map((image) => (
+                      <tr key={`${image.id}-${image.repository}-${image.tag}`} className="border-t border-line dark:border-slate-700">
+                        <td className="px-4 py-3 font-medium break-all">{image.repository}</td>
+                        <td className="px-4 py-3">{image.tag}</td>
+                        <td className="px-4 py-3 font-mono text-xs">{image.id}</td>
+                        <td className="px-4 py-3">{image.size}</td>
+                        <td className="px-4 py-3">{image.created}</td>
+                        <td className="px-4 py-3">
+                          {isAdmin ? <button disabled={loading} onClick={() => void removeSelectedImage(image)} title="Delete this image" className="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-3 py-1 text-xs font-semibold text-red-600 transition-colors hover:bg-red-500/20 disabled:opacity-50 dark:text-red-400">{busy === `rmi:${image.id}` ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} Delete</button> : null}
+                        </td>
+                      </tr>
+                    ))}
+                    {images.length === 0 ? <tr><td className="px-4 py-6 text-slate-500" colSpan={6}>Load Docker or Podman images.</td></tr> : null}
+                  </tbody>
+                </table>
+              ) : (
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500 dark:bg-slate-800/40 dark:text-slate-400"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">Image</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Ports</th><th className="px-4 py-3">Actions</th></tr></thead>
+                  <tbody>
+                    {(() => {
+                    const visible = containers.filter((c) => !runningOnly || /^up\b/i.test((c.status || "").trim()));
+                    return (<>
+                    {visible.map((container) => (
+                      <tr key={container.id} className="border-t border-line dark:border-slate-700">
+                        <td className="px-4 py-3 font-medium">{container.name}</td>
+                        <td className="px-4 py-3">{container.image}</td>
+                        <td className="px-4 py-3">{container.status}</td>
+                        <td className="max-w-xs break-words px-4 py-3">
+                          {container.host_ports && container.host_ports.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {container.host_ports.map((p) => (
+                                <a key={p} href={`http://${server?.ip_address}:${p}`} target="_blank" rel="noreferrer" title={`Open http://${server?.ip_address}:${p} in a new tab`} className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20">{p}<ExternalLink size={11} /></a>
+                              ))}
+                            </div>
+                          ) : (shortPorts(container.ports) || "-")}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap gap-2">
+                            <button onClick={() => void loadContainerLogs(container.name)} className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">Logs</button>
+                            <button disabled={loading} onClick={() => void loadContainerEnv(container.name)} title="Show the container's .env file (or its runtime environment if none)" className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700">{busy === `env:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />} .env</button>
+                            {isAdmin && server?.has_credentials ? <button onClick={() => setContainerShellFor(container.name)} title="Open an interactive shell inside this container" className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30"><Terminal size={12} /> Shell</button> : null}
+                            {canRestartContainer ? <button disabled={loading} onClick={() => void restartSelectedContainer(container.name)} className="inline-flex items-center gap-1 rounded-full bg-accent/10 px-3 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 dark:bg-accent/20 dark:text-accent dark:hover:bg-accent/30">{busy === `container:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : null}Restart</button> : null}
+                            {isAdmin ? <button disabled={loading} onClick={() => void removeSelectedContainer(container.name)} title="Delete this container" className="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-3 py-1 text-xs font-semibold text-red-600 transition-colors hover:bg-red-500/20 disabled:opacity-50 dark:text-red-400">{busy === `rmc:${container.name}` ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} Delete</button> : null}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                    {visible.length === 0 ? <tr><td className="px-4 py-6 text-slate-500" colSpan={5}>{containers.length === 0 ? "Load Docker or Podman containers." : "No running containers."}</td></tr> : null}
+                    </>);
+                    })()}
+                  </tbody>
+                </table>
+              )}
             </Panel>
           ) : null}
 
@@ -1617,11 +1718,27 @@ function agoText(iso: string | null): string {
 
 // Modal for entering/replacing the stored SSH credentials. Self-contained local state, and
 // values are snapshotted before the await so no `event.currentTarget`-after-await hazard.
-function CredentialsDialog({ hasCredentials, busy, onClose, onSave }: { hasCredentials: boolean; busy: boolean; onClose: () => void; onSave: (password: string, privateKey: string) => Promise<void> }) {
+function CredentialsDialog({ hasCredentials, busy, onClose, onSave, onTest }: { hasCredentials: boolean; busy: boolean; onClose: () => void; onSave: (password: string, privateKey: string) => Promise<void>; onTest: (password: string, privateKey: string) => Promise<{ ok: boolean; message: string }> }) {
   const [password, setPassword] = useState("");
   const [privateKey, setPrivateKey] = useState("");
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [localError, setLocalError] = useState("");
+
+  async function runTest() {
+    setTesting(true);
+    setTestResult(null);
+    setLocalError("");
+    try {
+      // Empty fields test the stored credentials; otherwise the just-typed ones.
+      setTestResult(await onTest(password, privateKey));
+    } catch (error) {
+      setTestResult({ ok: false, message: error instanceof Error ? error.message : "Connection test failed" });
+    } finally {
+      setTesting(false);
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1658,10 +1775,14 @@ function CredentialsDialog({ hasCredentials, busy, onClose, onSave }: { hasCrede
           <div className="text-center text-xs font-medium uppercase text-slate-400">or</div>
           <textarea value={privateKey} onChange={(event) => setPrivateKey(event.target.value)} spellCheck={false} placeholder="SSH private key (PEM)" className="min-h-32 w-full rounded-xl border border-line bg-white px-3 py-2 font-mono text-xs dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
           {localError ? <p className="text-xs font-medium text-danger dark:text-red-400">{localError}</p> : null}
+          {testResult ? <p className={`text-xs font-medium ${testResult.ok ? "text-emerald-600 dark:text-emerald-400" : "text-danger dark:text-red-400"}`}>{testResult.ok ? "✓ " : "✕ "}{testResult.message}</p> : null}
           <p className="text-xs text-slate-500 dark:text-slate-400">Stored Fernet-encrypted on the server and never sent back to the browser.</p>
-          <div className="flex items-center justify-end gap-2 pt-1">
-            <button type="button" onClick={onClose} className="h-10 rounded-full border border-line px-5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</button>
-            <button type="submit" disabled={saving || busy} className="h-10 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{saving ? "Saving…" : "Save encrypted"}</button>
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <button type="button" onClick={() => void runTest()} disabled={testing || busy} title={hasCredentials ? "Test the entered credentials, or the stored ones if blank" : "Test the entered credentials over SSH"} className="inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">{testing ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />} Test connection</button>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={onClose} className="h-10 rounded-full border border-line px-5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</button>
+              <button type="submit" disabled={saving || busy} className="h-10 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{saving ? "Saving…" : "Save encrypted"}</button>
+            </div>
           </div>
         </form>
       </div>

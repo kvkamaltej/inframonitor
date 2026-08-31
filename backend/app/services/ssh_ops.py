@@ -13,7 +13,7 @@ import uuid
 import paramiko
 
 from app.models.entities import Server
-from app.schemas.contracts import ContainerRead, CredentialPayload
+from app.schemas.contracts import ContainerRead, CredentialPayload, ImageRead
 from app.services import commands
 
 _q = shlex.quote
@@ -2273,8 +2273,32 @@ def list_containers_with_ports(server: Server, credentials: CredentialPayload, r
     for line in output.splitlines():
         parts = line.split("\t")
         if len(parts) >= 5:
-            containers.append(ContainerRead(runtime=runtime, id=parts[0], name=parts[1], image=parts[2], status=parts[3], ports=_short_ports(parts[4])))
+            containers.append(ContainerRead(runtime=runtime, id=parts[0], name=parts[1], image=parts[2], status=parts[3], ports=_short_ports(parts[4]), host_ports=_published_host_ports(parts[4])))
     return containers
+
+
+def _published_host_ports(value: str) -> list[int]:
+    """Host ports reachable via the server's IP, for the UI's 'open in browser' links.
+
+    Parses the raw ``docker/podman ps`` .Ports column (e.g.
+    ``0.0.0.0:8088->8000/tcp, 127.0.0.1:9090->9090/tcp, [::]:8088->8000/tcp``) and
+    keeps only published host ports whose bind address is externally routable --
+    0.0.0.0 or a concrete host IP. Loopback (127.0.0.1 / ::1) and container-internal
+    mappings with no host port are dropped, deduped, sorted ascending.
+    """
+    found: set[int] = set()
+    for item in value.split(","):
+        text = item.strip()
+        if "->" not in text:
+            continue
+        left = text.split("->", 1)[0]  # e.g. "0.0.0.0:8088" or "127.0.0.1:9090"
+        host, _, port = left.rpartition(":")
+        host = host.strip("[]")  # normalise IPv6 "[::]" / "[::1]"
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            continue
+        if port.isdigit():
+            found.add(int(port))
+    return sorted(found)
 
 
 def _short_ports(value: str) -> str:
@@ -2293,6 +2317,28 @@ def _short_ports(value: str) -> str:
         if re.fullmatch(r"\d+(->\d+)?", short) and short not in ports:
             ports.append(short)
     return ", ".join(ports)
+
+
+def list_images(server: Server, credentials: CredentialPayload, runtime: str) -> list[ImageRead]:
+    fmt = "{{.ID}}\\t{{.Repository}}\\t{{.Tag}}\\t{{.Size}}\\t{{.CreatedSince}}"
+    output = run_command(server, credentials, commands.image_ls(runtime, fmt))
+    images: list[ImageRead] = []
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 5:
+            images.append(ImageRead(runtime=runtime, id=parts[0], repository=parts[1], tag=parts[2], size=parts[3], created=parts[4]))
+    return images
+
+
+def remove_container(server: Server, credentials: CredentialPayload, runtime: str, container: str) -> str:
+    # container_rm merges stderr (2>&1); a non-zero exit still raises SshOperationError,
+    # so the route surfaces the CLI's reason (e.g. "No such container").
+    return run_command(server, credentials, commands.container_rm(runtime, container)).strip()
+
+
+def remove_image(server: Server, credentials: CredentialPayload, runtime: str, image: str) -> str:
+    # rmi without -f: a still-in-use image fails and the CLI message is surfaced.
+    return run_command(server, credentials, commands.image_rm(runtime, image)).strip()
 
 
 def container_logs(server: Server, credentials: CredentialPayload, runtime: str, container: str, tail: int = 200) -> list[str]:

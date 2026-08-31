@@ -62,6 +62,22 @@ def container_restart(runtime: str, container: str) -> str:
     return f"{_binary(runtime)} restart {_q(container)}"
 
 
+def container_rm(runtime: str, container: str) -> str:
+    # -f so a running container is stopped and removed in one step (matches the
+    # "delete" affordance in the UI). Destructive -> the route gates this to admins.
+    return f"{_binary(runtime)} rm -f {_q(container)} 2>&1"
+
+
+def image_ls(runtime: str, fmt: str) -> str:
+    return f"{_binary(runtime)} images --format '{fmt}'"
+
+
+def image_rm(runtime: str, image: str) -> str:
+    # No -f: refuse to remove an image that still backs a container (the CLI error
+    # is surfaced to the user) rather than silently orphaning running workloads.
+    return f"{_binary(runtime)} rmi {_q(image)} 2>&1"
+
+
 def journal_logs(unit: str, tail: int) -> str:
     return f"journalctl -u {_q(unit)} -n {tail} --no-pager"
 

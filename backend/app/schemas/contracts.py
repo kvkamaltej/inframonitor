@@ -190,6 +190,19 @@ class ContainerRead(BaseModel):
     image: str
     status: str
     ports: str = ""
+    # Externally reachable published host ports (bind IP 0.0.0.0 or a routable
+    # address, never 127.0.0.1/::1). The UI turns each into an "open in browser"
+    # link http://<server-ip>:<port>, like Docker Desktop's port shortcuts.
+    host_ports: list[int] = []
+
+
+class ImageRead(BaseModel):
+    runtime: str
+    id: str            # short image id
+    repository: str    # "<none>" for dangling
+    tag: str           # "<none>" for untagged
+    size: str          # human-readable, e.g. "142MB"
+    created: str       # e.g. "3 days ago"
 
 
 class LogResponse(BaseModel):
