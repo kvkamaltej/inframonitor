@@ -1475,7 +1475,7 @@ def delete_server(server_id: str, _: dict = Depends(require_admin), db: Session 
     db.commit()
 
 
-_EDITABLE_TEXT_FIELDS = ("hostname", "alias", "ip_address", "username", "environment", "server_type", "business_owner", "support_contact")
+_EDITABLE_TEXT_FIELDS = ("hostname", "alias", "ip_address", "username", "environment", "server_type", "business_owner", "support_contact", "os_kind")
 
 
 @router.patch("/servers/{server_id}", response_model=ServerRead)

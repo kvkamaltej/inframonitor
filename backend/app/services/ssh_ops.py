@@ -102,7 +102,9 @@ def run_command(server: Server, credentials: CredentialPayload, command: str, st
 
 
 def probe_vitals(server: Server, credentials: CredentialPayload) -> dict:
-    output = run_command(server, credentials, commands.wrap_sh(commands.VITALS_SH))
+    is_windows = (getattr(server, "os_kind", "linux") or "linux") == "windows"
+    script = commands.win_wrap(commands.WIN_VITALS_PS) if is_windows else commands.wrap_sh(commands.VITALS_SH)
+    output = run_command(server, credentials, script)
     facts: dict[str, str] = {}
     for line in output.splitlines():
         if "=" in line:
@@ -178,7 +180,11 @@ DISCOVERY_TIMEOUT = 90
 
 
 def discover_host(server: Server, credentials: CredentialPayload) -> dict:
-    command = commands.DISCOVER_SH + commands.TOMCAT_SCAN_SH + "\nexit 0\n"
+    is_windows = (getattr(server, "os_kind", "linux") or "linux") == "windows"
+    if is_windows:
+        command = commands.win_wrap(commands.WIN_DISCOVER_PS)
+    else:
+        command = commands.DISCOVER_SH + commands.TOMCAT_SCAN_SH + "\nexit 0\n"
     output = run_command(server, credentials, command, timeout=DISCOVERY_TIMEOUT)
     result: dict[str, str] = {}
     services: list[dict] = []
@@ -247,13 +253,18 @@ def discover_host(server: Server, credentials: CredentialPayload) -> dict:
         elif section == "dblogs" and "|" in line:
             name, source, path = line.split("|", 2)
             db_logs.append({"database": name, "source": source, "path": path})
-    result.update(_os_facts(os_release, os_extra, packages))
-    instances = _tomcat_instances(tomcat_lines)
-    if instances:
-        try:
-            _tomcat_apply_details(server, credentials, instances)
-        except Exception:
-            pass
+    # _os_facts + Tomcat probing are Linux-only (they parse /etc/os-release and POSIX Tomcat
+    # layouts). On Windows the WIN_DISCOVER_PS facts (OS/OS_DISTRO/OS_VERSION_ID) stand alone.
+    if not is_windows:
+        result.update(_os_facts(os_release, os_extra, packages))
+        instances = _tomcat_instances(tomcat_lines)
+        if instances:
+            try:
+                _tomcat_apply_details(server, credentials, instances)
+            except Exception:
+                pass
+    else:
+        instances = []
     if not result.get("OS") or result.get("OS") == "unknown":
         if result.get("OS_NAME"):
             result["OS"] = result["OS_NAME"]

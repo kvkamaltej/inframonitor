@@ -38,6 +38,7 @@ EXPECTED_SERVER_COLUMNS: list[tuple[str, str]] = [
     ("database_logs_json", "'[]'"),
     ("last_discovery", "NULL"),
     ("os_family", "''"),
+    ("os_kind", "'linux'"),
     ("os_distro", "''"),
     ("os_version", "''"),
     ("package_manager", "''"),

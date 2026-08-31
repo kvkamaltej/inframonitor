@@ -83,6 +83,7 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
         environment: String(form.get("environment") ?? "production"),
         server_type: String(form.get("server_type") ?? "application"),
         tags,
+        os_kind: String(form.get("os_kind") ?? "linux"),
         password: String(form.get("password") ?? ""),
         private_key: String(form.get("private_key") ?? ""),
         folder_id: folderId
@@ -118,6 +119,11 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
         {options.server_types.map((serverType) => (
           <option key={serverType} value={serverType}>{serverType}</option>
         ))}
+      </select>
+      {/* OS kind decides which probe set runs (POSIX vs PowerShell). Not auto-detected. */}
+      <select name="os_kind" defaultValue="linux" title="Operating system family" className={fieldClass}>
+        <option value="linux">Linux / Unix</option>
+        <option value="windows">Windows</option>
       </select>
 
       {/* Group: which bucket the server is created into. Hostname uniqueness is per-group, so this

@@ -88,6 +88,8 @@ export type Server = {
   docker_version: string;
   podman_version: string;
   os_family: string;
+  // "linux" | "windows" -- selects the probe set and enables the Remote Desktop button.
+  os_kind: string;
   os_distro: string;
   os_version: string;
   package_manager: string;
@@ -709,6 +711,7 @@ export type ServerUpdate = Partial<{
   tags: string[];
   business_owner: string;
   support_contact: string;
+  os_kind: string;
 }>;
 
 export async function updateServer(token: string, serverId: string, payload: ServerUpdate): Promise<Server> {

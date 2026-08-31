@@ -85,6 +85,10 @@ class Server(Base):
     disk_gb: Mapped[int] = mapped_column(Integer, default=0)
     architecture: Mapped[str] = mapped_column(String(64), default="")
     os_family: Mapped[str] = mapped_column(String(32), default="")
+    # High-level OS kind that decides which probe/command set runs: "linux" (POSIX, the default)
+    # or "windows" (PowerShell over SSH). Set by the operator when adding/editing a server, NOT
+    # auto-detected. Distinct from os_family, which is the Linux DISTRO family (rhel/debian/…).
+    os_kind: Mapped[str] = mapped_column(String(16), default="linux")
     os_distro: Mapped[str] = mapped_column(String(64), default="")
     os_version: Mapped[str] = mapped_column(String(64), default="")
     package_manager: Mapped[str] = mapped_column(String(32), default="")

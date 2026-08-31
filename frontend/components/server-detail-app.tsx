@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, ChevronDown, ChevronRight, Clock, Coffee, Copy, Download, ExternalLink, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, Layers, LayoutGrid, LineChart as LineChartIcon, ListChecks, Loader2, Lock, MemoryStick, MonitorCog, MoreVertical, Network, Package, Pencil, PlugZap, RefreshCw, ScrollText, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, ChevronDown, ChevronRight, Clock, Coffee, Copy, Download, ExternalLink, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, Layers, LayoutGrid, LineChart as LineChartIcon, ListChecks, Loader2, Lock, MemoryStick, Monitor, MonitorCog, MoreVertical, Network, Package, Pencil, PlugZap, RefreshCw, ScrollText, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
 import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
 import { downloadTextFile, safeFilename } from "@/lib/download";
+import { buildRdpFile } from "@/lib/rdp";
 import { serverMetricCharts } from "@/lib/monitoring-queries";
 import {
   assignServerFolder,
@@ -722,6 +723,16 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     window.location.href = "/";
   }
 
+  // A browser cannot launch mstsc directly, so download a ready-to-use .rdp file; opening it
+  // starts the native Windows Remote Desktop client against this host. No password is embedded.
+  function openRemoteDesktop() {
+    if (!server) return;
+    const rdp = buildRdpFile({ host: server.ip_address, username: server.username });
+    downloadTextFile(`${safeFilename(server.hostname || server.ip_address, "remote")}.rdp`, rdp);
+  }
+
+  const isWindows = (server?.os_kind || "linux") === "windows";
+
   const runtimeOptions = [
     server?.docker_version ? "docker" : "",
     server?.podman_version ? "podman" : ""
@@ -758,6 +769,16 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                 className={`inline-flex h-9 items-center gap-2 rounded-full px-4 text-sm font-semibold transition-colors ${hostShellOpen ? "bg-accent/10 text-accent hover:bg-accent/20 dark:bg-accent/20 dark:hover:bg-accent/30" : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"}`}
               >
                 <Terminal size={16} /> Shell
+              </button>
+            ) : null}
+            {isWindows ? (
+              <button
+                type="button"
+                onClick={openRemoteDesktop}
+                title={`Download an .rdp file to open Remote Desktop to ${server?.hostname ?? "this host"}`}
+                className="inline-flex h-9 items-center gap-2 rounded-full bg-accent/10 px-4 text-sm font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:hover:bg-accent/30"
+              >
+                <Monitor size={16} /> Remote Desktop
               </button>
             ) : null}
             {isAdmin ? (
@@ -1801,6 +1822,7 @@ function EditServerDialog({ server, onClose, onSave }: { server: Server; onClose
   const [tags, setTags] = useState(server.tags.join(", "));
   const [businessOwner, setBusinessOwner] = useState(server.business_owner ?? "");
   const [supportContact, setSupportContact] = useState(server.support_contact ?? "");
+  const [osKind, setOsKind] = useState(server.os_kind || "linux");
   const [saving, setSaving] = useState(false);
   const [localError, setLocalError] = useState("");
 
@@ -1827,7 +1849,8 @@ function EditServerDialog({ server, onClose, onSave }: { server: Server; onClose
         server_type: serverType.trim(),
         tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
         business_owner: businessOwner.trim(),
-        support_contact: supportContact.trim()
+        support_contact: supportContact.trim(),
+        os_kind: osKind
       });
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : "Unable to save changes");
@@ -1875,6 +1898,13 @@ function EditServerDialog({ server, onClose, onSave }: { server: Server; onClose
           <div>
             <label className={labelClass}>Server type</label>
             <input value={serverType} onChange={(event) => setServerType(event.target.value)} className={field} />
+          </div>
+          <div className="sm:col-span-2">
+            <label className={labelClass}>Operating system <span className="font-normal normal-case text-slate-400">(selects the probe set)</span></label>
+            <select value={osKind} onChange={(event) => setOsKind(event.target.value)} className={field}>
+              <option value="linux">Linux / Unix (POSIX probes)</option>
+              <option value="windows">Windows (PowerShell probes + Remote Desktop)</option>
+            </select>
           </div>
           <div className="sm:col-span-2">
             <label className={labelClass}>Tags <span className="font-normal normal-case text-slate-400">(comma separated)</span></label>

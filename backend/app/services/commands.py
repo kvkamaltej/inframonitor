@@ -11,9 +11,22 @@ Every builder is pure: it takes the caller's values and returns the command
 string, owning its own shell quoting via ``_q``.
 """
 
+import base64
 import shlex
 
 _q = shlex.quote
+
+
+def win_wrap(script: str) -> str:
+    """Wrap a PowerShell script for execution over SSH on a Windows host.
+
+    Windows OpenSSH runs the command via cmd.exe or powershell -- neither uses POSIX
+    single-quote quoting -- so instead of quoting we base64-encode the script (UTF-16LE,
+    as `-EncodedCommand` requires). The resulting command line is pure [A-Za-z0-9+/=],
+    which every Windows shell passes through verbatim, sidestepping all quoting issues.
+    """
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return f"powershell -NoProfile -NonInteractive -EncodedCommand {encoded}"
 
 
 def _binary(runtime: str) -> str:
@@ -455,4 +468,59 @@ if command -v kubectl >/dev/null 2>&1 || command -v k3s >/dev/null 2>&1 \
    || systemctl is-active --quiet kubelet 2>/dev/null; then echo KUBERNETES=1; else echo KUBERNETES=0; fi
 test -f /var/log/nginx/access.log && echo NGINX_ACCESS=1 || echo NGINX_ACCESS=0
 test -f /var/log/nginx/error.log  && echo NGINX_ERROR=1  || echo NGINX_ERROR=0
+"""
+
+
+# --- Windows (PowerShell) equivalents -----------------------------------------
+# Run via win_wrap() (powershell -EncodedCommand). They deliberately emit the SAME
+# KEY=VALUE facts and __SERVICES__/__STORAGE__ section markers as DISCOVER_SH so
+# ssh_ops.discover_host's parser is reused unchanged (it skips the Linux-only
+# _os_facts/tomcat steps for Windows). CIM (WMI) is used throughout -- fast and
+# available on Windows Server 2016+ / PowerShell 5.1, which ship in-box.
+WIN_DISCOVER_PS = r"""
+$ErrorActionPreference='SilentlyContinue'
+$os=Get-CimInstance Win32_OperatingSystem
+$cs=Get-CimInstance Win32_ComputerSystem
+Write-Output ("OS=" + $os.Caption)
+Write-Output ("KERNEL=" + $os.Version)
+Write-Output ("ARCH=" + $os.OSArchitecture)
+Write-Output ("CPU=" + $cs.NumberOfLogicalProcessors)
+Write-Output ("RAM_MB=" + [int]($cs.TotalPhysicalMemory/1MB))
+$sys=Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+if($sys){Write-Output ("DISK_GB=" + [int]($sys.Size/1GB))}else{Write-Output "DISK_GB=0"}
+Write-Output "OS_DISTRO=Windows"
+Write-Output ("OS_VERSION_ID=" + $os.Version)
+Write-Output "__OSRELEASE__"
+Write-Output "__OSEXTRA__"
+Write-Output "__PKG__"
+Write-Output "__SERVICES__"
+Get-Service | Where-Object {$_.Status -eq 'Running'} | Select-Object -First 40 | ForEach-Object {Write-Output ($_.Name + "|service|running|" + $_.DisplayName)}
+Write-Output "__STORAGE__"
+Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
+  $sz=[long]$_.Size; $fr=[long]$_.FreeSpace
+  if($sz -gt 0){
+    $used=$sz-$fr; $pct=[int]($used*100/$sz)
+    Write-Output ($_.DeviceID + "|NTFS|" + [long]($sz/1024) + "|" + [long]($used/1024) + "|" + [long]($fr/1024) + "|" + $pct + "%|" + $_.DeviceID)
+  }
+}
+Write-Output "__DBLOGS__"
+Write-Output "__TOMCAT__"
+"""
+
+
+WIN_VITALS_PS = r"""
+$ErrorActionPreference='SilentlyContinue'
+$os=Get-CimInstance Win32_OperatingSystem
+$cs=Get-CimInstance Win32_ComputerSystem
+$up=[int]((Get-Date)-$os.LastBootUpTime).TotalSeconds
+Write-Output ("UPTIME_SECONDS=" + $up)
+Write-Output "LOAD_AVERAGE="
+Write-Output ("CPU_CORES=" + $cs.NumberOfLogicalProcessors)
+$tot=[int]($cs.TotalPhysicalMemory/1MB)
+$free=[int]($os.FreePhysicalMemory/1024)
+Write-Output ("RAM_TOTAL_MB=" + $tot)
+Write-Output ("RAM_USED_MB=" + ($tot-$free))
+Write-Output ("PROCESS_COUNT=" + (Get-Process).Count)
+$cpu=(Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor | Where-Object {$_.Name -eq '_Total'}).PercentProcessorTime
+Write-Output ("CPU_PERCENT=" + [int]$cpu)
 """

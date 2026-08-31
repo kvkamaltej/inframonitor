@@ -46,6 +46,8 @@ class ServerCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     business_owner: str = ""
     support_contact: str = ""
+    # "linux" (default) or "windows" -- selects the probe/command set. Not auto-detected.
+    os_kind: str = "linux"
     password: str = ""
     private_key: str = ""
     # optional group (folder public_id) to create the server directly into; "" / None means the
@@ -67,6 +69,7 @@ class ServerUpdate(BaseModel):
     tags: list[str] | None = None
     business_owner: str | None = None
     support_contact: str | None = None
+    os_kind: str | None = None
 
 
 class ServerRead(BaseModel):
@@ -90,6 +93,7 @@ class ServerRead(BaseModel):
     installed_services: list[str]
     installed_exporters: list[str]
     os_family: str = ""
+    os_kind: str = "linux"
     os_distro: str = ""
     os_version: str = ""
     package_manager: str = ""
