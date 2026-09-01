@@ -34,9 +34,13 @@ def _client(server: Server, credentials: CredentialPayload) -> paramiko.SSHClien
         "hostname": server.ip_address,
         "port": server.ssh_port,
         "username": server.username,
-        "timeout": 8,
-        "banner_timeout": 8,
-        "auth_timeout": 8,
+        # Tolerant of remote / WAN / hardened hosts: a distant "live" server (or one whose
+        # sshd does slow PAM/LDAP auth or fail2ban banner delays) can need well over the old 8s
+        # to connect + authenticate, which made SOME features flap while quick ones succeeded.
+        # 20s is still short enough that a genuinely-down host fails reasonably fast.
+        "timeout": 20,
+        "banner_timeout": 20,
+        "auth_timeout": 20,
     }
     if credentials.private_key.strip():
         key_text = credentials.private_key.strip()

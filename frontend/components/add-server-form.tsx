@@ -120,15 +120,18 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
           <option key={serverType} value={serverType}>{serverType}</option>
         ))}
       </select>
-      {/* OS kind decides which probe set runs (POSIX vs PowerShell). Not auto-detected. */}
-      <select name="os_kind" defaultValue="linux" title="Operating system family" className={fieldClass}>
-        <option value="linux">Linux / Unix</option>
-        <option value="windows">Windows</option>
-      </select>
-
+      {/* Row 2 — three labeled 2-col cells so the grid stays balanced: OS · Group · New group. */}
+      <label className="flex flex-col gap-1 md:col-span-2">
+        <span className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Operating system</span>
+        {/* decides which probe set runs (POSIX vs PowerShell); not auto-detected */}
+        <select name="os_kind" defaultValue="linux" className={fieldClass}>
+          <option value="linux">Linux / Unix</option>
+          <option value="windows">Windows</option>
+        </select>
+      </label>
       {/* Group: which bucket the server is created into. Hostname uniqueness is per-group, so this
           is how you add a second "DEV" — put it in a different (or brand-new) group. */}
-      <label className="flex flex-col gap-1 md:col-span-3">
+      <label className="flex flex-col gap-1 md:col-span-2">
         <span className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Group</span>
         <select
           value={groupChoice}
@@ -143,14 +146,17 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
         </select>
       </label>
       {groupChoice === NEW_GROUP ? (
-        <input
-          value={newGroupName}
-          onChange={(event) => setNewGroupName(event.target.value)}
-          placeholder="New group name"
-          className={`${fieldClass} md:col-span-3`}
-        />
+        <label className="flex flex-col gap-1 md:col-span-2">
+          <span className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">New group name</span>
+          <input
+            value={newGroupName}
+            onChange={(event) => setNewGroupName(event.target.value)}
+            placeholder="e.g. MH"
+            className={fieldClass}
+          />
+        </label>
       ) : (
-        <div className="hidden md:col-span-3 md:block" />
+        <div className="hidden md:col-span-2 md:block" />
       )}
 
       <input name="password" type="password" placeholder="SSH password, optional" className={`${fieldClass} md:col-span-3`} />
