@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Activity, ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileSpreadsheet, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, TerminalSquare, Trash2, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowLeft, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileSpreadsheet, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, LayoutGrid, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, TerminalSquare, Trash2, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AddServerForm } from "@/components/add-server-form";
 import { matchDistroLogo, OsLogo } from "@/components/os-logo";
@@ -393,6 +393,12 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // Grouped-by-folder is the default view the feature is meant to deliver; the toggle drops back
   // to the original flat "all servers" table for anyone who wants it.
   const [grouped, setGrouped] = useState(true);
+  // Card drill-down view over the (nested) groups. navFolderId: null = root (top-level group
+  // cards), a folder id = inside that group, "__unassigned__" = the ungrouped-servers bucket.
+  const [cardView, setCardView] = useState(false);
+  const [navFolderId, setNavFolderId] = useState<string | null>(null);
+  const [cardNewName, setCardNewName] = useState("");
+  const [cardAddOpen, setCardAddOpen] = useState(false);
   // The filter controls are hidden until the Filter button (next to Add Server) is clicked, so
   // the inventory header stays a single compact row until filtering is actually wanted.
   const [showFilters, setShowFilters] = useState(false);
@@ -524,6 +530,127 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
     } catch (error) {
       setFolderError(error instanceof Error ? error.message : "Unable to delete folder");
     }
+  }
+
+  // Create a group under `parentId` (null = a top-level group) from the card view.
+  async function createGroupUnder(parentId: string | null, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setFolderBusy(true);
+    setFolderError("");
+    try {
+      await createFolder(token, trimmed, parentId);
+      setCardNewName("");
+      setCardAddOpen(false);
+      await reloadFolders();
+    } catch (error) {
+      setFolderError(error instanceof Error ? error.message : "Unable to create group");
+    } finally {
+      setFolderBusy(false);
+    }
+  }
+
+  // The card drill-down over nested groups. navFolderId: null = root (top-level cards + an
+  // Unassigned card), a folder id = inside that group, "__unassigned__" = the ungrouped bucket.
+  function renderGroupCards() {
+    const folderById = new Map(folders.map((f) => [f.id, f] as const));
+    const isUnassignedView = navFolderId === "__unassigned__";
+    const currentId = navFolderId && !isUnassignedView ? navFolderId : null;
+
+    const trail: Folder[] = [];
+    let walk = currentId ? folderById.get(currentId) : undefined;
+    while (walk) { trail.unshift(walk); walk = walk.parent_id ? folderById.get(walk.parent_id) : undefined; }
+
+    const childFolders = folders
+      .filter((f) => (f.parent_id || "") === (currentId || ""))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const unassignedCount = servers.filter((s) => !s.folder_id || !folderById.has(s.folder_id)).length;
+    const directServers = isUnassignedView
+      ? servers.filter((s) => !s.folder_id || !folderById.has(s.folder_id))
+      : currentId
+        ? servers.filter((s) => s.folder_id === currentId)
+        : [];
+
+    return (
+      <div className="space-y-5 p-6">
+        {/* Breadcrumb */}
+        <div className="flex flex-wrap items-center gap-1 text-sm">
+          <button onClick={() => { setNavFolderId(null); setCardAddOpen(false); }} className="inline-flex items-center gap-1 rounded-full px-2 py-1 font-semibold text-muted transition-colors hover:bg-page hover:text-fg"><LayoutGrid size={14} /> Groups</button>
+          {trail.map((f) => (
+            <span key={f.id} className="inline-flex items-center gap-1">
+              <ChevronRight size={14} className="text-muted" />
+              <button onClick={() => { setNavFolderId(f.id); setCardAddOpen(false); }} className="rounded-full px-2 py-1 font-semibold text-muted transition-colors hover:bg-page hover:text-fg">{f.name}</button>
+            </span>
+          ))}
+          {isUnassignedView ? (<><ChevronRight size={14} className="text-muted" /><span className="px-2 py-1 font-semibold text-fg">Unassigned</span></>) : null}
+        </div>
+
+        {/* Level header + New (sub)group */}
+        {!isUnassignedView ? (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              {currentId ? <button onClick={() => { const p = folderById.get(currentId); setNavFolderId(p?.parent_id || null); }} title="Back" className="inline-flex h-8 w-8 items-center justify-center rounded-full text-muted transition-colors hover:bg-page"><ArrowLeft size={16} /></button> : null}
+              <h3 className="text-sm font-semibold text-fg">{currentId ? (folderById.get(currentId)?.name ?? "Group") : "All groups"}</h3>
+            </div>
+            {role === "admin" ? (
+              cardAddOpen ? (
+                <form onSubmit={(e) => { e.preventDefault(); void createGroupUnder(currentId, cardNewName); }} className="flex items-center gap-2">
+                  <input autoFocus value={cardNewName} onChange={(e) => setCardNewName(e.target.value)} placeholder={currentId ? "New sub-group name" : "New group name"} maxLength={128} className="h-9 w-52 rounded-full border-none bg-white px-4 text-sm ring-1 ring-slate-200 focus:outline-none focus:ring-2 focus:ring-accent dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700" />
+                  <button type="submit" disabled={folderBusy || !cardNewName.trim()} className="inline-flex h-9 items-center gap-1.5 rounded-full bg-accent px-4 text-sm font-semibold text-white hover:bg-accent/80 disabled:opacity-50"><FolderPlus size={15} /> Create</button>
+                  <button type="button" onClick={() => { setCardAddOpen(false); setCardNewName(""); }} className="inline-flex h-9 items-center rounded-full px-3 text-sm font-medium text-muted hover:bg-page">Cancel</button>
+                </form>
+              ) : (
+                <button onClick={() => setCardAddOpen(true)} className="inline-flex h-9 items-center gap-1.5 rounded-full bg-accent/10 px-4 text-sm font-semibold text-accent transition-colors hover:bg-accent/20 dark:bg-accent/20 dark:hover:bg-accent/30"><FolderPlus size={15} /> {currentId ? "New sub-group" : "New group"}</button>
+              )
+            ) : null}
+          </div>
+        ) : null}
+        {folderError ? <p className="text-xs font-medium text-danger dark:text-red-400">{folderError}</p> : null}
+
+        {/* Group cards (child groups + an Unassigned card at the root) */}
+        {!isUnassignedView && (childFolders.length > 0 || (!currentId && unassignedCount > 0)) ? (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {childFolders.map((f) => (
+              <div key={f.id} role="button" tabIndex={0}
+                onClick={() => { setNavFolderId(f.id); setCardAddOpen(false); }}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setNavFolderId(f.id); setCardAddOpen(false); } }}
+                className="group flex cursor-pointer flex-col gap-3 rounded-2xl bg-surface p-5 ring-1 ring-edge transition-all hover:ring-2 hover:ring-accent">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 font-semibold text-fg"><FolderIcon size={18} className="text-accent" /> {f.name}</div>
+                  {role === "admin" ? (
+                    <button onClick={(e) => { e.stopPropagation(); void removeFolder(f); }} title={`Delete group ${f.name}`} className="inline-flex h-7 w-7 items-center justify-center rounded-full text-muted opacity-0 transition-opacity hover:bg-danger/10 hover:text-danger group-hover:opacity-100 dark:hover:bg-red-500/10 dark:hover:text-red-400"><Trash2 size={14} /></button>
+                  ) : null}
+                </div>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-muted">
+                  <span className="inline-flex items-center gap-1"><FolderTree size={13} /> {f.child_count} sub-group{f.child_count === 1 ? "" : "s"}</span>
+                  <span className="inline-flex items-center gap-1"><MonitorDot size={13} /> {f.server_count} server{f.server_count === 1 ? "" : "s"}</span>
+                </div>
+              </div>
+            ))}
+            {!currentId && unassignedCount > 0 ? (
+              <div role="button" tabIndex={0}
+                onClick={() => setNavFolderId("__unassigned__")}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setNavFolderId("__unassigned__"); } }}
+                className="group flex cursor-pointer flex-col gap-3 rounded-2xl bg-surface p-5 ring-1 ring-edge transition-all hover:ring-2 hover:ring-accent">
+                <div className="flex items-center gap-2 font-semibold text-fg"><MonitorDot size={18} className="text-muted" /> Unassigned</div>
+                <div className="text-xs font-medium text-muted"><span className="inline-flex items-center gap-1"><MonitorDot size={13} /> {unassignedCount} server{unassignedCount === 1 ? "" : "s"}</span></div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Servers directly assigned to the current group / the Unassigned bucket */}
+        {currentId || isUnassignedView ? (
+          directServers.length > 0 ? (
+            serverTable(sortRows(directServers, sortKey, sortDir), sortKey, sortDir, toggleSort)
+          ) : (
+            <p className="text-sm text-muted">{childFolders.length > 0 ? "No servers directly in this group — open a sub-group above." : "No servers here yet. Assign one from the inventory row menu (⋮ → Move to group)."}</p>
+          )
+        ) : (
+          childFolders.length === 0 && unassignedCount === 0 ? <p className="text-sm text-muted">No groups yet. Create one above.</p> : null
+        )}
+      </div>
+    );
   }
 
   // Server types and environments are user-managed master data, so the filter options are
@@ -824,7 +951,10 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
                     <button disabled={refreshing || visibleServers.length === 0} onClick={() => { setActionsMenuOpen(false); void refreshAllVitals(); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page disabled:opacity-50">
                       <Activity size={16} className={refreshing ? "animate-pulse text-accent" : "text-accent"} /> {refreshing ? "Probing…" : `Refresh vitals${filtersActive && visibleServers.length ? ` (${visibleServers.length})` : ""}`}
                     </button>
-                    <button onClick={() => { setGrouped((value) => !value); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page">
+                    <button onClick={() => { setCardView((v) => !v); setNavFolderId(null); setCardAddOpen(false); setActionsMenuOpen(false); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page">
+                      {cardView ? <><List size={16} className="text-muted" /> Table view</> : <><LayoutGrid size={16} className="text-muted" /> Group cards</>}
+                    </button>
+                    <button onClick={() => { setGrouped((value) => !value); setActionsMenuOpen(false); }} disabled={cardView} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page disabled:opacity-40">
                       {grouped ? <><List size={16} className="text-muted" /> Show all (flat)</> : <><FolderTree size={16} className="text-muted" /> Group view</>}
                     </button>
                     <button disabled={exporting || servers.length === 0} onClick={() => { setActionsMenuOpen(false); void exportInventory(); }} className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left text-sm font-medium transition-colors hover:bg-page disabled:opacity-50" title="Download the full inventory as an Excel workbook">
@@ -923,6 +1053,8 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
             reads as a section heading, never as a row crammed under the column header. */}
         {servers.length === 0 ? (
           <div className="px-6 py-6 text-sm text-muted">{loadError ? `Unable to load inventory: ${loadError}` : "No servers in inventory yet."}</div>
+        ) : cardView ? (
+          renderGroupCards()
         ) : visibleServers.length === 0 ? (
           <div className="px-6 py-6 text-sm text-muted">
             <span className="font-medium">No servers match the current filters.</span>{" "}

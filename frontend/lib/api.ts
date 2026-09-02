@@ -123,7 +123,9 @@ export type Server = {
 export type Folder = {
   id: string;
   name: string;
-  server_count: number;
+  server_count: number;   // servers assigned DIRECTLY to this group
+  parent_id: string;      // parent group's id, or "" for a top-level group
+  child_count: number;    // number of direct sub-groups
 };
 
 export type PrivilegedResult = {
@@ -666,12 +668,17 @@ export async function getFolders(token: string): Promise<Folder[]> {
   return request<Folder[]>("/folders", token);
 }
 
-export async function createFolder(token: string, name: string): Promise<Folder> {
-  return request<Folder>("/folders", token, { method: "POST", body: JSON.stringify({ name }) });
+export async function createFolder(token: string, name: string, parentId?: string | null): Promise<Folder> {
+  return request<Folder>("/folders", token, { method: "POST", body: JSON.stringify({ name, parent_id: parentId ?? null }) });
 }
 
 export async function renameFolder(token: string, folderId: string, name: string): Promise<Folder> {
   return request<Folder>(`/folders/${encodeURIComponent(folderId)}`, token, { method: "PATCH", body: JSON.stringify({ name }) });
+}
+
+// Move a group under a new parent (parentId=null moves it to the top level).
+export async function moveFolder(token: string, folderId: string, parentId: string | null): Promise<Folder> {
+  return request<Folder>(`/folders/${encodeURIComponent(folderId)}`, token, { method: "PATCH", body: JSON.stringify({ parent_id: parentId }) });
 }
 
 export async function deleteFolder(token: string, folderId: string): Promise<void> {

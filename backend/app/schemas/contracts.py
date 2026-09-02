@@ -134,6 +134,15 @@ class ServerRead(BaseModel):
 class FolderCreate(BaseModel):
     # only the name is client-supplied; public_id is minted server-side at creation
     name: str
+    # optional parent group's public_id for a NESTED sub-group; None/"" = a top-level group.
+    parent_id: str | None = None
+
+
+class FolderUpdate(BaseModel):
+    # PATCH: rename and/or MOVE. Uses model_dump(exclude_unset=True) in the route, so an omitted
+    # field is left untouched, while `parent_id: null` / "" explicitly moves the group to the root.
+    name: str | None = None
+    parent_id: str | None = None
 
 
 class FolderRead(BaseModel):
@@ -142,7 +151,9 @@ class FolderRead(BaseModel):
     # folder header with its membership without a second round-trip.
     id: str
     name: str
-    server_count: int
+    server_count: int          # servers assigned DIRECTLY to this group (not its sub-groups)
+    parent_id: str = ""        # parent group's public_id, or "" for a top-level group
+    child_count: int = 0       # number of direct sub-groups
 
 
 class ServerFolderUpdate(BaseModel):

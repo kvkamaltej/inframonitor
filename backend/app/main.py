@@ -20,7 +20,7 @@ from app.core.config import Settings, get_settings
 from app.core.database import Base, SessionLocal, engine
 from app.core.menus import DEFAULT_ROLE_MENUS, MENU_ITEMS, ROLE_MENUS_KEY
 from app.core.security import SEEDED_GUEST_EMAIL, hash_password, verify_password
-from app.models.entities import AppSetting, DbConnection, KubeCluster, Role, Server, User
+from app.models.entities import AppSetting, DbConnection, Folder, KubeCluster, Role, Server, User
 
 
 settings = get_settings()
@@ -156,6 +156,29 @@ def _migrate_db_connection_columns() -> None:
         for name, default in missing:
             ddl_type, literal = _db_connection_ddl(name, default)
             conn.execute(text(f"ALTER TABLE db_connections ADD COLUMN {name} {ddl_type} DEFAULT {literal}"))
+
+
+# feature/nested-groups: self-FK for sub-groups. `folders` is created by create_all() on a fresh
+# install (with the column present); an existing DB whose folders table predates nesting needs it
+# ALTERed in. Same compile-the-type-from-the-ORM approach as the loops above.
+EXPECTED_FOLDER_COLUMNS: list[tuple[str, str]] = [
+    ("parent_id", "NULL"),
+]
+
+
+def _migrate_folder_columns() -> None:
+    inspector = inspect(engine)
+    if "folders" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("folders")}
+    missing = [entry for entry in EXPECTED_FOLDER_COLUMNS if entry[0] not in existing]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for name, default in missing:
+            column = Folder.__table__.columns.get(name)
+            ddl_type = column.type.compile(dialect=engine.dialect) if column is not None else "INTEGER"
+            conn.execute(text(f"ALTER TABLE folders ADD COLUMN {name} {ddl_type} DEFAULT {default}"))
 
 
 # (column name, SQL default) for kube_clusters columns added after the first release -- the
@@ -477,6 +500,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
     _migrate_server_columns()
     _migrate_db_connection_columns()
+    _migrate_folder_columns()
     _migrate_kube_cluster_columns()
     _ensure_shell_favorites_unique()
     _backfill_public_ids()

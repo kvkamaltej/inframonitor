@@ -74,6 +74,7 @@ from app.schemas.contracts import (
     DbTable,
     FolderCreate,
     FolderRead,
+    FolderUpdate,
     IntegrationStatus,
     ActionResult,
     AlertRuleCreate,
@@ -971,13 +972,53 @@ def _folder_counts(db: Session) -> dict[int, int]:
     return {folder_id: count for folder_id, count in rows}
 
 
+def _folder_child_counts(db: Session) -> dict[int, int]:
+    # one grouped query for every group's number of DIRECT sub-groups (for the card view).
+    rows = db.execute(
+        select(Folder.parent_id, func.count(Folder.id))
+        .where(Folder.parent_id.is_not(None))
+        .group_by(Folder.parent_id)
+    ).all()
+    return {parent_id: count for parent_id, count in rows}
+
+
+def _folder_descendant_ids(db: Session, folder_id: int) -> set[int]:
+    # All folders that sit somewhere below folder_id, walked over parent_id. Used to reject moving a
+    # group into its own sub-tree (which would orphan a cycle). One read of (id, parent_id) pairs.
+    pairs = db.execute(select(Folder.id, Folder.parent_id)).all()
+    children: dict[int, list[int]] = {}
+    for fid, pid in pairs:
+        if pid is not None:
+            children.setdefault(pid, []).append(fid)
+    seen: set[int] = set()
+    stack = list(children.get(folder_id, []))
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        stack.extend(children.get(cur, []))
+    return seen
+
+
 @router.get("/folders", response_model=list[FolderRead])
 def list_folders(_: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[FolderRead]:
     counts = _folder_counts(db)
+    child_counts = _folder_child_counts(db)
     # ordered case-insensitively so "BH" and "bh"-style names sort where a reader expects, not by
     # ASCII where uppercase sorts before lowercase
     folders = db.scalars(select(Folder).order_by(func.lower(Folder.name))).all()
-    return [FolderRead(id=folder.public_id, name=folder.name, server_count=counts.get(folder.id, 0)) for folder in folders]
+    id_to_pub = {folder.id: folder.public_id for folder in folders}
+    return [
+        FolderRead(
+            id=folder.public_id,
+            name=folder.name,
+            server_count=counts.get(folder.id, 0),
+            parent_id=id_to_pub.get(folder.parent_id, "") if folder.parent_id else "",
+            child_count=child_counts.get(folder.id, 0),
+        )
+        for folder in folders
+    ]
 
 
 @router.post("/folders", response_model=FolderRead, status_code=status.HTTP_201_CREATED)
@@ -989,39 +1030,64 @@ def create_folder(payload: FolderCreate, _: dict = Depends(require_admin), db: S
     # column's UNIQUE constraint alone is case-sensitive on SQLite
     if db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower())):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A folder with that name already exists")
+    # Optional parent group for a NESTED sub-group; absent/"" => a top-level group.
+    parent = _folder_or_404(db, payload.parent_id.strip()) if (payload.parent_id or "").strip() else None
     # public_id is set here and only here: folders are born through this route, so there is no
     # legacy row that could exist without one, and no separate backfill pass is needed
-    folder = Folder(name=name, public_id=str(uuid.uuid4()))
+    folder = Folder(name=name, public_id=str(uuid.uuid4()), parent_id=(parent.id if parent else None))
     db.add(folder)
     db.commit()
     db.refresh(folder)
-    return FolderRead(id=folder.public_id, name=folder.name, server_count=0)
+    return FolderRead(id=folder.public_id, name=folder.name, server_count=0, parent_id=(parent.public_id if parent else ""), child_count=0)
 
 
 @router.patch("/folders/{public_id}", response_model=FolderRead)
-def rename_folder(public_id: str, payload: FolderCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> FolderRead:
+def update_folder(public_id: str, payload: FolderUpdate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> FolderRead:
+    """Rename and/or MOVE a group. exclude_unset: an omitted field is left untouched; sending
+    parent_id null/"" moves the group to the top level. Moving into the group's own sub-tree (or
+    onto itself) is rejected so the tree can never form a cycle."""
     folder = _folder_or_404(db, public_id)
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Folder name is required")
-    # a folder may keep (or re-case) its own name; only a clash with a DIFFERENT folder is a 409
-    clash = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower(), Folder.id != folder.id))
-    if clash:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A folder with that name already exists")
-    folder.name = name
+    data = payload.model_dump(exclude_unset=True)
+    if "name" in data and data["name"] is not None:
+        name = data["name"].strip()
+        if not name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Folder name is required")
+        # a folder may keep (or re-case) its own name; only a clash with a DIFFERENT folder is a 409
+        clash = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower(), Folder.id != folder.id))
+        if clash:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A folder with that name already exists")
+        folder.name = name
+    if "parent_id" in data:
+        target = (data["parent_id"] or "").strip()
+        if not target:
+            folder.parent_id = None
+        else:
+            parent = _folder_or_404(db, target)
+            if parent.id == folder.id:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A group cannot be its own parent")
+            if parent.id in _folder_descendant_ids(db, folder.id):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot move a group into one of its own sub-groups")
+            folder.parent_id = parent.id
     db.commit()
     db.refresh(folder)
     counts = _folder_counts(db)
-    return FolderRead(id=folder.public_id, name=folder.name, server_count=counts.get(folder.id, 0))
+    child_counts = _folder_child_counts(db)
+    parent_pub = ""
+    if folder.parent_id:
+        parent = db.get(Folder, folder.parent_id)
+        parent_pub = parent.public_id if parent else ""
+    return FolderRead(id=folder.public_id, name=folder.name, server_count=counts.get(folder.id, 0), parent_id=parent_pub, child_count=child_counts.get(folder.id, 0))
 
 
 @router.delete("/folders/{public_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_folder(public_id: str, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> None:
     folder = _folder_or_404(db, public_id)
-    # Unassign members FIRST, explicitly. There is deliberately no ON DELETE cascade on the FK, so
-    # with SQLite's PRAGMA foreign_keys=ON a delete leaving servers pointed at this folder would
-    # raise an IntegrityError. Servers must outlive their folder -- they just fall back to the
-    # "Unassigned" group.
+    # Reparent DIRECT sub-groups up to this folder's own parent (its grandparent, or the top level)
+    # so a nested tree survives deleting a middle group instead of orphaning its children.
+    db.execute(update(Folder).where(Folder.parent_id == folder.id).values(parent_id=folder.parent_id))
+    # Unassign members, explicitly. There is deliberately no ON DELETE cascade on the FK, so with
+    # SQLite's PRAGMA foreign_keys=ON a delete leaving servers pointed at this folder would raise an
+    # IntegrityError. Servers must outlive their folder -- they just fall back to the "Unassigned" group.
     db.execute(update(Server).where(Server.folder_id == folder.id).values(folder_id=None))
     db.delete(folder)
     db.commit()

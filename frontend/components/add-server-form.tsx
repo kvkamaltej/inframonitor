@@ -1,7 +1,7 @@
 "use client";
 
 import { Plus } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { addServer, createFolder, getFolders, getOptions, Folder, OptionList } from "@/lib/api";
 import { addressError } from "@/lib/address";
 
@@ -101,6 +101,20 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
     }
   }
 
+  // Flatten the (nested) groups into path-labelled options — "MH / App-Servers / …" — so a server
+  // can be assigned to any group at any depth from this single select. Sorted by full path.
+  const folderOptions = useMemo(() => {
+    const byId = new Map(folders.map((f) => [f.id, f] as const));
+    const pathOf = (folder: Folder): string => {
+      const parts = [folder.name];
+      let parent = folder.parent_id ? byId.get(folder.parent_id) : undefined;
+      let guard = 0;
+      while (parent && guard++ < 50) { parts.unshift(parent.name); parent = parent.parent_id ? byId.get(parent.parent_id) : undefined; }
+      return parts.join(" / ");
+    };
+    return folders.map((f) => ({ id: f.id, label: pathOf(f) })).sort((a, b) => a.label.localeCompare(b.label));
+  }, [folders]);
+
   const fieldClass =
     "h-12 rounded-xl border-none bg-slate-100 px-4 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100";
 
@@ -139,8 +153,8 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
           className={fieldClass}
         >
           <option value="">Unassigned</option>
-          {folders.map((folder) => (
-            <option key={folder.id} value={folder.id}>{folder.name}</option>
+          {folderOptions.map((option) => (
+            <option key={option.id} value={option.id}>{option.label}</option>
           ))}
           <option value={NEW_GROUP}>＋ New group…</option>
         </select>
