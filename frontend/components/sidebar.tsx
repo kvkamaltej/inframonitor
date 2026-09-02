@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Activity, Boxes, ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Play, Server, Settings, Shield, SlidersHorizontal, Sun, Table2 as TableIcon, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
 import { MouseEvent, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { getDbConnections, getDbTables, getFolders, getServers, DbConnection, DbTable, Folder as FolderType, Server as ServerRow } from "@/lib/api";
+import { getAppDatabase, getDbConnections, getDbTables, getFolders, getServers, AppDbConfig, DbConnection, DbTable, Folder as FolderType, Server as ServerRow } from "@/lib/api";
 import { applyTheme, DEFAULT_DARK, DEFAULT_LIGHT, resolveInitialTheme, themeMeta, THEME_EVENT, type ThemeName } from "@/lib/theme";
 
 // Built-in per-role menu sets, used only as a fallback when the server sends no `menus` (or an
@@ -53,6 +53,17 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
   // folder public_ids the user has collapsed; everything is expanded by default so hosts are one
   // click away. "" is the Unassigned group.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  // App-database footer indicator: which DB the app itself runs on, at a glance, with the details
+  // on hover. Only fetched for callers who can see the App Database page (admins); the endpoint is
+  // admin-only. `dbHover` drives the styled popover (a fixed sibling, so the aside can't clip it).
+  const [appDb, setAppDb] = useState<AppDbConfig | null>(null);
+  const [dbHover, setDbHover] = useState(false);
+  useEffect(() => {
+    if (!allowed.has("appdatabase")) return;
+    const token = window.localStorage.getItem("inframonitor-token") ?? "";
+    void getAppDatabase(token).then(setAppDb).catch(() => undefined);
+  }, [allowed]);
 
   async function loadShellData() {
     // Empty token is fine: a desktop guest has no token, and getServers("")/getFolders("") are
@@ -322,6 +333,26 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
           {allowed.has("appearance") && (
             <NavItem href="/appearance" icon={Palette} label="Appearance" />
           )}
+          {/* App-database at-a-glance: the DatabaseZap icon plus the running engine, with the full
+              connection shown in a popover on hover. Click opens the App Database settings page. */}
+          {allowed.has("appdatabase") && appDb ? (
+            <button
+              type="button"
+              onMouseEnter={() => setDbHover(true)}
+              onMouseLeave={() => setDbHover(false)}
+              onFocus={() => setDbHover(true)}
+              onBlur={() => setDbHover(false)}
+              onClick={() => router.push("/app-database")}
+              title={!open ? `Application database — ${appDb.backend}` : undefined}
+              className="group flex h-12 w-full items-center gap-4 rounded-full px-4 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              <DatabaseZap size={20} className="shrink-0 text-accent" />
+              <span className={`flex min-w-0 flex-col leading-tight transition-opacity duration-200 ${open ? "opacity-100 w-auto" : "opacity-0 w-0 hidden"}`}>
+                <span className="truncate">{appDb.backend}</span>
+                <span className="truncate text-[11px] font-normal text-slate-400 dark:text-slate-500">{appDb.is_override ? "External database" : "Default database"}</span>
+              </span>
+            </button>
+          ) : null}
           <button
             onClick={toggleTheme}
             className="group flex h-12 items-center gap-4 rounded-full px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200 dark:text-slate-300 dark:hover:bg-slate-800"
@@ -336,6 +367,26 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
         </div>
       </nav>
     </aside>
+    {/* App-database hover popover. Fixed sibling offset by the rail width so it sits flush against
+        the footer indicator and is never clipped by the overflow-hidden aside. */}
+    {allowed.has("appdatabase") && appDb && dbHover ? (
+      <div
+        onMouseEnter={() => setDbHover(true)}
+        onMouseLeave={() => setDbHover(false)}
+        style={{ left: open ? 288 : 72, bottom: 16 }}
+        className="fixed z-50 w-72 rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl dark:border-slate-800 dark:bg-[#161616]"
+      >
+        <div className="mb-2.5 flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+          <DatabaseZap size={16} className="text-accent" /> Application database
+        </div>
+        <dl className="space-y-2 text-xs">
+          <div className="flex items-center justify-between gap-3"><dt className="text-slate-500 dark:text-slate-400">Engine</dt><dd className="font-semibold text-slate-800 dark:text-slate-200">{appDb.backend}</dd></div>
+          <div className="flex items-center justify-between gap-3"><dt className="text-slate-500 dark:text-slate-400">Mode</dt><dd className="font-semibold text-slate-800 dark:text-slate-200">{appDb.is_override ? "External (migrated)" : "Default (bundled)"}</dd></div>
+          <div><dt className="mb-1 text-slate-500 dark:text-slate-400">Connection</dt><dd className="break-all rounded-lg bg-slate-100 px-2 py-1.5 font-mono text-[11px] text-slate-700 dark:bg-slate-800 dark:text-slate-300">{appDb.url_masked}</dd></div>
+        </dl>
+        <p className="mt-3 text-[11px] text-slate-400 dark:text-slate-500">Click the indicator to open settings</p>
+      </div>
+    ) : null}
     {/* Shell launcher flyout. Rendered as a fixed sibling (not a child of the overflow-hidden
         aside, which would clip it) and offset by the current rail width so it sits flush against
         the sidebar in both the expanded and collapsed states. */}
