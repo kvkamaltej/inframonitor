@@ -628,7 +628,8 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
 
         {/* Group cards (child groups + an Unassigned card at the root) */}
         {!isUnassignedView && (childFolders.length > 0 || (!currentId && unassignedCount > 0)) ? (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          // auto-fill: as many ~15rem tiles per row as the available width fits, re-flowing on resize.
+          <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]">
             {childFolders.map((f) => (
               <div key={f.id} role="button" tabIndex={0}
                 onClick={() => { setNavFolderId(f.id); setCardAddOpen(false); }}
