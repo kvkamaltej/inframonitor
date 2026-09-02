@@ -181,6 +181,20 @@ def _migrate_folder_columns() -> None:
             conn.execute(text(f"ALTER TABLE folders ADD COLUMN {name} {ddl_type} DEFAULT {default}"))
 
 
+def _relax_folder_name_unique() -> None:
+    # v1 put a GLOBAL unique index on folders.name (ix_folders_name). Nested groups allow the same
+    # sub-group name under different parents, so drop that unique index on existing DBs; per-parent
+    # uniqueness is now enforced in the folder routes. DROP INDEX works on SQLite and PostgreSQL.
+    inspector = inspect(engine)
+    if "folders" not in inspector.get_table_names():
+        return
+    for index in inspector.get_indexes("folders"):
+        if index.get("name") == "ix_folders_name" and index.get("unique"):
+            with engine.begin() as conn:
+                conn.execute(text("DROP INDEX IF EXISTS ix_folders_name"))
+            break
+
+
 # (column name, SQL default) for kube_clusters columns added after the first release -- the
 # log-shipping pair, mirroring the Server ones. Same compile-the-type-from-the-ORM approach.
 EXPECTED_KUBE_CLUSTER_COLUMNS: list[tuple[str, str]] = [
@@ -501,6 +515,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _migrate_server_columns()
     _migrate_db_connection_columns()
     _migrate_folder_columns()
+    _relax_folder_name_unique()
     _migrate_kube_cluster_columns()
     _ensure_shell_favorites_unique()
     _backfill_public_ids()

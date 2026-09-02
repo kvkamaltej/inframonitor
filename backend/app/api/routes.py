@@ -982,6 +982,14 @@ def _folder_child_counts(db: Session) -> dict[int, int]:
     return {parent_id: count for parent_id, count in rows}
 
 
+def _sibling_name_clash(db: Session, name: str, parent_id: int | None, exclude_id: int | None = None) -> bool:
+    # Group names are unique only AMONG SIBLINGS (same parent), case-insensitively -- so "prod" can
+    # live under both MH and EMS, but not twice under the same parent. NULL parent = the top level.
+    predicate = Folder.parent_id.is_(None) if parent_id is None else Folder.parent_id == parent_id
+    clash = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower(), predicate))
+    return bool(clash and clash.id != exclude_id)
+
+
 def _folder_descendant_ids(db: Session, folder_id: int) -> set[int]:
     # All folders that sit somewhere below folder_id, walked over parent_id. Used to reject moving a
     # group into its own sub-tree (which would orphan a cycle). One read of (id, parent_id) pairs.
@@ -1026,12 +1034,12 @@ def create_folder(payload: FolderCreate, _: dict = Depends(require_admin), db: S
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Folder name is required")
-    # case-insensitive duplicate guard: "BH" and "bh" are the same folder to a human, and the
-    # column's UNIQUE constraint alone is case-sensitive on SQLite
-    if db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower())):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A folder with that name already exists")
     # Optional parent group for a NESTED sub-group; absent/"" => a top-level group.
     parent = _folder_or_404(db, payload.parent_id.strip()) if (payload.parent_id or "").strip() else None
+    # names are unique only among SIBLINGS (case-insensitive), so the same name can repeat in a
+    # different parent group but not twice under the same one
+    if _sibling_name_clash(db, name, parent.id if parent else None):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A group with that name already exists here")
     # public_id is set here and only here: folders are born through this route, so there is no
     # legacy row that could exist without one, and no separate backfill pass is needed
     folder = Folder(name=name, public_id=str(uuid.uuid4()), parent_id=(parent.id if parent else None))
@@ -1048,26 +1056,28 @@ def update_folder(public_id: str, payload: FolderUpdate, _: dict = Depends(requi
     onto itself) is rejected so the tree can never form a cycle."""
     folder = _folder_or_404(db, public_id)
     data = payload.model_dump(exclude_unset=True)
+    new_name = folder.name
+    new_parent_id = folder.parent_id
     if "name" in data and data["name"] is not None:
-        name = data["name"].strip()
-        if not name:
+        new_name = data["name"].strip()
+        if not new_name:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Folder name is required")
-        # a folder may keep (or re-case) its own name; only a clash with a DIFFERENT folder is a 409
-        clash = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower(), Folder.id != folder.id))
-        if clash:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A folder with that name already exists")
-        folder.name = name
     if "parent_id" in data:
         target = (data["parent_id"] or "").strip()
         if not target:
-            folder.parent_id = None
+            new_parent_id = None
         else:
             parent = _folder_or_404(db, target)
             if parent.id == folder.id:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A group cannot be its own parent")
             if parent.id in _folder_descendant_ids(db, folder.id):
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot move a group into one of its own sub-groups")
-            folder.parent_id = parent.id
+            new_parent_id = parent.id
+    # name must be unique among the target parent's children (case-insensitive), excluding self
+    if _sibling_name_clash(db, new_name, new_parent_id, exclude_id=folder.id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A group with that name already exists here")
+    folder.name = new_name
+    folder.parent_id = new_parent_id
     db.commit()
     db.refresh(folder)
     counts = _folder_counts(db)

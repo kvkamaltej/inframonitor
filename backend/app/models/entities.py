@@ -54,9 +54,10 @@ class Folder(Base):
     # the Server model already follows. It is set at creation from uuid4(); folders are only ever
     # born through the API, so there is no legacy row that could sneak in without one.
     public_id: Mapped[str] = mapped_column(String(36), unique=True, index=True, default="")
-    # unique + case-insensitive-checked in the route: two folders named "BH" and "bh" would be a
-    # confusing pair, so the route rejects the second before it reaches this constraint.
-    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    # NOT globally unique: nested groups allow the SAME sub-group name under different parents
+    # (e.g. "prod" under both MH and EMS). Uniqueness is enforced PER-PARENT in the folder routes
+    # (case-insensitive among siblings). Existing DBs get the old unique index dropped on startup.
+    name: Mapped[str] = mapped_column(String(128), index=True)
     # Self-referential parent for NESTED groups (a group can hold sub-groups to any depth). NULL =
     # a top-level group. Names stay globally unique for now (v1), so a subgroup can't reuse a name
     # that exists elsewhere in the tree -- relax the `name` unique index later if siblings need it.

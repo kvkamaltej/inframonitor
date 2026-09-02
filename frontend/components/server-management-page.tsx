@@ -309,9 +309,24 @@ function RowActions({ server, canShell, vitalsBusy, onShell, onRefreshVitals, on
   );
 }
 
-// Searchable group-assignment dialog, opened from the row menu's "Move to group…". Filtering by
-// name is what keeps this usable with a very large number of groups, where the old inline list
-// would have been unnavigable. Enter assigns the single remaining match.
+// Full "Parent / Child / …" path for every folder, so nested sub-groups are recognizable (and,
+// now that siblings can share a name, distinguishable) wherever a group is listed.
+function folderPaths(folders: Folder[]): Map<string, string> {
+  const byId = new Map(folders.map((f) => [f.id, f] as const));
+  const paths = new Map<string, string>();
+  for (const folder of folders) {
+    const parts = [folder.name];
+    let parent = folder.parent_id ? byId.get(folder.parent_id) : undefined;
+    let guard = 0;
+    while (parent && guard++ < 50) { parts.unshift(parent.name); parent = parent.parent_id ? byId.get(parent.parent_id) : undefined; }
+    paths.set(folder.id, parts.join(" / "));
+  }
+  return paths;
+}
+
+// Searchable group-assignment dialog, opened from the row menu's "Move to group…". Lists every
+// group by its full nested path, so a server can be moved into any sub-group at any depth. Enter
+// assigns the single remaining match.
 function GroupAssignDialog({ server, folders, onClose, onAssign }: {
   server: Server;
   folders: Folder[];
@@ -319,8 +334,12 @@ function GroupAssignDialog({ server, folders, onClose, onAssign }: {
   onAssign: (folderId: string | null) => void;
 }) {
   const [query, setQuery] = useState("");
+  const paths = useMemo(() => folderPaths(folders), [folders]);
   const needle = query.trim().toLowerCase();
-  const matches = needle ? folders.filter((folder) => folder.name.toLowerCase().includes(needle)) : folders;
+  // Sort by full path so a parent and its children read together; filter matches the whole path,
+  // so typing "MH" surfaces "MH / prod" and typing "prod" finds every "prod" sub-group.
+  const ordered = [...folders].sort((a, b) => (paths.get(a.id) || a.name).localeCompare(paths.get(b.id) || b.name));
+  const matches = needle ? ordered.filter((folder) => (paths.get(folder.id) || folder.name).toLowerCase().includes(needle)) : ordered;
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -359,7 +378,7 @@ function GroupAssignDialog({ server, folders, onClose, onAssign }: {
             </button>
             {matches.map((folder) => (
               <button key={folder.id} className={item} onClick={() => onAssign(folder.id)}>
-                <span className="flex min-w-0 items-center gap-2"><FolderIcon size={14} className="shrink-0 text-accent" /> <span className="truncate">{folder.name}</span> <span className="shrink-0 text-xs text-slate-400">{folder.server_count}</span></span>
+                <span className="flex min-w-0 items-center gap-2"><FolderIcon size={14} className="shrink-0 text-accent" /> <span className="truncate">{paths.get(folder.id) || folder.name}</span> <span className="shrink-0 text-xs text-slate-400">{folder.server_count}</span></span>
                 {server.folder_id === folder.id ? <Check size={14} className="shrink-0 text-accent" /> : null}
               </button>
             ))}
@@ -393,9 +412,9 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // Grouped-by-folder is the default view the feature is meant to deliver; the toggle drops back
   // to the original flat "all servers" table for anyone who wants it.
   const [grouped, setGrouped] = useState(true);
-  // Card drill-down view over the (nested) groups. navFolderId: null = root (top-level group
-  // cards), a folder id = inside that group, "__unassigned__" = the ungrouped-servers bucket.
-  const [cardView, setCardView] = useState(false);
+  // Card drill-down view over the (nested) groups -- the DEFAULT landing view. navFolderId: null =
+  // root (top-level group cards), a folder id = inside that group, "__unassigned__" = ungrouped.
+  const [cardView, setCardView] = useState(true);
   const [navFolderId, setNavFolderId] = useState<string | null>(null);
   const [cardNewName, setCardNewName] = useState("");
   const [cardAddOpen, setCardAddOpen] = useState(false);
@@ -657,6 +676,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // whatever the loaded inventory actually contains rather than a hardcoded list.
   const serverTypes = useMemo(() => distinctValues(servers, (server) => server.server_type), [servers]);
   const environments = useMemo(() => distinctValues(servers, (server) => server.environment), [servers]);
+  const groupPaths = useMemo(() => folderPaths(folders), [folders]);
 
   const filtersActive = typeFilter !== ALL || envFilter !== ALL || groupFilter !== ALL;
 
@@ -1037,7 +1057,7 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
           </select>
           <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)} aria-label="Filter by group" className={selectClass}>
             <option value={ALL}>All groups</option>
-            {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+            {folders.map((folder) => <option key={folder.id} value={folder.id}>{groupPaths.get(folder.id) || folder.name}</option>)}
             <option value={UNASSIGNED_FILTER}>Unassigned</option>
           </select>
           {filtersActive ? (

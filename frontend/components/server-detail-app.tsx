@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Activity, AlertTriangle, ArrowLeft, Boxes, Check, ChevronDown, ChevronRight, Clock, Coffee, Copy, Download, ExternalLink, Cpu, Database, FileText, Folder as FolderIcon, Gauge, HardDrive, Info as InfoIcon, KeyRound, Layers, LayoutGrid, LineChart as LineChartIcon, ListChecks, Loader2, Lock, MemoryStick, Monitor, MonitorCog, MoreVertical, Network, Package, Pencil, PlugZap, RefreshCw, ScrollText, ServerCog, Terminal, Trash2, Upload, X } from "lucide-react";
-import { Fragment, FormEvent, useEffect, useRef, useState } from "react";
+import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
 import { downloadTextFile, safeFilename } from "@/lib/download";
@@ -333,6 +333,19 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
 
   // EXPERIMENTAL (feature/server-folders): move this server into a folder, or "" to unassign.
   // Optional and non-breaking — the select just reflects and updates server.folder_id.
+  // Nested-path labels ("MH / App-Servers") so the assign dropdown shows sub-groups clearly.
+  const folderOptions = useMemo(() => {
+    const byId = new Map(folders.map((f) => [f.id, f] as const));
+    const pathOf = (folder: Folder): string => {
+      const parts = [folder.name];
+      let parent = folder.parent_id ? byId.get(folder.parent_id) : undefined;
+      let guard = 0;
+      while (parent && guard++ < 50) { parts.unshift(parent.name); parent = parent.parent_id ? byId.get(parent.parent_id) : undefined; }
+      return parts.join(" / ");
+    };
+    return folders.map((f) => ({ id: f.id, label: pathOf(f) })).sort((a, b) => a.label.localeCompare(b.label));
+  }, [folders]);
+
   async function assignFolder(folderId: string) {
     setFolderBusy(true);
     try {
@@ -997,7 +1010,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                       className="h-10 min-w-[16rem] cursor-pointer rounded-xl border border-line bg-white px-3 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
                     >
                       <option value="">Unassigned</option>
-                      {folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+                      {folderOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
                     </select>
                     {folderBusy ? <Loader2 size={16} className="animate-spin text-accent" /> : null}
                   </div>
