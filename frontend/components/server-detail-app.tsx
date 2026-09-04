@@ -290,6 +290,21 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     if (logRefresher && !busy) logRefresher();
   });
 
+  // Nested-path labels ("MH / App-Servers") for the assign dropdown. MUST stay above the early
+  // returns below -- a hook after a conditional return changes the hook count between the loading
+  // and loaded renders (React error #310).
+  const folderOptions = useMemo(() => {
+    const byId = new Map(folders.map((f) => [f.id, f] as const));
+    const pathOf = (folder: Folder): string => {
+      const parts = [folder.name];
+      let parent = folder.parent_id ? byId.get(folder.parent_id) : undefined;
+      let guard = 0;
+      while (parent && guard++ < 50) { parts.unshift(parent.name); parent = parent.parent_id ? byId.get(parent.parent_id) : undefined; }
+      return parts.join(" / ");
+    };
+    return folders.map((f) => ({ id: f.id, label: pathOf(f) })).sort((a, b) => a.label.localeCompare(b.label));
+  }, [folders]);
+
   if (initializing) return <div className="flex min-h-screen items-center justify-center bg-page"><div className="h-8 w-8 animate-spin rounded-full border-4 border-accent border-t-transparent" /></div>;
   // Guest mode sets `me` with an empty token; only fall to the login gate when there's no session.
   if (!me) return <LoginPanel onLogin={(nextToken) => { setToken(nextToken); void load(nextToken); }} />;
@@ -333,19 +348,6 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
 
   // EXPERIMENTAL (feature/server-folders): move this server into a folder, or "" to unassign.
   // Optional and non-breaking — the select just reflects and updates server.folder_id.
-  // Nested-path labels ("MH / App-Servers") so the assign dropdown shows sub-groups clearly.
-  const folderOptions = useMemo(() => {
-    const byId = new Map(folders.map((f) => [f.id, f] as const));
-    const pathOf = (folder: Folder): string => {
-      const parts = [folder.name];
-      let parent = folder.parent_id ? byId.get(folder.parent_id) : undefined;
-      let guard = 0;
-      while (parent && guard++ < 50) { parts.unshift(parent.name); parent = parent.parent_id ? byId.get(parent.parent_id) : undefined; }
-      return parts.join(" / ");
-    };
-    return folders.map((f) => ({ id: f.id, label: pathOf(f) })).sort((a, b) => a.label.localeCompare(b.label));
-  }, [folders]);
-
   async function assignFolder(folderId: string) {
     setFolderBusy(true);
     try {
