@@ -15,7 +15,7 @@ import {
   Terminal,
   X
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import {
   getRedisKey,
@@ -151,6 +151,23 @@ export function RedisWorkspace({
   const [running, setRunning] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
+  // The workspace container is calc(100vh-4rem), but a page-level banner can sit above it, so
+  // relying on h-full leaves the console pinned below the fold. Measure the actual room from the
+  // root's top to the viewport bottom and use it as an explicit height, so the console is always
+  // reachable regardless of the banner.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [rootH, setRootH] = useState<number>();
+  useLayoutEffect(() => {
+    function measure() {
+      const el = rootRef.current;
+      if (!el) return;
+      setRootH(Math.max(360, window.innerHeight - el.getBoundingClientRect().top));
+    }
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+
   const loadKeyspaces = useCallback(async () => {
     try {
       setKeyspaces(await getRedisKeyspaces(token, connection.id));
@@ -237,7 +254,7 @@ export function RedisWorkspace({
   const totalKeys = keyspaces.find((k) => k.db === db)?.keys ?? null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-elevated">
+    <div ref={rootRef} style={{ height: rootH }} className="flex h-full min-h-0 flex-col bg-elevated">
       {/* header: connection + database picker + pattern filter */}
       <div className="flex flex-wrap items-center gap-2 border-b border-edge px-4 py-2.5">
         <Database size={16} className="text-accent" />
