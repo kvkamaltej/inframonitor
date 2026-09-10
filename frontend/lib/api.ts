@@ -1768,12 +1768,15 @@ export async function lokiQueryRange(
   query: string,
   startSec: number,
   endSec: number,
-  opts?: { limit?: number; direction?: string }
+  // endNs overrides endSec with an exact nanosecond bound, used to page backward from the oldest
+  // row already loaded (Loki's `end` is exclusive, so passing that row's ns returns strictly older
+  // entries with no overlap).
+  opts?: { limit?: number; direction?: string; endNs?: string }
 ): Promise<LokiResponse> {
   const params = new URLSearchParams({
     query,
     start: `${Math.floor(startSec)}000000000`,
-    end: `${Math.floor(endSec)}000000000`,
+    end: opts?.endNs ?? `${Math.floor(endSec)}000000000`,
     limit: String(opts?.limit ?? 200),
     direction: opts?.direction ?? "backward"
   });

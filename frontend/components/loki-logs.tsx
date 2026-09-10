@@ -23,6 +23,13 @@ function nowSec(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+// Lines Loki returns per query. A wide window over a busy stream has far more than this, so the
+// viewer pages backward ("Load older") and Export walks every page rather than stopping at the cap.
+const PAGE_LIMIT = 2000;
+// A hard ceiling on a full-range export so a runaway query cannot try to pull an unbounded stream
+// into the browser. Reaching it exports what was gathered and says so.
+const EXPORT_MAX_LINES = 200_000;
+
 // nanosecond epoch string -> HH:MM:SS. Slicing off the last 6 digits yields milliseconds without
 // losing precision to a float.
 function nsToClock(ns: string): string {
@@ -91,6 +98,14 @@ export function LokiLogViewer({
   const [error, setError] = useState("");
   const [ran, setRan] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+
+  // Pagination: one query returns at most PAGE_LIMIT newest lines, so a wide window over a busy
+  // stream would otherwise stop at "today" and never reach older days. queryCtx remembers the
+  // active query + its window start so "Load older" can page backward from the oldest loaded row.
+  const [queryCtx, setQueryCtx] = useState<{ logql: string; startSec: number; endSec: number } | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // Time-window mode: relative presets or an explicit absolute From/To window.
   const [rangeMode, setRangeMode] = useState<"relative" | "absolute">("relative");
@@ -191,12 +206,18 @@ export function LokiLogViewer({
       setError("");
       setRan(true);
       try {
-        const resp = await lokiQueryRange(token, logql, start, end, { limit: 1000, direction: "backward" });
+        const resp = await lokiQueryRange(token, logql, start, end, { limit: PAGE_LIMIT, direction: "backward" });
         const streams = resp?.data?.result ?? [];
-        setRows(flattenStreams(streams));
+        const page = flattenStreams(streams);
+        setRows(page);
+        // A full page means Loki likely had more to give before the window start -> allow paging back.
+        setQueryCtx({ logql, startSec: start, endSec: end });
+        setHasMore(page.length >= PAGE_LIMIT);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Query failed");
         setRows([]);
+        setHasMore(false);
+        setQueryCtx(null);
       } finally {
         setLoading(false);
       }
@@ -205,6 +226,35 @@ export function LokiLogViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [token, selectors, lineFilter, pinnedSelector, rangeMode, relSeconds, absFrom, absTo]
   );
+
+  // Fetch the next older page and append it. Anchors on the oldest loaded row's exact nanosecond
+  // (Loki's `end` is exclusive) so pages join with no overlap or gap, letting the operator walk the
+  // whole history back to the window start rather than being capped at the newest PAGE_LIMIT lines.
+  const loadOlder = useCallback(async () => {
+    if (!queryCtx || rows.length === 0 || loadingMore) return;
+    const oldestNs = rows[rows.length - 1].ns;
+    setLoadingMore(true);
+    setError("");
+    try {
+      const resp = await lokiQueryRange(token, queryCtx.logql, queryCtx.startSec, 0, {
+        limit: PAGE_LIMIT,
+        direction: "backward",
+        endNs: oldestNs
+      });
+      const page = flattenStreams(resp?.data?.result ?? []);
+      // Dedupe on ns+line in case an identical entry sits exactly on the boundary.
+      setRows((prev) => {
+        const seen = new Set(prev.map((r) => `${r.ns} ${r.line}`));
+        const fresh = page.filter((r) => !seen.has(`${r.ns} ${r.line}`));
+        return [...prev, ...fresh];
+      });
+      setHasMore(page.length >= PAGE_LIMIT);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Query failed");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [token, queryCtx, rows, loadingMore]);
 
   // When pinned to a selector, auto-run once on mount and re-run whenever the pin changes.
   useEffect(() => {
@@ -231,18 +281,54 @@ export function LokiLogViewer({
     };
   }, [fullscreen]);
 
-  // Export the currently loaded rows to a .log file, oldest-first (rows are held newest-first).
-  function exportLogs() {
-    if (rows.length === 0) return;
-    const text = [...rows]
-      .reverse()
-      .map((row) => {
-        const iso = new Date(Number(row.ns.slice(0, -6))).toISOString();
-        return `${iso}\t[${identityOf(row.labels)}]\t${row.line}`;
-      })
-      .join("\n");
-    downloadTextFile(`loki-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.log`, text);
-  }
+  // Export the WHOLE window, oldest-first -- not just what is on screen. A single query is capped at
+  // PAGE_LIMIT, so this pages backward from the window end to its start (each page anchored on the
+  // previous page's oldest nanosecond, Loki's `end` being exclusive) and concatenates every line, up
+  // to a safety ceiling. This is why the file can hold far more than the loaded rows.
+  const exportLogs = useCallback(async () => {
+    if (!queryCtx || exporting) return;
+    setExporting(true);
+    setError("");
+    try {
+      const all: LogRow[] = [];
+      const seen = new Set<string>();
+      let endNs: string | undefined;
+      // Guard against a pathological stream that never returns a short page.
+      for (let pages = 0; pages < Math.ceil(EXPORT_MAX_LINES / PAGE_LIMIT) + 1; pages++) {
+        const resp = await lokiQueryRange(token, queryCtx.logql, queryCtx.startSec, queryCtx.endSec, {
+          limit: PAGE_LIMIT,
+          direction: "backward",
+          endNs
+        });
+        const page = flattenStreams(resp?.data?.result ?? []);
+        let added = 0;
+        for (const r of page) {
+          const key = `${r.ns} ${r.line}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          all.push(r);
+          added++;
+        }
+        if (page.length < PAGE_LIMIT || all.length >= EXPORT_MAX_LINES || added === 0) break;
+        endNs = page[page.length - 1].ns; // page backward from this page's oldest line
+      }
+      if (all.length === 0) return;
+      // `all` is newest-first across pages; reverse for a chronological file.
+      const text = [...all]
+        .reverse()
+        .map((row) => {
+          const iso = new Date(Number(row.ns.slice(0, -6))).toISOString();
+          return `${iso}\t[${identityOf(row.labels)}]\t${row.line}`;
+        })
+        .join("\n");
+      const note = all.length >= EXPORT_MAX_LINES ? `\n# truncated at ${EXPORT_MAX_LINES} lines` : "";
+      downloadTextFile(`loki-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.log`, text + note);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }, [token, queryCtx, exporting]);
 
   // --- controls (query builder + time window) ----------------------------------------------
   const controls = (
@@ -398,10 +484,11 @@ export function LokiLogViewer({
         </button>
         <button
           onClick={exportLogs}
-          disabled={rows.length === 0}
+          disabled={!queryCtx || exporting}
+          title="Export the whole window (pages through the full range, not just the loaded lines)"
           className="inline-flex h-9 items-center gap-2 rounded-full border border-edge px-4 text-sm font-medium text-fg transition-colors hover:bg-elevated disabled:opacity-50"
         >
-          <Download size={15} /> Export
+          {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} {exporting ? "Exporting…" : "Export"}
         </button>
       </div>
     </div>
@@ -411,7 +498,7 @@ export function LokiLogViewer({
   const results = (
     <div className="rounded-2xl border border-edge bg-surface">
       <div className="flex items-center gap-2 border-b border-edge px-4 py-2 text-xs font-semibold uppercase tracking-wide text-muted">
-        <ScrollText size={14} /> {heading} {rows.length > 0 ? `(${rows.length})` : ""}
+        <ScrollText size={14} /> {heading} {rows.length > 0 ? `(${rows.length}${hasMore ? "+, load older for more" : ""})` : ""}
       </div>
       <div
         className={`overflow-auto p-2 font-mono text-xs leading-relaxed ${
@@ -458,6 +545,18 @@ export function LokiLogViewer({
             );
           })
         )}
+        {ran && !loading && !error && hasMore ? (
+          <div className="flex justify-center py-2">
+            <button
+              onClick={loadOlder}
+              disabled={loadingMore}
+              className="inline-flex h-8 items-center gap-2 rounded-full border border-edge px-4 font-sans text-xs font-semibold text-fg transition-colors hover:bg-elevated disabled:opacity-50"
+            >
+              {loadingMore ? <Loader2 size={14} className="animate-spin" /> : null}
+              {loadingMore ? "Loading…" : "Load older entries"}
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );
