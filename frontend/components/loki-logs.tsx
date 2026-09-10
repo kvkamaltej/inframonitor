@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Download, Loader2, Maximize2, Minimize2, Play, Plus, ScrollText, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Download, Loader2, Maximize2, Minimize2, Play, Plus, ScrollText, SlidersHorizontal, X } from "lucide-react";
 import { lokiLabelValues, lokiLabels, lokiQueryRange, type LokiStream } from "@/lib/api";
 import { buildLogqlSelector, type SelectorRow } from "@/lib/monitoring-queries";
 
@@ -30,12 +30,17 @@ const PAGE_LIMIT = 2000;
 // into the browser. Reaching it exports what was gathered and says so.
 const EXPORT_MAX_LINES = 200_000;
 
-// nanosecond epoch string -> HH:MM:SS. Slicing off the last 6 digits yields milliseconds without
-// losing precision to a float.
-function nsToClock(ns: string): string {
+// nanosecond epoch string -> a clock, optionally prefixed with the date. Slicing off the last 6
+// digits yields milliseconds without losing precision to a float. The date is shown when the loaded
+// window spans more than one day, so a multi-day range is not an ambiguous wall of times.
+function nsToStamp(ns: string, withDate: boolean): string {
   const ms = Number(ns.slice(0, -6));
   if (!Number.isFinite(ms)) return "";
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  if (!withDate) return time;
+  const date = d.toLocaleDateString([], { day: "2-digit", month: "short" });
+  return `${date} ${time}`;
 }
 
 // The most specific identity available for a stream: which container/service the line belongs to.
@@ -106,6 +111,9 @@ export function LokiLogViewer({
   const [exporting, setExporting] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // The query builder collapses to a one-line summary so the log rows get the screen once a query
+  // is dialed in. Starts collapsed when pinned (the common case: it auto-runs, no editing needed).
+  const [controlsCollapsed, setControlsCollapsed] = useState<boolean>(Boolean(pinnedSelector && pinnedSelector.trim()));
 
   // Time-window mode: relative presets or an explicit absolute From/To window.
   const [rangeMode, setRangeMode] = useState<"relative" | "absolute">("relative");
@@ -331,9 +339,45 @@ export function LokiLogViewer({
   }, [token, queryCtx, exporting]);
 
   // --- controls (query builder + time window) ----------------------------------------------
+  // One-line description of the current query, shown when the builder is collapsed.
+  const querySummary =
+    ((pinnedSelector && pinnedSelector.trim()) ||
+      selectors.filter((s) => s.label && s.value).map((s) => `${s.label}="${s.value}"`).join(", ") ||
+      "no selector") +
+    (lineFilter.trim() ? ` ${lineFilter.trim()}` : "") +
+    " · " +
+    (rangeMode === "relative"
+      ? `last ${RELATIVE_PRESETS.find((p) => p.seconds === relSeconds)?.label ?? "custom"}`
+      : absFrom && absTo
+        ? `${absFrom.replace("T", " ")} → ${absTo.replace("T", " ")}`
+        : "absolute");
+
   const controls = (
-    <div className="rounded-2xl border border-edge bg-surface p-4">
-      {/* Selector builder */}
+    <div className="rounded-2xl border border-edge bg-surface">
+      <button
+        type="button"
+        onClick={() => setControlsCollapsed((v) => !v)}
+        className="flex w-full items-center gap-2 px-4 py-2.5 text-left transition-colors hover:bg-elevated/40"
+      >
+        {controlsCollapsed ? <ChevronRight size={15} className="shrink-0 text-muted" /> : <ChevronDown size={15} className="shrink-0 text-muted" />}
+        <SlidersHorizontal size={14} className="shrink-0 text-accent" />
+        <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">Query</span>
+        {controlsCollapsed ? (
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted">{querySummary}</span>
+        ) : null}
+        {controlsCollapsed ? (
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(e) => { e.stopPropagation(); void run(); }}
+            className="ml-auto inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full bg-accent px-3 text-xs font-semibold text-white transition-colors hover:bg-accent/90"
+          >
+            {loading ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />} Run
+          </span>
+        ) : null}
+      </button>
+      {controlsCollapsed ? null : (
+      <div className="px-4 pb-4">
       <div className="flex flex-col gap-2">
         <span className="text-xs font-semibold uppercase tracking-wide text-muted">Selectors</span>
 
@@ -491,8 +535,17 @@ export function LokiLogViewer({
           {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} {exporting ? "Exporting…" : "Export"}
         </button>
       </div>
+      </div>
+      )}
     </div>
   );
+
+  // Show the date on each line only when the loaded logs cross a day boundary (rows are held
+  // newest-first, so compare the first and last). A same-day window stays as bare clocks.
+  const spansMultipleDays =
+    rows.length > 1 &&
+    new Date(Number(rows[0].ns.slice(0, -6))).toDateString() !==
+      new Date(Number(rows[rows.length - 1].ns.slice(0, -6))).toDateString();
 
   // --- results pane -------------------------------------------------------------------------
   const results = (
@@ -529,7 +582,7 @@ export function LokiLogViewer({
                   row.stderr ? "text-red-600 dark:text-red-400" : "text-fg"
                 }`}
               >
-                <span className="shrink-0 select-none text-muted">{nsToClock(row.ns)}</span>
+                <span className="shrink-0 select-none tabular-nums text-muted">{nsToStamp(row.ns, spansMultipleDays)}</span>
                 {identity ? (
                   <span className="shrink-0 select-none rounded bg-elevated px-1.5 text-[11px] text-muted">
                     {identity}
