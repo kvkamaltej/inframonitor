@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -307,3 +307,84 @@ class ShellFavorite(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped[User] = relationship(back_populates="shell_favorites")
+
+
+class Gateway(Base):
+    """An API gateway that ships its access log here.
+
+    One row per gateway (VAPT's Kong, prod's Kong, anything else later). The
+    token is what Kong presents on every ingest call: Kong is a machine, not an
+    operator, so it must not carry an operator JWT.
+    """
+
+    __tablename__ = "gateways"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    environment: Mapped[str] = mapped_column(String(64), default="")
+    token: Mapped[str] = mapped_column(String(128), unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GatewayEvent(Base):
+    """One request as the gateway saw it.
+
+    Every request is kept, not just rejections: during a penetration test the
+    shape of a scan is the finding, and a table of only the blocked calls shows
+    where the limiter fired without showing what was being probed. Retention is
+    a setting; see `gateway_event_retention_days`.
+    """
+
+    __tablename__ = "gateway_events"
+    __table_args__ = (
+        # The two groupings the UI actually performs, and the retention sweep.
+        Index("ix_gateway_events_ts", "ts"),
+        Index("ix_gateway_events_ip_ts", "client_ip", "ts"),
+        Index("ix_gateway_events_ip_path_ts", "client_ip", "path", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    gateway_id: Mapped[int] = mapped_column(ForeignKey("gateways.id"))
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=False)
+    client_ip: Mapped[str] = mapped_column(String(64))
+    method: Mapped[str] = mapped_column(String(10), default="")
+    path: Mapped[str] = mapped_column(String(512), default="")
+    route_name: Mapped[str] = mapped_column(String(128), default="")
+    tier: Mapped[str] = mapped_column(String(32), default="")
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    # The limit that applied, as text ("30/min"), so the UI can show what was
+    # enforced without re-deriving it from the gateway config at read time.
+    limit_rule: Mapped[str] = mapped_column(String(32), default="")
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    user_agent: Mapped[str] = mapped_column(String(256), default="")
+
+
+class GatewayRollup(Base):
+    """Per-minute counts, grouped the way the two screens read them.
+
+    The address list and the endpoint drill-down are both GROUP BY over this
+    table. Reading them from `gateway_events` would mean scanning every request
+    in the window; at full capture that is the difference between a 24h view
+    that returns and one that does not.
+    """
+
+    __tablename__ = "gateway_rollups"
+    __table_args__ = (
+        UniqueConstraint("gateway_id", "minute", "client_ip", "path", name="uq_gateway_rollup"),
+        Index("ix_gateway_rollups_minute_ip", "minute", "client_ip"),
+        Index("ix_gateway_rollups_ip_path_minute", "client_ip", "path", "minute"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    gateway_id: Mapped[int] = mapped_column(ForeignKey("gateways.id"))
+    minute: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    client_ip: Mapped[str] = mapped_column(String(64))
+    path: Mapped[str] = mapped_column(String(512), default="")
+    tier: Mapped[str] = mapped_column(String(32), default="")
+    limit_rule: Mapped[str] = mapped_column(String(32), default="")
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    allowed: Mapped[int] = mapped_column(Integer, default=0)
+    throttled: Mapped[int] = mapped_column(Integer, default=0)
+    last_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))

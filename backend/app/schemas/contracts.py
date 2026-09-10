@@ -1048,3 +1048,70 @@ class KubeCordonRequest(BaseModel):
 class ActionResult(BaseModel):
     ok: bool
     message: str
+
+
+# --------------------------------------------------------------- gateway traffic
+
+class GatewayIngestEvent(BaseModel):
+    """One entry of Kong's http-log payload, reduced to what this feature reads."""
+
+    ts: float
+    client_ip: str
+    method: str = ""
+    path: str = ""
+    route_name: str = ""
+    tier: str = ""
+    status: int = 0
+    limit_rule: str = ""
+    latency_ms: int = 0
+    user_agent: str = ""
+
+
+class GatewayIngestResult(BaseModel):
+    accepted: int
+    gateway: str
+
+
+class GatewaySourceRead(BaseModel):
+    client_ip: str
+    requests: int
+    allowed: int
+    throttled: int
+    endpoints: int
+    rate_per_min: float
+    throttled_share: float
+    last_seen: datetime
+
+
+class GatewayEndpointRead(BaseModel):
+    path: str
+    tier: str
+    limit_rule: str
+    hits: int
+    allowed: int
+    throttled: int
+    last_hit: datetime
+
+
+class GatewayEventRead(BaseModel):
+    ts: datetime
+    client_ip: str
+    method: str
+    path: str
+    tier: str
+    status: int
+    limit_rule: str
+    latency_ms: int
+
+
+class GatewayRead(BaseModel):
+    id: int
+    name: str
+    environment: str
+    enabled: bool
+    last_event_at: datetime | None
+
+
+class GatewayCreate(BaseModel):
+    name: str
+    environment: str = ""

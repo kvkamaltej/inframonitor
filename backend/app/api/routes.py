@@ -37,8 +37,14 @@ from app.services import alert_rules
 from app.services import db_backend
 from app.services import db_backup
 from app.services import oidc
-from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, DbQueryHistory, Folder, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
+from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, DbQueryHistory, Folder, Gateway, GatewayEvent, GatewayRollup, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
+    GatewayCreate,
+    GatewayEndpointRead,
+    GatewayEventRead,
+    GatewayIngestResult,
+    GatewayRead,
+    GatewaySourceRead,
     AccessPolicyCreate,
     AccessPolicyRead,
     AppDbConfigRead,
@@ -3881,3 +3887,355 @@ def kube_cordon_node(cluster_id: str, name: str, payload: KubeCordonRequest, _: 
     cluster = _cluster_or_404(db, cluster_id)
     message = _kube_call(kube.cordon_node, _cluster_conn(cluster), name, payload.cordon)
     return ActionResult(ok=True, message=message)
+
+
+# =============================================================================
+# Gateway traffic
+#
+# Kong's http-log plugin POSTs its access log here. Every request is kept, not
+# only the rejections: during a penetration test the shape of a scan is the
+# finding, and a table of blocked calls alone shows where the limiter fired
+# without showing what was being probed.
+#
+# Reads never touch gateway_events. Both screens group over gateway_rollups,
+# which is written alongside each event -- at full capture that is the
+# difference between a 24h view that returns and one that does not.
+# =============================================================================
+
+# Windows the UI offers. Whitelisted rather than parsed, so a range can never
+# reach the query as text.
+_GW_RANGES: dict[str, timedelta] = {
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "1h": timedelta(hours=1),
+    "6h": timedelta(hours=6),
+    "24h": timedelta(hours=24),
+}
+
+# Sortable columns, per screen. A column name never reaches the query builder
+# unless it is a member here.
+_GW_SOURCE_SORTS = {"requests", "allowed", "throttled", "endpoints", "last_seen",
+                    "rate_per_min", "throttled_share"}
+_GW_ENDPOINT_SORTS = {"path", "hits", "allowed", "throttled", "last_hit"}
+
+# Default tier map, matching the gateway's own rules. An admin can override it
+# through the `gateway_tier_map` setting so it follows a retune without a
+# redeploy.
+_GW_DEFAULT_TIERS: list[tuple[str, str, str]] = [
+    ("/captcha/", "captcha", "30/min"),
+    ("/user/newCaptchaValidate", "captcha", "30/min"),
+    ("/user/GenerateOTPRequest", "auth", "5/min"),
+    ("/user/VerifyOTPRequest", "auth", "5/min"),
+    ("/user/forgetPassword", "auth", "5/min"),
+    ("/user/verifyForgetPassword", "auth", "5/min"),
+    ("/user/resetPassword", "auth", "5/min"),
+    ("/user/changePassword", "auth", "5/min"),
+    ("/reports/", "report", "10/min"),
+]
+
+
+def _gw_window(range_key: str) -> tuple[datetime, str]:
+    if range_key not in _GW_RANGES:
+        raise HTTPException(status_code=400, detail=f"unknown range '{range_key}'")
+    return datetime.now(timezone.utc) - _GW_RANGES[range_key], range_key
+
+
+def _gw_tier_for(rules: list[tuple[str, str, str]], path: str) -> tuple[str, str]:
+    """Which tier and limit applied to this path.
+
+    Kong's access log does not carry the plugin config, so the mapping lives
+    here. Longest matching prefix wins, so a specific path beats the family it
+    sits inside.
+    """
+    best: tuple[str, str, str] | None = None
+    for prefix, tier, limit in rules:
+        if path.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
+            best = (prefix, tier, limit)
+    return (best[1], best[2]) if best else ("", "")
+
+
+def _gw_tier_rules(db: Session) -> list[tuple[str, str, str]]:
+    raw = db.get(AppSetting, "gateway_tier_map")
+    if raw and raw.value:
+        try:
+            return [(r["prefix"], r["tier"], r["limit"]) for r in json.loads(raw.value)]
+        except (ValueError, KeyError, TypeError):
+            # A malformed override must not stop ingest. Fall back and carry on;
+            # dropping traffic because a setting is wrong would be worse.
+            return _GW_DEFAULT_TIERS
+    return _GW_DEFAULT_TIERS
+
+
+def _gw_auth(db: Session, token: str | None) -> Gateway:
+    """Authenticate the gateway itself.
+
+    A shared token, not an operator JWT: Kong is a machine, and handing it a
+    person's credential would make its traffic indistinguishable from theirs.
+    """
+    if not token:
+        raise HTTPException(status_code=401, detail="missing gateway token")
+    gateway = (
+        db.query(Gateway)
+        .filter(Gateway.token == token, Gateway.enabled.is_(True))
+        .first()
+    )
+    if not gateway:
+        raise HTTPException(status_code=401, detail="unknown gateway token")
+    return gateway
+
+
+def _gw_parse_kong(entry: dict[str, Any]) -> dict[str, Any] | None:
+    """Map one Kong http-log entry onto our columns.
+
+    Reads Kong's native shape, so the stock plugin can post straight here with
+    no custom serialiser on the gateway.
+    """
+    try:
+        request = entry.get("request") or {}
+        response = entry.get("response") or {}
+        latencies = entry.get("latencies") or {}
+        route = entry.get("route") or {}
+        started = entry.get("started_at")
+        ts = (
+            datetime.fromtimestamp(started / 1000.0, tz=timezone.utc)
+            if isinstance(started, (int, float))
+            else datetime.now(timezone.utc)
+        )
+        uri = str(request.get("uri") or request.get("url") or "").split("?")[0]
+        headers = request.get("headers") or {}
+        return {
+            "ts": ts,
+            "client_ip": str(entry.get("client_ip") or "")[:64],
+            "method": str(request.get("method") or "")[:10],
+            "path": uri[:512],
+            "route_name": str(route.get("name") or "")[:128],
+            "status": int(response.get("status") or 0),
+            "latency_ms": int(latencies.get("request") or 0),
+            "user_agent": str(headers.get("user-agent") or "")[:256],
+        }
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+@router.post("/gateway/ingest", response_model=GatewayIngestResult)
+def gateway_ingest(
+    payload: Any = Body(...),
+    x_gateway_token: str | None = Header(default=None, alias="X-Gateway-Token"),
+    db: Session = Depends(get_db),
+) -> GatewayIngestResult:
+    gateway = _gw_auth(db, x_gateway_token)
+    entries = payload if isinstance(payload, list) else [payload]
+    rules = _gw_tier_rules(db)
+
+    accepted = 0
+    # minute bucket -> running counts, so a batch of 50 becomes a handful of
+    # rollup writes rather than 50 read-modify-write round trips.
+    buckets: dict[tuple[datetime, str, str], dict[str, Any]] = {}
+
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+        parsed = _gw_parse_kong(raw)
+        if not parsed or not parsed["client_ip"]:
+            continue
+        tier, limit_rule = _gw_tier_for(rules, parsed["path"])
+        db.add(GatewayEvent(gateway_id=gateway.id, tier=tier,
+                            limit_rule=limit_rule, **parsed))
+        accepted += 1
+
+        minute = parsed["ts"].replace(second=0, microsecond=0)
+        key = (minute, parsed["client_ip"], parsed["path"])
+        bucket = buckets.setdefault(key, {
+            "tier": tier, "limit_rule": limit_rule,
+            "hits": 0, "allowed": 0, "throttled": 0, "last_ts": parsed["ts"],
+        })
+        bucket["hits"] += 1
+        if parsed["status"] == 429:
+            bucket["throttled"] += 1
+        else:
+            bucket["allowed"] += 1
+        if parsed["ts"] > bucket["last_ts"]:
+            bucket["last_ts"] = parsed["ts"]
+
+    for (minute, client_ip, path), b in buckets.items():
+        row = (
+            db.query(GatewayRollup)
+            .filter(
+                GatewayRollup.gateway_id == gateway.id,
+                GatewayRollup.minute == minute,
+                GatewayRollup.client_ip == client_ip,
+                GatewayRollup.path == path,
+            )
+            .first()
+        )
+        if row is None:
+            db.add(GatewayRollup(
+                gateway_id=gateway.id, minute=minute, client_ip=client_ip,
+                path=path, tier=b["tier"], limit_rule=b["limit_rule"],
+                hits=b["hits"], allowed=b["allowed"], throttled=b["throttled"],
+                last_ts=b["last_ts"],
+            ))
+        else:
+            row.hits += b["hits"]
+            row.allowed += b["allowed"]
+            row.throttled += b["throttled"]
+            if b["last_ts"] > row.last_ts:
+                row.last_ts = b["last_ts"]
+
+    gateway.last_event_at = datetime.now(timezone.utc)
+    db.commit()
+    return GatewayIngestResult(accepted=accepted, gateway=gateway.name)
+
+
+@router.get("/gateway/sources", response_model=list[GatewaySourceRead])
+def gateway_sources(
+    range: str = "5m",
+    sort: str = "throttled",
+    dir: str = "desc",
+    _: dict = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[GatewaySourceRead]:
+    since, key = _gw_window(range)
+    if sort not in _GW_SOURCE_SORTS:
+        raise HTTPException(status_code=400, detail=f"cannot sort by '{sort}'")
+
+    rows = (
+        db.query(
+            GatewayRollup.client_ip.label("client_ip"),
+            func.sum(GatewayRollup.hits).label("requests"),
+            func.sum(GatewayRollup.allowed).label("allowed"),
+            func.sum(GatewayRollup.throttled).label("throttled"),
+            func.count(func.distinct(GatewayRollup.path)).label("endpoints"),
+            func.max(GatewayRollup.last_ts).label("last_seen"),
+        )
+        .filter(GatewayRollup.minute >= since)
+        .group_by(GatewayRollup.client_ip)
+        .all()
+    )
+
+    minutes = max(_GW_RANGES[key].total_seconds() / 60.0, 1.0)
+    out = [
+        GatewaySourceRead(
+            client_ip=r.client_ip,
+            requests=int(r.requests or 0),
+            allowed=int(r.allowed or 0),
+            throttled=int(r.throttled or 0),
+            endpoints=int(r.endpoints or 0),
+            rate_per_min=round(int(r.requests or 0) / minutes, 1),
+            throttled_share=round(int(r.throttled or 0) / max(int(r.requests or 1), 1), 4),
+            last_seen=r.last_seen,
+        )
+        for r in rows
+    ]
+    # Sorted here rather than in SQL because rate and share are derived. The set
+    # is one row per address seen in the window, so it is small by construction.
+    out.sort(key=lambda s: getattr(s, sort), reverse=(dir != "asc"))
+    return out
+
+
+@router.get("/gateway/sources/{client_ip}/endpoints",
+            response_model=list[GatewayEndpointRead])
+def gateway_source_endpoints(
+    client_ip: str,
+    range: str = "5m",
+    sort: str = "hits",
+    dir: str = "desc",
+    _: dict = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[GatewayEndpointRead]:
+    since, _key = _gw_window(range)
+    if sort not in _GW_ENDPOINT_SORTS:
+        raise HTTPException(status_code=400, detail=f"cannot sort by '{sort}'")
+
+    column = {
+        "path": GatewayRollup.path,
+        "hits": func.sum(GatewayRollup.hits),
+        "allowed": func.sum(GatewayRollup.allowed),
+        "throttled": func.sum(GatewayRollup.throttled),
+        "last_hit": func.max(GatewayRollup.last_ts),
+    }[sort]
+
+    rows = (
+        db.query(
+            GatewayRollup.path.label("path"),
+            func.max(GatewayRollup.tier).label("tier"),
+            func.max(GatewayRollup.limit_rule).label("limit_rule"),
+            func.sum(GatewayRollup.hits).label("hits"),
+            func.sum(GatewayRollup.allowed).label("allowed"),
+            func.sum(GatewayRollup.throttled).label("throttled"),
+            func.max(GatewayRollup.last_ts).label("last_hit"),
+        )
+        .filter(GatewayRollup.minute >= since, GatewayRollup.client_ip == client_ip)
+        .group_by(GatewayRollup.path)
+        .order_by(column.desc() if dir != "asc" else column.asc())
+        .all()
+    )
+    return [
+        GatewayEndpointRead(
+            path=r.path, tier=r.tier or "", limit_rule=r.limit_rule or "",
+            hits=int(r.hits or 0), allowed=int(r.allowed or 0),
+            throttled=int(r.throttled or 0), last_hit=r.last_hit,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/gateway/sources/{client_ip}/events",
+            response_model=list[GatewayEventRead])
+def gateway_source_events(
+    client_ip: str,
+    range: str = "5m",
+    path: str | None = None,
+    status: int | None = None,
+    limit: int = 200,
+    _: dict = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[GatewayEventRead]:
+    since, _key = _gw_window(range)
+    query = db.query(GatewayEvent).filter(
+        GatewayEvent.ts >= since, GatewayEvent.client_ip == client_ip
+    )
+    if path:
+        query = query.filter(GatewayEvent.path == path)
+    if status is not None:
+        query = query.filter(GatewayEvent.status == status)
+    rows = query.order_by(GatewayEvent.ts.desc()).limit(min(max(limit, 1), 1000)).all()
+    return [
+        GatewayEventRead(
+            ts=r.ts, client_ip=r.client_ip, method=r.method, path=r.path,
+            tier=r.tier, status=r.status, limit_rule=r.limit_rule,
+            latency_ms=r.latency_ms,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/gateway/gateways", response_model=list[GatewayRead])
+def list_gateways(
+    _: dict = Depends(require_admin_not_guest),
+    db: Session = Depends(get_db),
+) -> list[GatewayRead]:
+    return [
+        GatewayRead(id=g.id, name=g.name, environment=g.environment,
+                    enabled=g.enabled, last_event_at=g.last_event_at)
+        for g in db.query(Gateway).order_by(Gateway.name).all()
+    ]
+
+
+@router.post("/gateway/gateways")
+def create_gateway(
+    payload: GatewayCreate,
+    _: dict = Depends(require_admin_not_guest),
+    db: Session = Depends(get_db),
+) -> dict:
+    if db.query(Gateway).filter(Gateway.name == payload.name).first():
+        raise HTTPException(status_code=409,
+                            detail="a gateway with that name already exists")
+    token = secrets.token_urlsafe(32)
+    gateway = Gateway(name=payload.name, environment=payload.environment, token=token)
+    db.add(gateway)
+    db.commit()
+    # The only time the token is returned. It is what Kong presents on every
+    # ingest call; an operator who loses it registers a new gateway rather than
+    # recovering this one.
+    return {"id": gateway.id, "name": gateway.name, "token": token}
