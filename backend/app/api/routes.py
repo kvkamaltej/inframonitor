@@ -3966,6 +3966,24 @@ def _gw_tier_rules(db: Session) -> list[tuple[str, str, str]]:
     return _GW_DEFAULT_TIERS
 
 
+def _gw_utc(ts: datetime | None) -> datetime | None:
+    """Label a timestamp read back from the database as UTC.
+
+    `DateTime(timezone=True)` is honoured by Postgres but not by SQLite, which
+    returns a naive datetime. That bites twice. Internally, a rollup row loaded
+    in a later request is naive while the timestamp just parsed from the gateway
+    is aware, and comparing the two raises. On the way out, a naive timestamp
+    serialises with no offset, and `new Date()` reads an offset-less string as
+    *local* time -- so on a UTC+5:30 host the UI ages every row by 5h30m and
+    reports a request from a second ago as "5h". Everything stored here is UTC,
+    so saying so fixes both, and keeps the two database backends serving one
+    contract.
+    """
+    if ts is None:
+        return None
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+
+
 def _gw_auth(db: Session, token: str | None) -> Gateway:
     """Authenticate the gateway itself.
 
@@ -4079,7 +4097,7 @@ def gateway_ingest(
             row.hits += b["hits"]
             row.allowed += b["allowed"]
             row.throttled += b["throttled"]
-            if b["last_ts"] > row.last_ts:
+            if b["last_ts"] > _gw_utc(row.last_ts):
                 row.last_ts = b["last_ts"]
 
     gateway.last_event_at = datetime.now(timezone.utc)
@@ -4123,7 +4141,7 @@ def gateway_sources(
             endpoints=int(r.endpoints or 0),
             rate_per_min=round(int(r.requests or 0) / minutes, 1),
             throttled_share=round(int(r.throttled or 0) / max(int(r.requests or 1), 1), 4),
-            last_seen=r.last_seen,
+            last_seen=_gw_utc(r.last_seen),
         )
         for r in rows
     ]
@@ -4174,7 +4192,7 @@ def gateway_source_endpoints(
         GatewayEndpointRead(
             path=r.path, tier=r.tier or "", limit_rule=r.limit_rule or "",
             hits=int(r.hits or 0), allowed=int(r.allowed or 0),
-            throttled=int(r.throttled or 0), last_hit=r.last_hit,
+            throttled=int(r.throttled or 0), last_hit=_gw_utc(r.last_hit),
         )
         for r in rows
     ]
@@ -4202,7 +4220,7 @@ def gateway_source_events(
     rows = query.order_by(GatewayEvent.ts.desc()).limit(min(max(limit, 1), 1000)).all()
     return [
         GatewayEventRead(
-            ts=r.ts, client_ip=r.client_ip, method=r.method, path=r.path,
+            ts=_gw_utc(r.ts), client_ip=r.client_ip, method=r.method, path=r.path,
             tier=r.tier, status=r.status, limit_rule=r.limit_rule,
             latency_ms=r.latency_ms,
         )
@@ -4217,7 +4235,7 @@ def list_gateways(
 ) -> list[GatewayRead]:
     return [
         GatewayRead(id=g.id, name=g.name, environment=g.environment,
-                    enabled=g.enabled, last_event_at=g.last_event_at)
+                    enabled=g.enabled, last_event_at=_gw_utc(g.last_event_at))
         for g in db.query(Gateway).order_by(Gateway.name).all()
     ]
 

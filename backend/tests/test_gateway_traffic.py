@@ -244,3 +244,73 @@ def test_query_string_is_stripped_from_the_path(client, token):
     assert len(rows) == 1
     assert rows[0]["path"] == "/captcha/getCaptcha"
     assert rows[0]["hits"] == 3
+
+# --- regressions found running it against a live feed ------------------------------------------
+
+
+def test_a_second_batch_folds_into_the_existing_rollup_row(client, token):
+    """Kong posts continuously, so the second batch hits a rollup row that is
+    already there. That path was never exercised: every other test posts one
+    batch, and within a single request the row just inserted is still the
+    aware Python object in the session's identity map. Read back in a later
+    request SQLite hands it over naive -- `DateTime(timezone=True)` is a
+    Postgres-only guarantee -- and comparing it to the aware timestamp just
+    parsed from Kong raised TypeError, so ingest answered 500 and Kong dropped
+    the batch. Pin one `started_at` so both batches share a minute bucket.
+    """
+    started = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    def batch(n, status):
+        out = []
+        for _ in range(n):
+            e = _kong("/captcha/getCaptcha", status, ip="14.139.93.243")
+            e["started_at"] = started
+            out.append(e)
+        return out
+
+    first = client.post("/api/gateway/ingest", json=batch(3, 200),
+                        headers={"X-Gateway-Token": token})
+    assert first.status_code == 200, first.text
+
+    second = client.post("/api/gateway/ingest", json=batch(2, 429),
+                         headers={"X-Gateway-Token": token})
+    assert second.status_code == 200, second.text
+
+    rows = client.get("/api/gateway/sources?range=5m").json()
+    row = next(r for r in rows if r["client_ip"] == "14.139.93.243")
+    assert row["requests"] == 5
+    assert row["allowed"] == 3
+    assert row["throttled"] == 2
+    # One rollup row, not two: the second batch folded into the first.
+    assert row["endpoints"] == 1
+
+
+def test_timestamps_come_back_as_utc(client, token):
+    """Every timestamp must carry its offset.
+
+    SQLite returns these naive, and a naive ISO string has no offset, which
+    `new Date()` reads as *local* time. On a UTC+5:30 host that ages every row
+    by five and a half hours, so the page reported a request from a second ago
+    as "5h ago" -- on the one column an operator watches during a scan.
+    """
+    client.post("/api/gateway/ingest",
+                json=[_kong("/captcha/getCaptcha", 429, ip="203.0.113.7")],
+                headers={"X-Gateway-Token": token})
+
+    def aware(value):
+        assert value is not None
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).tzinfo is not None
+
+    source = next(r for r in client.get("/api/gateway/sources?range=5m").json()
+                  if r["client_ip"] == "203.0.113.7")
+    assert aware(source["last_seen"]), source["last_seen"]
+
+    endpoint = client.get("/api/gateway/sources/203.0.113.7/endpoints?range=5m").json()[0]
+    assert aware(endpoint["last_hit"]), endpoint["last_hit"]
+
+    event = client.get("/api/gateway/sources/203.0.113.7/events?range=5m").json()[0]
+    assert aware(event["ts"]), event["ts"]
+
+    gateway = next(g for g in client.get("/api/gateway/gateways").json()
+                   if g["last_event_at"] is not None)
+    assert aware(gateway["last_event_at"]), gateway["last_event_at"]

@@ -310,9 +310,12 @@ export function GatewayPage({ token }: { token: string }) {
                 {!loading && sources.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="px-4 py-10 text-center text-sm text-muted">
-                      No gateway traffic in the last {range}. If a gateway has never reached this
-                      page, register one under Administration and point Kong&apos;s http-log plugin
-                      at <span className="font-mono">/api/gateway/ingest</span>.
+                      No gateway traffic in the last {range}. If no gateway has reached this page
+                      yet, register one with{" "}
+                      <span className="font-mono">POST /api/gateway/gateways</span> and point the
+                      gateway&apos;s access log at{" "}
+                      <span className="font-mono">/api/gateway/ingest</span>, sending the token that
+                      call returns as <span className="font-mono">X-Gateway-Token</span>.
                     </td>
                   </tr>
                 ) : null}
