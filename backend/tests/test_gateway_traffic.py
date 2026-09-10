@@ -245,6 +245,32 @@ def test_query_string_is_stripped_from_the_path(client, token):
     assert rows[0]["path"] == "/captcha/getCaptcha"
     assert rows[0]["hits"] == 3
 
+
+def test_identifier_segments_collapse_to_one_endpoint(client, token):
+    # Each captcha image has a unique filename, so the raw URLs would otherwise
+    # become one endpoint row per image. They must fold onto a single templated
+    # endpoint, while the request stream still keeps every exact URL.
+    batch = [
+        _kong("/captcha/captchaImage/045d2f399b.png", 200, ip="6.6.6.6"),
+        _kong("/captcha/captchaImage/07481b9058.png", 200, ip="6.6.6.6"),
+        _kong("/captcha/captchaImage/1066bebfc6.png", 200, ip="6.6.6.6"),
+        _kong("/order/scan/view_order/12345", 200, ip="6.6.6.6"),
+        _kong("/order/scan/view_order/67890", 200, ip="6.6.6.6"),
+        _kong("/captcha/getCaptcha", 200, ip="6.6.6.6"),  # a real endpoint, kept distinct
+    ]
+    client.post("/api/gateway/ingest", json=batch, headers={"X-Gateway-Token": token})
+
+    rows = client.get("/api/gateway/sources/6.6.6.6/endpoints", params={"sort": "hits"}).json()
+    paths = {r["path"]: r["hits"] for r in rows}
+    assert paths == {
+        "/captcha/captchaImage/{id}": 3,
+        "/order/scan/view_order/{id}": 2,
+        "/captcha/getCaptcha": 1,
+    }
+    # the raw stream still carries the exact image URLs, not the template
+    events = client.get("/api/gateway/sources/6.6.6.6/events").json()
+    assert "/captcha/captchaImage/045d2f399b.png" in {e["path"] for e in events}
+
 # --- regressions found running it against a live feed ------------------------------------------
 
 

@@ -3941,18 +3941,54 @@ def _gw_window(range_key: str) -> tuple[datetime, str]:
     return datetime.now(timezone.utc) - _GW_RANGES[range_key], range_key
 
 
-def _gw_tier_for(rules: list[tuple[str, str, str]], path: str) -> tuple[str, str]:
-    """Which tier and limit applied to this path.
+def _gw_match(rules: list[tuple[str, str, str]], path: str) -> tuple[str, str, str] | None:
+    """The gateway rule that governs this path, or None.
 
-    Kong's access log does not carry the plugin config, so the mapping lives
-    here. Longest matching prefix wins, so a specific path beats the family it
-    sits inside.
+    Longest matching prefix wins, so a specific path beats the family it sits
+    inside. The rules mirror the gateway's own routes, so the winning prefix is
+    the route that matched -- which is also the stable identity of the endpoint,
+    used to fold per-request URLs (`/captcha/captchaImage/<hash>.png`) back onto
+    the one route that served them.
     """
     best: tuple[str, str, str] | None = None
     for prefix, tier, limit in rules:
         if path.startswith(prefix) and (best is None or len(prefix) > len(best[0])):
             best = (prefix, tier, limit)
+    return best
+
+
+def _gw_tier_for(rules: list[tuple[str, str, str]], path: str) -> tuple[str, str]:
+    """The (tier, limit) that applied to this path; ('', '') if no rule matches."""
+    best = _gw_match(rules, path)
     return (best[1], best[2]) if best else ("", "")
+
+
+# A path segment that is an identifier rather than part of the route: a numeric
+# id, a hex hash/token, a UUID, an image/file name. Kept deliberately strict
+# (letters that are not hex keep a segment static) so real endpoints like
+# `getCaptcha` or `getStateList` are never templated away.
+_GW_DYNAMIC_SEGMENT = re.compile(
+    r"^("
+    r"\d+"                                         # 42
+    r"|[0-9a-fA-F]{8,}"                            # 045d2f399b, a sha, a hex id
+    r"|[0-9a-fA-F]{8}-[0-9a-fA-F-]{4,}"            # a uuid
+    r"|[A-Za-z0-9_-]{24,}"                         # a long opaque token
+    r")(\.[A-Za-z0-9]{1,8})?$"                     # optional .png/.json/...
+)
+
+
+def _gw_endpoint_for(path: str) -> str:
+    """The stable endpoint a request rolls up under: the path with identifier
+    segments templated to `{id}`, so `/captcha/captchaImage/045d2f399b.png` and
+    every sibling image fold onto `/captcha/captchaImage/{id}` -- one endpoint
+    row instead of one per request URL. The events table still keeps the exact
+    URL. Route-map independent, so it behaves the same before and after the tier
+    map is calibrated."""
+    if "/" not in path:
+        return path
+    out = [seg if not seg or not _GW_DYNAMIC_SEGMENT.match(seg) else "{id}"
+           for seg in path.split("/")]
+    return "/".join(out)
 
 
 def _gw_tier_rules(db: Session) -> list[tuple[str, str, str]]:
@@ -4058,12 +4094,15 @@ def gateway_ingest(
         if not parsed or not parsed["client_ip"]:
             continue
         tier, limit_rule = _gw_tier_for(rules, parsed["path"])
+        # The event keeps the exact URL; the rollup groups by the templated
+        # endpoint so per-request URLs (image names, ids) collapse onto one row.
+        endpoint = _gw_endpoint_for(parsed["path"])
         db.add(GatewayEvent(gateway_id=gateway.id, tier=tier,
                             limit_rule=limit_rule, **parsed))
         accepted += 1
 
         minute = parsed["ts"].replace(second=0, microsecond=0)
-        key = (minute, parsed["client_ip"], parsed["path"])
+        key = (minute, parsed["client_ip"], endpoint)
         bucket = buckets.setdefault(key, {
             "tier": tier, "limit_rule": limit_rule,
             "hits": 0, "allowed": 0, "throttled": 0, "last_ts": parsed["ts"],
