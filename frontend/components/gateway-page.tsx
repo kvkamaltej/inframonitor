@@ -13,7 +13,7 @@
 // header implies.
 
 import { AlertTriangle, ArrowLeft, Check, Copy, Loader2, Plus, Server, ShieldAlert, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
 import {
@@ -392,6 +392,24 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  // The request stream is the last panel on the drill-down, so let it grow to
+  // the bottom of the viewport instead of a fixed height -- on a tall screen a
+  // capped list strands most of the page. Measured rather than a CSS calc so it
+  // tracks the endpoints table above it (which changes height) and any banner.
+  const requestsRef = useRef<HTMLDivElement>(null);
+  const [requestsMaxH, setRequestsMaxH] = useState<number>();
+  useLayoutEffect(() => {
+    function measure() {
+      const el = requestsRef.current;
+      if (!el) return;
+      const top = el.getBoundingClientRect().top;
+      setRequestsMaxH(Math.max(240, window.innerHeight - top - 24));
+    }
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [selected, gateway, endpoints.length, events.length]);
+
   const loadOverview = useCallback(async () => {
     if (gateway) return;
     setOverview(await getGatewayOverview(token, range));
@@ -739,7 +757,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
               <h2 className="text-sm font-semibold text-fg">Requests</h2>
               <span className="ml-auto text-xs text-muted">newest first · up to 100</span>
             </div>
-            <div className="max-h-96 overflow-auto">
+            <div ref={requestsRef} className="overflow-auto" style={{ maxHeight: requestsMaxH ?? 384 }}>
               <table className="w-full text-[13px]">
                 <thead className="sticky top-0 bg-surface">
                   <tr className="border-b border-edge">
