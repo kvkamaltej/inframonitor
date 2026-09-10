@@ -43,6 +43,7 @@ from app.schemas.contracts import (
     GatewayEndpointRead,
     GatewayEventRead,
     GatewayIngestResult,
+    GatewayOverviewRead,
     GatewayRead,
     GatewaySourceRead,
     AccessPolicyCreate,
@@ -4110,6 +4111,7 @@ def gateway_sources(
     range: str = "5m",
     sort: str = "throttled",
     dir: str = "desc",
+    gateway: int | None = None,
     _: dict = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[GatewaySourceRead]:
@@ -4117,7 +4119,7 @@ def gateway_sources(
     if sort not in _GW_SOURCE_SORTS:
         raise HTTPException(status_code=400, detail=f"cannot sort by '{sort}'")
 
-    rows = (
+    query = (
         db.query(
             GatewayRollup.client_ip.label("client_ip"),
             func.sum(GatewayRollup.hits).label("requests"),
@@ -4127,9 +4129,12 @@ def gateway_sources(
             func.max(GatewayRollup.last_ts).label("last_seen"),
         )
         .filter(GatewayRollup.minute >= since)
-        .group_by(GatewayRollup.client_ip)
-        .all()
     )
+    # Scoped to one gateway when the UI has drilled into its tile; unscoped
+    # aggregates every gateway that ships here.
+    if gateway is not None:
+        query = query.filter(GatewayRollup.gateway_id == gateway)
+    rows = query.group_by(GatewayRollup.client_ip).all()
 
     minutes = max(_GW_RANGES[key].total_seconds() / 60.0, 1.0)
     out = [
@@ -4158,6 +4163,7 @@ def gateway_source_endpoints(
     range: str = "5m",
     sort: str = "hits",
     dir: str = "desc",
+    gateway: int | None = None,
     _: dict = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[GatewayEndpointRead]:
@@ -4173,18 +4179,19 @@ def gateway_source_endpoints(
         "last_hit": func.max(GatewayRollup.last_ts),
     }[sort]
 
+    query = db.query(
+        GatewayRollup.path.label("path"),
+        func.max(GatewayRollup.tier).label("tier"),
+        func.max(GatewayRollup.limit_rule).label("limit_rule"),
+        func.sum(GatewayRollup.hits).label("hits"),
+        func.sum(GatewayRollup.allowed).label("allowed"),
+        func.sum(GatewayRollup.throttled).label("throttled"),
+        func.max(GatewayRollup.last_ts).label("last_hit"),
+    ).filter(GatewayRollup.minute >= since, GatewayRollup.client_ip == client_ip)
+    if gateway is not None:
+        query = query.filter(GatewayRollup.gateway_id == gateway)
     rows = (
-        db.query(
-            GatewayRollup.path.label("path"),
-            func.max(GatewayRollup.tier).label("tier"),
-            func.max(GatewayRollup.limit_rule).label("limit_rule"),
-            func.sum(GatewayRollup.hits).label("hits"),
-            func.sum(GatewayRollup.allowed).label("allowed"),
-            func.sum(GatewayRollup.throttled).label("throttled"),
-            func.max(GatewayRollup.last_ts).label("last_hit"),
-        )
-        .filter(GatewayRollup.minute >= since, GatewayRollup.client_ip == client_ip)
-        .group_by(GatewayRollup.path)
+        query.group_by(GatewayRollup.path)
         .order_by(column.desc() if dir != "asc" else column.asc())
         .all()
     )
@@ -4206,6 +4213,7 @@ def gateway_source_events(
     path: str | None = None,
     status: int | None = None,
     limit: int = 200,
+    gateway: int | None = None,
     _: dict = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[GatewayEventRead]:
@@ -4213,6 +4221,8 @@ def gateway_source_events(
     query = db.query(GatewayEvent).filter(
         GatewayEvent.ts >= since, GatewayEvent.client_ip == client_ip
     )
+    if gateway is not None:
+        query = query.filter(GatewayEvent.gateway_id == gateway)
     if path:
         query = query.filter(GatewayEvent.path == path)
     if status is not None:
@@ -4226,6 +4236,44 @@ def gateway_source_events(
         )
         for r in rows
     ]
+
+
+@router.get("/gateway/overview", response_model=list[GatewayOverviewRead])
+def gateway_overview(
+    range: str = "5m",
+    _: dict = Depends(require_user),
+    db: Session = Depends(get_db),
+) -> list[GatewayOverviewRead]:
+    """The landing tiles: one card per registered gateway, with its activity in
+    the window. Readable by any signed-in role (the token-management list is
+    admin-only); a gateway with no traffic still gets a tile so it is visibly
+    registered-but-quiet rather than absent."""
+    since, _key = _gw_window(range)
+    stats = {
+        r.gateway_id: r
+        for r in db.query(
+            GatewayRollup.gateway_id.label("gateway_id"),
+            func.sum(GatewayRollup.hits).label("requests"),
+            func.sum(GatewayRollup.throttled).label("throttled"),
+            func.count(func.distinct(GatewayRollup.path)).label("endpoints"),
+            func.count(func.distinct(GatewayRollup.client_ip)).label("sources"),
+        )
+        .filter(GatewayRollup.minute >= since)
+        .group_by(GatewayRollup.gateway_id)
+        .all()
+    }
+    out = []
+    for g in db.query(Gateway).order_by(Gateway.name).all():
+        s = stats.get(g.id)
+        out.append(GatewayOverviewRead(
+            id=g.id, name=g.name, environment=g.environment, enabled=g.enabled,
+            requests=int(s.requests) if s else 0,
+            throttled=int(s.throttled) if s else 0,
+            endpoints=int(s.endpoints) if s else 0,
+            sources=int(s.sources) if s else 0,
+            last_event_at=_gw_utc(g.last_event_at),
+        ))
+    return out
 
 
 @router.get("/gateway/gateways", response_model=list[GatewayRead])

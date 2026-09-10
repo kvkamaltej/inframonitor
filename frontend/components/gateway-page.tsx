@@ -21,11 +21,13 @@ import {
   createGateway,
   getGatewayEndpoints,
   getGatewayEvents,
+  getGatewayOverview,
   getGatewaySources,
   listGateways,
   type GatewayEndpoint,
   type GatewayEndpointSort,
   type GatewayEvent,
+  type GatewayOverview,
   type GatewayRange,
   type GatewaySource,
   type GatewaySourceSort,
@@ -372,6 +374,11 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
   const [range, setRange] = useState<GatewayRange>("5m");
   const [refreshSeconds, setRefreshSeconds] = useState(30);
 
+  // Three levels of drill-down: the registered gateways (tiles), then one
+  // gateway's calling addresses, then one address's endpoints + requests.
+  const [overview, setOverview] = useState<GatewayOverview[]>([]);
+  const [gateway, setGateway] = useState<{ id: number; name: string } | null>(null);
+
   const [sources, setSources] = useState<GatewaySource[]>([]);
   const [sourceSort, setSourceSort] = useState<GatewaySourceSort>("throttled");
   const [sourceDir, setSourceDir] = useState<SortDir>("desc");
@@ -385,31 +392,49 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  const loadOverview = useCallback(async () => {
+    if (gateway) return;
+    setOverview(await getGatewayOverview(token, range));
+  }, [token, range, gateway]);
+
   const loadSources = useCallback(async () => {
-    const rows = await getGatewaySources(token, range, sourceSort, sourceDir);
+    if (!gateway) return;
+    const rows = await getGatewaySources(token, range, sourceSort, sourceDir, gateway.id);
     setSources(rows);
-  }, [token, range, sourceSort, sourceDir]);
+  }, [token, range, sourceSort, sourceDir, gateway]);
 
   const loadDetail = useCallback(async () => {
-    if (!selected) return;
+    if (!gateway || !selected) return;
     const [rows, stream] = await Promise.all([
-      getGatewayEndpoints(token, selected, range, endpointSort, endpointDir),
-      getGatewayEvents(token, selected, range, { limit: 100 })
+      getGatewayEndpoints(token, selected, range, endpointSort, endpointDir, gateway.id),
+      getGatewayEvents(token, selected, range, { limit: 100, gatewayId: gateway.id })
     ]);
     setEndpoints(rows);
     setEvents(stream);
-  }, [token, selected, range, endpointSort, endpointDir]);
+  }, [token, selected, range, endpointSort, endpointDir, gateway]);
 
   const load = useCallback(async () => {
     setError("");
     try {
-      await Promise.all([loadSources(), loadDetail()]);
+      await Promise.all([loadOverview(), loadSources(), loadDetail()]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to load gateway traffic");
     } finally {
       setLoading(false);
     }
-  }, [loadSources, loadDetail]);
+  }, [loadOverview, loadSources, loadDetail]);
+
+  function enterGateway(g: { id: number; name: string }) {
+    setSelected(null);
+    setSources([]);
+    setGateway(g);
+  }
+
+  function leaveGateway() {
+    setSelected(null);
+    setSources([]);
+    setGateway(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -457,19 +482,35 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
   return (
     <div className="px-6 py-6">
       <div className="mb-5 flex flex-wrap items-center gap-3">
-        {selected ? (
+        {gateway && selected ? (
           <button
             type="button"
             onClick={() => setSelected(null)}
             className="flex items-center gap-1.5 text-sm font-medium text-accent hover:underline"
           >
             <ArrowLeft size={15} />
-            All addresses
+            {gateway.name} · all addresses
           </button>
+        ) : gateway ? (
+          <>
+            <button
+              type="button"
+              onClick={leaveGateway}
+              className="flex items-center gap-1.5 text-sm font-medium text-accent hover:underline"
+            >
+              <ArrowLeft size={15} />
+              All gateways
+            </button>
+            <span className="flex items-center gap-2 text-sm text-muted">
+              <ShieldAlert size={16} className="text-accent" />
+              <span className="font-semibold text-fg">{gateway.name}</span>
+              {fmt(totals.requests)} requests, {fmt(totals.throttled)} throttled in the last {range}
+            </span>
+          </>
         ) : (
           <div className="flex items-center gap-2 text-sm text-muted">
             <ShieldAlert size={16} className="text-accent" />
-            {fmt(totals.requests)} requests, {fmt(totals.throttled)} throttled in the last {range}
+            {overview.length === 1 ? "1 gateway" : `${overview.length} gateways`} — pick one to see its traffic
           </div>
         )}
         <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -497,14 +538,79 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
         </div>
       ) : null}
 
-      {loading && sources.length === 0 ? (
+      {loading && (gateway ? sources.length === 0 : overview.length === 0) ? (
         <div className="flex items-center gap-2 px-6 py-10 text-sm font-medium text-muted">
           <Loader2 size={16} className="animate-spin" />
           Loading gateway traffic…
         </div>
       ) : null}
 
-      {!selected ? (
+      {!gateway ? (
+        // Level 1: the registered gateways as tiles. Click one to open its traffic.
+        <div>
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3">
+            {overview.map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => enterGateway({ id: g.id, name: g.name })}
+                className="group flex flex-col gap-3 rounded-2xl border border-edge bg-surface p-4 text-left transition-colors hover:border-accent/50 hover:bg-page"
+              >
+                <div className="flex items-center gap-2">
+                  <Server size={16} className="text-accent" />
+                  <span className="truncate font-semibold text-fg">{g.name}</span>
+                  <span
+                    className={`ml-auto flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                      g.enabled ? "bg-accent/10 text-accent" : "bg-page text-muted"
+                    }`}
+                  >
+                    <span className={`h-1.5 w-1.5 rounded-full ${g.enabled ? "bg-accent" : "bg-muted"}`} />
+                    {g.enabled ? "enabled" : "disabled"}
+                  </span>
+                </div>
+                {g.environment ? (
+                  <span className="w-fit rounded-full bg-page px-2 py-0.5 text-[11px] font-medium text-muted">
+                    {g.environment}
+                  </span>
+                ) : null}
+                <div className="flex items-baseline gap-2">
+                  <span className="font-mono text-2xl font-semibold tabular-nums text-fg">{fmt(g.requests)}</span>
+                  <span className="text-xs text-muted">requests · last {range}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
+                  <span>
+                    {g.throttled > 0 ? (
+                      <span className="font-semibold text-danger">{fmt(g.throttled)} throttled</span>
+                    ) : (
+                      "0 throttled"
+                    )}
+                  </span>
+                  <span className="tabular-nums">{fmt(g.sources)} addresses</span>
+                  <span className="tabular-nums">{fmt(g.endpoints)} endpoints</span>
+                  <span className="ml-auto">{g.last_event_at ? ago(g.last_event_at) : "no traffic yet"}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+          {!loading && overview.length === 0 ? (
+            <div className="rounded-2xl border border-edge bg-surface px-4 py-10 text-center text-sm text-muted">
+              No gateways registered yet.{" "}
+              {isAdmin ? (
+                <>
+                  Use{" "}
+                  <button type="button" onClick={() => setManageOpen(true)} className="font-medium text-accent hover:underline">
+                    Manage gateways
+                  </button>{" "}
+                  to register one and point Kong&apos;s http-log plugin at{" "}
+                  <span className="font-mono">/api/gateway/ingest</span>.
+                </>
+              ) : (
+                <>Ask an administrator to register one.</>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : !selected ? (
         <div className="overflow-hidden rounded-2xl border border-edge bg-surface">
           <div className="flex items-center gap-2 border-b border-edge px-4 py-3">
             <h2 className="text-sm font-semibold text-fg">Addresses</h2>
@@ -552,24 +658,9 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
                 {!loading && sources.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="px-4 py-10 text-center text-sm text-muted">
-                      No gateway traffic in the last {range}.{" "}
-                      {isAdmin ? (
-                        <>
-                          If a gateway has never reached this page, use{" "}
-                          <button
-                            type="button"
-                            onClick={() => setManageOpen(true)}
-                            className="font-medium text-accent hover:underline"
-                          >
-                            Manage gateways
-                          </button>{" "}
-                          to register one, then point Kong&apos;s http-log plugin at{" "}
-                          <span className="font-mono">/api/gateway/ingest</span>.
-                        </>
-                      ) : (
-                        <>Ask an administrator to register a gateway and point Kong&apos;s http-log
-                        plugin at <span className="font-mono">/api/gateway/ingest</span>.</>
-                      )}
+                      No traffic through {gateway?.name} in the last {range}. If this gateway has
+                      never reached this page, check that Kong&apos;s http-log plugin points at{" "}
+                      <span className="font-mono">/api/gateway/ingest</span> with its token.
                     </td>
                   </tr>
                 ) : null}

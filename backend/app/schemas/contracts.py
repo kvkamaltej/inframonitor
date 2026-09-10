@@ -1112,6 +1112,19 @@ class GatewayRead(BaseModel):
     last_event_at: datetime | None
 
 
+class GatewayOverviewRead(BaseModel):
+    """One landing tile: a registered gateway plus its activity in the window."""
+    id: int
+    name: str
+    environment: str = ""
+    enabled: bool = True
+    requests: int = 0
+    throttled: int = 0
+    endpoints: int = 0
+    sources: int = 0
+    last_event_at: datetime | None = None
+
+
 class GatewayCreate(BaseModel):
     name: str
     environment: str = ""

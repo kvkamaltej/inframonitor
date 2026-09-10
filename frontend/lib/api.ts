@@ -1944,13 +1944,36 @@ export type GatewaySummary = {
   last_event_at: string | null;
 };
 
+// A landing tile: a registered gateway plus its activity in the window.
+export type GatewayOverview = {
+  id: number;
+  name: string;
+  environment: string;
+  enabled: boolean;
+  requests: number;
+  throttled: number;
+  endpoints: number;
+  sources: number;
+  last_event_at: string | null;
+};
+
+export async function getGatewayOverview(
+  token: string,
+  range: GatewayRange
+): Promise<GatewayOverview[]> {
+  const query = new URLSearchParams({ range });
+  return request<GatewayOverview[]>(`/gateway/overview?${query}`, token);
+}
+
 export async function getGatewaySources(
   token: string,
   range: GatewayRange,
   sort: GatewaySourceSort,
-  dir: SortDir
+  dir: SortDir,
+  gatewayId?: number
 ): Promise<GatewaySource[]> {
   const query = new URLSearchParams({ range, sort, dir });
+  if (gatewayId !== undefined) query.set("gateway", String(gatewayId));
   return request<GatewaySource[]>(`/gateway/sources?${query}`, token);
 }
 
@@ -1959,9 +1982,11 @@ export async function getGatewayEndpoints(
   clientIp: string,
   range: GatewayRange,
   sort: GatewayEndpointSort,
-  dir: SortDir
+  dir: SortDir,
+  gatewayId?: number
 ): Promise<GatewayEndpoint[]> {
   const query = new URLSearchParams({ range, sort, dir });
+  if (gatewayId !== undefined) query.set("gateway", String(gatewayId));
   return request<GatewayEndpoint[]>(
     `/gateway/sources/${encodeURIComponent(clientIp)}/endpoints?${query}`,
     token
@@ -1972,12 +1997,13 @@ export async function getGatewayEvents(
   token: string,
   clientIp: string,
   range: GatewayRange,
-  options: { path?: string; status?: number; limit?: number } = {}
+  options: { path?: string; status?: number; limit?: number; gatewayId?: number } = {}
 ): Promise<GatewayEvent[]> {
   const query = new URLSearchParams({ range });
   if (options.path) query.set("path", options.path);
   if (options.status !== undefined) query.set("status", String(options.status));
   if (options.limit !== undefined) query.set("limit", String(options.limit));
+  if (options.gatewayId !== undefined) query.set("gateway", String(options.gatewayId));
   return request<GatewayEvent[]>(
     `/gateway/sources/${encodeURIComponent(clientIp)}/events?${query}`,
     token
