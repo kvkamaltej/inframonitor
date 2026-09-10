@@ -32,6 +32,7 @@ import { DbNavigator, type DbNavigatorCtx } from "@/components/db-navigator";
 import { DbSqlEditor } from "@/components/db-sql-editor";
 import { DbResultGrid } from "@/components/db-result-grid";
 import { DbQueryHistoryPanel } from "@/components/db-query-history";
+import { RedisWorkspace } from "@/components/redis-workspace";
 
 type QueryTab = {
   id: string;
@@ -100,6 +101,9 @@ export function DbWorkspace({ token }: { token: string }) {
   const [connections, setConnections] = useState<DbConnection[]>([]);
   const [tabs, setTabs] = useState<QueryTab[]>([]);
   const [activeId, setActiveId] = useState<string>("");
+  // When set, a Redis connection is open: the right pane shows the RedisWorkspace instead of the
+  // SQL editor. Opening any SQL editor/tab clears it (see openTab / onOpenEditor).
+  const [redisConn, setRedisConn] = useState<DbConnection | null>(null);
   const [leftWidth, setLeftWidth] = useState(300);
   const [dragging, setDragging] = useState(false);
   // left navigator pane collapsed to a thin strip
@@ -173,6 +177,8 @@ export function DbWorkspace({ token }: { token: string }) {
     (tab: Omit<QueryTab, "id" | "result" | "error" | "running">) => {
       const id = newTabId();
       const full: QueryTab = { ...tab, id, result: null, error: "", running: false };
+      // Opening any SQL tab leaves Redis mode, so the new tab is actually shown.
+      setRedisConn(null);
       setTabs((prev) => [...prev, full]);
       // Keep tabsRef in sync SYNCHRONOUSLY. The effect above only resyncs after the next render, so
       // a caller that adds a tab and immediately runs it (View Data auto-run, deep link) would find
@@ -574,6 +580,7 @@ export function DbWorkspace({ token }: { token: string }) {
               onOpenEditor={onOpenEditor}
               onViewData={onViewData}
               onGenerate={onGenerate}
+              onOpenRedis={(conn) => setRedisConn(conn)}
               refreshKey={navRefreshKey}
             />
           </div>
@@ -587,7 +594,12 @@ export function DbWorkspace({ token }: { token: string }) {
         </>
       )}
 
-      {/* RIGHT: editor + results + history */}
+      {/* RIGHT: a Redis workspace when a redis connection is open, else the SQL editor + results */}
+      {redisConn ? (
+        <div className="flex h-full min-w-0 flex-1">
+          <RedisWorkspace token={token} connection={redisConn} onClose={() => setRedisConn(null)} />
+        </div>
+      ) : (
       <div className="flex h-full min-w-0 flex-1">
         <div className="flex h-full min-w-0 flex-1 flex-col">
           {/* tab bar: tabs scroll horizontally, but the History + Fullscreen cluster is pinned in a
@@ -861,6 +873,7 @@ export function DbWorkspace({ token }: { token: string }) {
           </div>
         )}
       </div>
+      )}
 
       {/* production destructive-query confirmation */}
       {prodGate && (

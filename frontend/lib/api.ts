@@ -1007,7 +1007,7 @@ export type DbEngine = "postgres" | "mysql";
 // PATH; host/port/username/password are unused) and SQL Server (mssql, default port 1433, same
 // host/port/user/password shape as postgres). Kept separate from DbEngine so the ad-hoc console,
 // which only opens postgres/mysql, is unaffected.
-export type DbConnEngine = "postgres" | "mysql" | "sqlite" | "mssql";
+export type DbConnEngine = "postgres" | "mysql" | "sqlite" | "mssql" | "redis";
 
 export type DbConnectionParams = {
   engine: DbEngine;
@@ -1169,6 +1169,52 @@ export async function testDbConnectionById(token: string, id: string): Promise<D
 
 export async function getDbTables(token: string, id: string): Promise<DbTable[]> {
   return request<DbTable[]>(`/db/connections/${encodeURIComponent(id)}/tables`, token);
+}
+
+// --- redis engine (feature/redis-view) ------------------------------------------------------
+// A connection whose engine is "redis" is browsed through these instead of the SQL routes: the
+// logical databases, one SCAN page of keys, one key's value, and a raw-command reply.
+
+export type RedisKeyspace = { db: number; keys: number; expires: number };
+export type RedisKeyEntry = { key: string; type: string; ttl: number };
+export type RedisScanResult = { keys: RedisKeyEntry[]; cursor: number };
+export type RedisKeyDetail = {
+  key: string;
+  type: string;
+  ttl: number;
+  size_bytes: number | null;
+  length: number | null;
+  // shape depends on type: string -> string; list/set -> string[]; zset -> [member, score][];
+  // hash -> [field, value][]; stream -> [id, fields][].
+  value: unknown;
+  truncated: boolean;
+};
+export type RedisCommandResult = { command: string; reply: unknown };
+
+export async function getRedisKeyspaces(token: string, id: string): Promise<RedisKeyspace[]> {
+  return request<RedisKeyspace[]>(`/db/connections/${encodeURIComponent(id)}/redis/keyspaces`, token);
+}
+
+export async function scanRedisKeys(
+  token: string,
+  id: string,
+  opts: { db: number; pattern?: string; cursor?: number; count?: number }
+): Promise<RedisScanResult> {
+  const q = new URLSearchParams({ db_num: String(opts.db), pattern: opts.pattern || "*", cursor: String(opts.cursor ?? 0) });
+  if (opts.count) q.set("count", String(opts.count));
+  return request<RedisScanResult>(`/db/connections/${encodeURIComponent(id)}/redis/keys?${q}`, token);
+}
+
+export async function getRedisKey(token: string, id: string, db: number, key: string): Promise<RedisKeyDetail> {
+  const q = new URLSearchParams({ db_num: String(db), key });
+  return request<RedisKeyDetail>(`/db/connections/${encodeURIComponent(id)}/redis/key?${q}`, token);
+}
+
+export async function runRedisCommand(token: string, id: string, db: number, command: string): Promise<RedisCommandResult> {
+  return request<RedisCommandResult>(`/db/connections/${encodeURIComponent(id)}/redis/command`, token, {
+    method: "POST",
+    body: JSON.stringify({ command, db })
+  });
 }
 
 export async function runConnectionQuery(token: string, id: string, sql: string, limit?: number): Promise<DbQueryResult> {

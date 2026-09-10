@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -759,6 +760,48 @@ class DbSchemaRenameRequest(BaseModel):
     # the target schema name. Validated in the route as a plain identifier (letters/digits/
     # underscore) before it is quoted into an ALTER SCHEMA statement.
     new_name: str = Field(min_length=1, max_length=63)
+
+
+# --- redis engine (feature/redis-view) ------------------------------------------------------
+# Redis is key/value, not SQL, so it has its own read models: the logical databases, one SCAN
+# page of keys, one key's detail, and a raw-command reply. `value`/`reply` are arbitrary JSON.
+
+
+class RedisKeyspace(BaseModel):
+    db: int
+    keys: int = 0
+    expires: int = 0
+
+
+class RedisKeyEntry(BaseModel):
+    key: str
+    type: str = ""
+    ttl: int = -1  # -1 = no expiry, -2 = missing, else seconds remaining
+
+
+class RedisScanResult(BaseModel):
+    keys: list[RedisKeyEntry] = []
+    cursor: int = 0  # 0 means the SCAN sweep is complete
+
+
+class RedisKeyDetail(BaseModel):
+    key: str
+    type: str
+    ttl: int = -1
+    size_bytes: int | None = None
+    length: int | None = None
+    value: Any = None
+    truncated: bool = False
+
+
+class RedisCommandRequest(BaseModel):
+    command: str = Field(min_length=1)
+    db: int | None = None
+
+
+class RedisCommandResult(BaseModel):
+    command: str
+    reply: Any = None
 
 
 # --- database query history (feature/db-connect follow-on) ----------------------------------

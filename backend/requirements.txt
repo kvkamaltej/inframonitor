@@ -31,4 +31,10 @@ kubernetes==31.0.0
 openpyxl==3.1.5
 prometheus-client==0.21.1
 python-multipart==0.0.20
+# Redis engine for the database module's key/value browser + command console
+# (app/services/redis_ops.py). Pure-python client, no system libraries.
+redis==5.2.1
 pytest==8.3.4
+# In-memory Redis used only by tests/test_redis_ops.py, so the Redis service can
+# be exercised without a live server.
+fakeredis==2.26.2

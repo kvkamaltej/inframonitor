@@ -46,6 +46,12 @@ from app.schemas.contracts import (
     GatewayOverviewRead,
     GatewayRead,
     GatewaySourceRead,
+    RedisCommandRequest,
+    RedisCommandResult,
+    RedisKeyDetail,
+    RedisKeyEntry,
+    RedisKeyspace,
+    RedisScanResult,
     AccessPolicyCreate,
     AccessPolicyRead,
     AppDbConfigRead,
@@ -148,6 +154,7 @@ from app.services.csv_import import CsvImportError, import_servers
 from app.services.db_console import DEFAULT_PORTS, ENGINES, DbConsoleError
 from app.services import db_console
 from app.services import db_metadata
+from app.services import redis_ops
 from app.services import kube
 from app.services.kube import KubeError
 from app.services.integrations import check_integrations
@@ -3015,10 +3022,44 @@ def _db_engine_or_400(engine: str) -> str:
     return normalized
 
 
+# Connections may also be Redis, which is key/value rather than SQL: it is a valid engine to save
+# and browse (its own routes below), but the SQL query/metadata endpoints still reject it via
+# _db_engine_or_400. _conn_engine_or_400 is the validator for the connection CRUD + test paths.
+_CONNECTION_ENGINES = (*ENGINES, "redis")
+_CONNECTION_DEFAULT_PORTS = {**DEFAULT_PORTS, "redis": redis_ops.DEFAULT_PORT}
+
+
+def _conn_engine_or_400(engine: str) -> str:
+    normalized = (engine or "").strip().lower()
+    if normalized not in _CONNECTION_ENGINES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Engine must be postgres, mysql, sqlite, mssql, or redis")
+    return normalized
+
+
+def _conn_default_port(engine: str) -> int:
+    return _CONNECTION_DEFAULT_PORTS.get(engine, 0)
+
+
+def _redis_test(conn_or_payload) -> DbConnectionResult:
+    """Test a Redis connection (saved conn row or unsaved payload), returning the same
+    ok/message shape the SQL test uses. `password` is already decrypted."""
+    try:
+        message = redis_ops.test_connection(
+            conn_or_payload["host"], conn_or_payload["port"], conn_or_payload["username"],
+            conn_or_payload["password"], conn_or_payload["database"],
+        )
+        return DbConnectionResult(ok=True, message=message)
+    except redis_ops.RedisOpError as exc:
+        return DbConnectionResult(ok=False, message=str(exc))
+
+
 @router.post("/db/test-connection", response_model=DbConnectionResult)
 def db_test_connection(payload: DbConnectionRequest, _: dict = Depends(require_user)) -> DbConnectionResult:
-    engine = _db_engine_or_400(payload.engine)
-    port = payload.port or DEFAULT_PORTS.get(engine, 0)
+    engine = _conn_engine_or_400(payload.engine)
+    port = payload.port or _conn_default_port(engine)
+    if engine == "redis":
+        return _redis_test({"host": payload.host, "port": port, "username": payload.username,
+                            "password": payload.password, "database": payload.database})
     try:
         message = db_console.test_connection(engine, payload.host, port, payload.username, payload.password, payload.database)
         return DbConnectionResult(ok=True, message=message)
@@ -3102,14 +3143,14 @@ def _validate_db_connection_target(engine: str, host: str, database: str) -> Non
 
 @router.post("/db/connections", response_model=DbConnectionRead, status_code=status.HTTP_201_CREATED)
 def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbConnectionRead:
-    engine = _db_engine_or_400(payload.engine)
+    engine = _conn_engine_or_400(payload.engine)
     _validate_db_connection_target(engine, payload.host, payload.database)
     conn = DbConnection(
         public_id=str(uuid.uuid4()),
         name=payload.name.strip(),
         engine=engine,
         host=payload.host.strip(),
-        port=payload.port or DEFAULT_PORTS.get(engine, 0),
+        port=payload.port or _conn_default_port(engine),
         username=payload.username,
         encrypted_password=encrypt_secret(payload.password),
         database=payload.database,
@@ -3127,8 +3168,11 @@ def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_
 def test_unsaved_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user)) -> DbConnectionResult:
     # Test the parameters as typed, without persisting anything. A bad host/credentials is an
     # expected outcome, reported as ok=false with HTTP 200 (like the ad-hoc db_test_connection).
-    engine = _db_engine_or_400(payload.engine)
-    port = payload.port or DEFAULT_PORTS.get(engine, 0)
+    engine = _conn_engine_or_400(payload.engine)
+    port = payload.port or _conn_default_port(engine)
+    if engine == "redis":
+        return _redis_test({"host": payload.host, "port": port, "username": payload.username,
+                            "password": payload.password, "database": payload.database})
     try:
         message = db_console.test_connection(engine, payload.host, port, payload.username, payload.password, payload.database)
         return DbConnectionResult(ok=True, message=message)
@@ -3147,7 +3191,7 @@ def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dic
     data = payload.model_dump(exclude_unset=True)
 
     if "engine" in data and data["engine"] is not None:
-        conn.engine = _db_engine_or_400(data["engine"])
+        conn.engine = _conn_engine_or_400(data["engine"])
     if "name" in data and data["name"] is not None:
         name = data["name"].strip()
         if not name:
@@ -3192,6 +3236,9 @@ def delete_db_connection(connection_id: str, _: dict = Depends(require_user), db
 @router.post("/db/connections/{connection_id}/test", response_model=DbConnectionResult)
 def test_saved_db_connection(connection_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbConnectionResult:
     conn = _db_connection_or_404(db, connection_id)
+    if conn.engine == "redis":
+        return _redis_test({"host": conn.host, "port": conn.port, "username": conn.username,
+                            "password": decrypt_secret(conn.encrypted_password), "database": conn.database})
     try:
         message = db_console.test_connection(
             conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database
@@ -3199,6 +3246,77 @@ def test_saved_db_connection(connection_id: str, _: dict = Depends(require_user)
         return DbConnectionResult(ok=True, message=message)
     except DbConsoleError as exc:
         return DbConnectionResult(ok=False, message=str(exc))
+
+
+# --- redis browser + command console (feature/redis-view) -----------------------------------
+#
+# A saved connection whose engine is "redis" is browsed through these routes instead of the SQL
+# ones. Each decrypts the stored password, opens a short-lived client, does one thing, and closes
+# it (redis_ops). A RedisOpError (bad host, auth, unknown command) is surfaced as a clean 400.
+
+
+def _redis_conn_or_400(db: Session, connection_id: str) -> DbConnection:
+    conn = _db_connection_or_404(db, connection_id)
+    if conn.engine != "redis":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This connection is not a Redis connection")
+    return conn
+
+
+def _redis_db_index(conn: DbConnection, db_param: int | None) -> int:
+    """The logical Redis database to act on: the ?db= override when given, else the connection's
+    saved database. Validated as a number by redis_ops."""
+    if db_param is not None:
+        return db_param
+    return redis_ops._db_index(conn.database)
+
+
+@router.get("/db/connections/{connection_id}/redis/keyspaces", response_model=list[RedisKeyspace])
+def redis_keyspaces(connection_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[RedisKeyspace]:
+    conn = _redis_conn_or_400(db, connection_id)
+    try:
+        rows = redis_ops.keyspaces(conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database)
+    except redis_ops.RedisOpError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [RedisKeyspace(**row) for row in rows]
+
+
+@router.get("/db/connections/{connection_id}/redis/keys", response_model=RedisScanResult)
+def redis_scan_keys(connection_id: str, db_num: int | None = None, pattern: str = "*", cursor: int = 0, count: int = 0, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> RedisScanResult:
+    conn = _redis_conn_or_400(db, connection_id)
+    try:
+        result = redis_ops.scan_keys(
+            conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database,
+            _redis_db_index(conn, db_num), pattern, cursor, count or redis_ops.SCAN_COUNT,
+        )
+    except redis_ops.RedisOpError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return RedisScanResult(keys=[RedisKeyEntry(**k) for k in result["keys"]], cursor=result["cursor"])
+
+
+@router.get("/db/connections/{connection_id}/redis/key", response_model=RedisKeyDetail)
+def redis_get_key(connection_id: str, key: str, db_num: int | None = None, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> RedisKeyDetail:
+    conn = _redis_conn_or_400(db, connection_id)
+    try:
+        detail = redis_ops.get_key(
+            conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database,
+            _redis_db_index(conn, db_num), key,
+        )
+    except redis_ops.RedisOpError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return RedisKeyDetail(**detail)
+
+
+@router.post("/db/connections/{connection_id}/redis/command", response_model=RedisCommandResult)
+def redis_command(connection_id: str, payload: RedisCommandRequest, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> RedisCommandResult:
+    conn = _redis_conn_or_400(db, connection_id)
+    try:
+        result = redis_ops.run_command(
+            conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database,
+            _redis_db_index(conn, payload.db), payload.command,
+        )
+    except redis_ops.RedisOpError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return RedisCommandResult(command=result["command"], reply=result["reply"])
 
 
 @router.get("/db/connections/{connection_id}/tables", response_model=list[DbTable])

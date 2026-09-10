@@ -77,6 +77,8 @@ type DbNavigatorProps = {
   onOpenEditor: (ctx: DbNavigatorCtx) => void;
   onViewData: (ctx: DbNavigatorCtx) => void;
   onGenerate: (ctx: DbNavigatorCtx, kind: string) => void;
+  // open the Redis workspace for a key/value connection (engine === "redis")
+  onOpenRedis: (conn: DbConnection) => void;
   // bump to force the top-level connection list to reload (e.g. after the workspace edits one)
   refreshKey?: number;
 };
@@ -84,7 +86,8 @@ type DbNavigatorProps = {
 type ConnStatus = "unknown" | "testing" | "healthy" | "error";
 
 // sqlite is file-backed and has no port; 0 stands in and is never sent for a sqlite connection.
-const DEFAULT_PORTS: Record<DbConnEngine, number> = { postgres: 5432, mysql: 3306, sqlite: 0, mssql: 1433 };
+// redis defaults to 6379.
+const DEFAULT_PORTS: Record<DbConnEngine, number> = { postgres: 5432, mysql: 3306, sqlite: 0, mssql: 1433, redis: 6379 };
 
 const inputClass =
   "h-11 w-full rounded-xl border-none bg-surface px-4 text-sm font-medium text-fg outline-none ring-1 ring-edge transition-colors focus:ring-2 focus:ring-accent";
@@ -100,6 +103,7 @@ type NavContextValue = {
   onOpenEditor: (ctx: DbNavigatorCtx) => void;
   onViewData: (ctx: DbNavigatorCtx) => void;
   onGenerate: (ctx: DbNavigatorCtx, kind: string) => void;
+  onOpenRedis: (conn: DbConnection) => void;
   statuses: Record<string, ConnStatus>;
   testConnection: (id: string) => void;
   openConnDialog: (conn: DbConnection | null) => void;
@@ -631,24 +635,35 @@ function ConnectionNode({ conn }: { conn: DbConnection }) {
   }, [load]);
 
   const status = nav.statuses[conn.id] ?? "unknown";
+  // Redis is key/value, not SQL: the node does not expand into a schema tree; clicking it opens
+  // the Redis workspace, and its menu drops the SQL-only actions. (conn.engine is typed DbEngine
+  // for the ad-hoc console, but carries sqlite/mssql/redis at runtime -- hence the cast.)
+  const isRedis = (conn.engine as string) === "redis";
 
-  const menuItems: MenuItem[] = [
-    { label: "Open SQL Editor", onClick: () => nav.onOpenEditor(ctx) },
-    // Reconnect: re-probe the stored credentials (updates the status dot) and rebuild the subtree.
-    { label: "Reconnect", onClick: () => { nav.testConnection(conn.id); refresh(); } },
-    { label: "Test connection", onClick: () => nav.testConnection(conn.id) },
-    { label: showAll ? "Show only default database" : "Show all databases", onClick: () => nav.toggleShowAllDb(conn.id) },
-    { label: "Refresh", onClick: refresh },
-    // Backup/restore are postgres-only (pg_dump/pg_restore); hide them for other engines.
-    ...(conn.engine === "postgres"
-      ? [
-          { label: "Backup", onClick: () => nav.backupConnection(conn.id, conn.database) },
-          { label: "Restore", danger: true, onClick: () => nav.restoreConnection(conn.id, conn.database) }
-        ]
-      : []),
-    { label: "Edit", onClick: () => nav.openConnDialog(conn) },
-    { label: "Delete", danger: true, onClick: () => nav.deleteConnection(conn) }
-  ];
+  const menuItems: MenuItem[] = isRedis
+    ? [
+        { label: "Open Redis", onClick: () => nav.onOpenRedis(conn) },
+        { label: "Test connection", onClick: () => nav.testConnection(conn.id) },
+        { label: "Edit", onClick: () => nav.openConnDialog(conn) },
+        { label: "Delete", danger: true, onClick: () => nav.deleteConnection(conn) }
+      ]
+    : [
+        { label: "Open SQL Editor", onClick: () => nav.onOpenEditor(ctx) },
+        // Reconnect: re-probe the stored credentials (updates the status dot) and rebuild the subtree.
+        { label: "Reconnect", onClick: () => { nav.testConnection(conn.id); refresh(); } },
+        { label: "Test connection", onClick: () => nav.testConnection(conn.id) },
+        { label: showAll ? "Show only default database" : "Show all databases", onClick: () => nav.toggleShowAllDb(conn.id) },
+        { label: "Refresh", onClick: refresh },
+        // Backup/restore are postgres-only (pg_dump/pg_restore); hide them for other engines.
+        ...(conn.engine === "postgres"
+          ? [
+              { label: "Backup", onClick: () => nav.backupConnection(conn.id, conn.database) },
+              { label: "Restore", danger: true, onClick: () => nav.restoreConnection(conn.id, conn.database) }
+            ]
+          : []),
+        { label: "Edit", onClick: () => nav.openConnDialog(conn) },
+        { label: "Delete", danger: true, onClick: () => nav.deleteConnection(conn) }
+      ];
 
   return (
     <div>
@@ -658,22 +673,23 @@ function ConnectionNode({ conn }: { conn: DbConnection }) {
           e.stopPropagation();
           nav.openMenu(nodeId, e.clientX, e.clientY);
         }}
-        onClick={toggle}
+        onClick={() => (isRedis ? nav.onOpenRedis(conn) : toggle())}
         className="group flex cursor-pointer select-none items-center gap-1.5 rounded-md px-1 py-1.5 text-sm hover:bg-surface"
         title={`${conn.name} — ${conn.username ? `${conn.username}@` : ""}${conn.host}:${conn.port}${conn.database ? `/${conn.database}` : ""}`}
       >
         <span className="flex h-4 w-4 shrink-0 items-center justify-center text-muted">
-          {loading ? <Loader2 size={12} className="animate-spin" /> : expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          {isRedis ? null : loading ? <Loader2 size={12} className="animate-spin" /> : expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         </span>
         <span className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(status)}`} title={`Status: ${status}`} />
-        <Database size={15} className="shrink-0 text-accent" />
+        <Database size={15} className={`shrink-0 ${isRedis ? "text-red-500" : "text-accent"}`} />
         <span className="truncate font-semibold text-fg">{conn.name}</span>
+        {isRedis ? <span className="rounded bg-red-500/10 px-1 py-0.5 text-[9px] font-semibold uppercase text-red-500">redis</span> : null}
         <EnvBadge environment={conn.environment} />
       </div>
 
       {nav.openMenuId === nodeId && <ContextMenu items={menuItems} />}
 
-      {expanded && (
+      {!isRedis && expanded && (
         <div>
           {error ? (
             <div className="flex items-center gap-1.5 py-1 pl-6 text-xs text-danger">
@@ -719,6 +735,7 @@ function ConnectionDialog({
   const [error, setError] = useState("");
 
   const isSqlite = engine === "sqlite";
+  const isRedis = engine === "redis";
 
   function changeEngine(next: DbConnEngine) {
     setPort((current) => (current === DEFAULT_PORTS[engine] ? DEFAULT_PORTS[next] : current));
@@ -812,6 +829,7 @@ function ConnectionDialog({
             <option value="mysql">MySQL</option>
             <option value="mssql">SQL Server</option>
             <option value="sqlite">SQLite</option>
+            <option value="redis">Redis</option>
           </select>
         </label>
         {isSqlite ? (
@@ -851,8 +869,13 @@ function ConnectionDialog({
               />
             </label>
             <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
-              Database
-              <input value={database} onChange={(e) => setDatabase(e.target.value)} placeholder="app" className={inputClass} />
+              {isRedis ? "Database number (0–15)" : "Database"}
+              <input
+                value={database}
+                onChange={(e) => setDatabase(e.target.value)}
+                placeholder={isRedis ? "0" : "app"}
+                className={inputClass}
+              />
             </label>
           </>
         )}
@@ -870,7 +893,7 @@ function ConnectionDialog({
           Group
           <input value={group} onChange={(e) => setGroup(e.target.value)} placeholder="Optional" className={inputClass} />
         </label>
-        {!isSqlite && (
+        {!isSqlite && !isRedis && (
           <label className="flex items-center gap-2.5 md:col-span-2">
             <input
               type="checkbox"
@@ -935,7 +958,7 @@ function ConnectionDialog({
 // --- the navigator --------------------------------------------------------------------------
 
 export function DbNavigator(props: DbNavigatorProps) {
-  const { token, onOpenEditor, onViewData, onGenerate, refreshKey } = props;
+  const { token, onOpenEditor, onViewData, onGenerate, onOpenRedis, refreshKey } = props;
   const { confirm, confirmDialog } = useConfirm();
 
   const [connections, setConnections] = useState<DbConnection[]>([]);
@@ -1107,6 +1130,7 @@ export function DbNavigator(props: DbNavigatorProps) {
       onOpenEditor,
       onViewData,
       onGenerate,
+      onOpenRedis,
       statuses,
       testConnection,
       openConnDialog,
@@ -1132,6 +1156,7 @@ export function DbNavigator(props: DbNavigatorProps) {
       onOpenEditor,
       onViewData,
       onGenerate,
+      onOpenRedis,
       statuses,
       testConnection,
       openConnDialog,
