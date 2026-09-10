@@ -5,6 +5,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, inspect, select, text
 from fastapi import FastAPI
@@ -461,6 +462,58 @@ async def _log_shipping_loop(interval: int) -> None:
             continue
 
 
+def _int_setting(db, key: str, default: int) -> int:
+    """Read an integer app setting, falling back when unset or unparseable."""
+    row = db.get(AppSetting, key)
+    if not row or not row.value:
+        return default
+    try:
+        value = int(row.value)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+async def _gateway_retention_loop(interval: int) -> None:
+    """Trim gateway traffic to its retention window.
+
+    Full capture means every request the gateway serves lands in
+    `gateway_events`, so this is not optional housekeeping -- without it the
+    lite profile's SQLite file grows without bound. Events go first and are kept
+    for days; the per-minute rollups are far smaller and are kept for months, so
+    both screens still answer questions long after the individual requests have
+    gone.
+
+    Mirrors _log_shipping_loop: a worker thread per pass with its own session,
+    every failure swallowed, cancellation-clean on shutdown.
+    """
+    from app.models.entities import GatewayEvent, GatewayRollup
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+
+            def _run() -> None:
+                with SessionLocal() as db:
+                    now = datetime.now(timezone.utc)
+                    events_before = now - timedelta(days=_int_setting(db, "gateway_event_retention_days", 7))
+                    rollups_before = now - timedelta(days=_int_setting(db, "gateway_rollup_retention_days", 90))
+                    db.query(GatewayEvent).filter(GatewayEvent.ts < events_before).delete(
+                        synchronize_session=False
+                    )
+                    db.query(GatewayRollup).filter(GatewayRollup.minute < rollups_before).delete(
+                        synchronize_session=False
+                    )
+                    db.commit()
+
+            await asyncio.to_thread(_run)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            # never let a sweep failure take down the periodic driver
+            continue
+
+
 async def _k8s_log_shipping_loop(interval: int) -> None:
     """Periodically tail Kubernetes pod logs into Loki, for clusters with shipping enabled.
 
@@ -535,10 +588,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     k8s_interval = settings.k8s_log_ship_interval_seconds
     if (settings.loki_url or "").strip() and k8s_interval > 0:
         k8s_ship_task = asyncio.create_task(_k8s_log_shipping_loop(k8s_interval))
+    # Gateway retention sweep. Unlike the shippers this is NOT gated on the full
+    # profile: gateway_events grows with every request the gateway serves, so on
+    # the lite profile -- a single SQLite file -- it is exactly where an unbounded
+    # table hurts most. Hourly is frequent enough for a window measured in days
+    # and cheap enough to leave running when no gateway is registered.
+    retention_task = asyncio.create_task(_gateway_retention_loop(3600))
     try:
         yield
     finally:
-        for task in (ship_task, k8s_ship_task):
+        for task in (ship_task, k8s_ship_task, retention_task):
             if task is not None:
                 task.cancel()
                 try:

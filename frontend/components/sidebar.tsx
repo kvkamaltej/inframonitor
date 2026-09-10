@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, Boxes, ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Play, Server, Settings, Shield, SlidersHorizontal, Sun, Table2 as TableIcon, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
+import { Activity, Boxes, ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Play, Server, Settings, Shield, ShieldAlert, SlidersHorizontal, Sun, Table2 as TableIcon, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
 import { MouseEvent, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getAppDatabase, getDbConnections, getDbTables, getFolders, getServers, AppDbConfig, DbConnection, DbTable, Folder as FolderType, Server as ServerRow } from "@/lib/api";
@@ -285,6 +285,10 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
           {/* Monitoring (feature/monitoring-page): metrics, alerts, and logs from the Prometheus/
               Loki/Alertmanager stack, surfaced in-app. Gated through the role->menu matrix. */}
           {allowed.has("monitoring") && <NavItem href="/monitoring" icon={Activity} label="Monitoring" />}
+          {/* Gateway Traffic (feature/gateway-traffic): the API gateway's own access log --
+              which addresses are calling it, what they called, and where the rate limiter
+              rejected them. Gated through the same role->menu matrix. */}
+          {allowed.has("gateway") && <NavItem href="/gateway" icon={ShieldAlert} label="Gateway Traffic" />}
           {/* EXPERIMENTAL (feature/server-folders): the Shell launcher. It is a button, not a
               route — it opens a flyout of hosts grouped by folder. Collapsing the sidebar first
               would hide the flyout's anchor, so opening it also opens the rail. */}

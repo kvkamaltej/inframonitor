@@ -1881,3 +1881,122 @@ export async function setClusterLogShipping(
     body: JSON.stringify({ enabled, namespaces })
   });
 }
+
+
+// --- gateway traffic -------------------------------------------------------------------------
+// Two screens over the API gateway's own access log: the addresses calling it, and
+// what any one of them called. Ranges and sort columns are whitelisted server-side,
+// so these types name the only values the API will accept.
+
+export const GATEWAY_RANGES = ["5m", "15m", "1h", "6h", "24h"] as const;
+export type GatewayRange = (typeof GATEWAY_RANGES)[number];
+
+export type GatewaySourceSort =
+  | "requests"
+  | "allowed"
+  | "throttled"
+  | "endpoints"
+  | "last_seen"
+  | "rate_per_min"
+  | "throttled_share";
+
+export type GatewayEndpointSort = "path" | "hits" | "allowed" | "throttled" | "last_hit";
+
+export type SortDir = "asc" | "desc";
+
+export type GatewaySource = {
+  client_ip: string;
+  requests: number;
+  allowed: number;
+  throttled: number;
+  endpoints: number;
+  rate_per_min: number;
+  throttled_share: number;
+  last_seen: string;
+};
+
+export type GatewayEndpoint = {
+  path: string;
+  tier: string;
+  limit_rule: string;
+  hits: number;
+  allowed: number;
+  throttled: number;
+  last_hit: string;
+};
+
+export type GatewayEvent = {
+  ts: string;
+  client_ip: string;
+  method: string;
+  path: string;
+  tier: string;
+  status: number;
+  limit_rule: string;
+  latency_ms: number;
+};
+
+export type GatewaySummary = {
+  id: number;
+  name: string;
+  environment: string;
+  enabled: boolean;
+  last_event_at: string | null;
+};
+
+export async function getGatewaySources(
+  token: string,
+  range: GatewayRange,
+  sort: GatewaySourceSort,
+  dir: SortDir
+): Promise<GatewaySource[]> {
+  const query = new URLSearchParams({ range, sort, dir });
+  return request<GatewaySource[]>(`/gateway/sources?${query}`, token);
+}
+
+export async function getGatewayEndpoints(
+  token: string,
+  clientIp: string,
+  range: GatewayRange,
+  sort: GatewayEndpointSort,
+  dir: SortDir
+): Promise<GatewayEndpoint[]> {
+  const query = new URLSearchParams({ range, sort, dir });
+  return request<GatewayEndpoint[]>(
+    `/gateway/sources/${encodeURIComponent(clientIp)}/endpoints?${query}`,
+    token
+  );
+}
+
+export async function getGatewayEvents(
+  token: string,
+  clientIp: string,
+  range: GatewayRange,
+  options: { path?: string; status?: number; limit?: number } = {}
+): Promise<GatewayEvent[]> {
+  const query = new URLSearchParams({ range });
+  if (options.path) query.set("path", options.path);
+  if (options.status !== undefined) query.set("status", String(options.status));
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  return request<GatewayEvent[]>(
+    `/gateway/sources/${encodeURIComponent(clientIp)}/events?${query}`,
+    token
+  );
+}
+
+export async function listGateways(token: string): Promise<GatewaySummary[]> {
+  return request<GatewaySummary[]>("/gateway/gateways", token);
+}
+
+export async function createGateway(
+  token: string,
+  name: string,
+  environment: string
+): Promise<{ id: number; name: string; token: string }> {
+  // The response carries the ingest token, and it is the only time the API
+  // returns it — surface it to the operator immediately or it is unrecoverable.
+  return request<{ id: number; name: string; token: string }>("/gateway/gateways", token, {
+    method: "POST",
+    body: JSON.stringify({ name, environment })
+  });
+}
