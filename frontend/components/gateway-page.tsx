@@ -40,9 +40,25 @@ function fmt(n: number): string {
   return n.toLocaleString();
 }
 
-function timeOf(iso: string): string {
+// Clock with milliseconds, optionally prefixed with the date. The date is shown on wider windows
+// (6h/24h) that can cross midnight, so a bare time is never ambiguous about which day it was.
+function timeOf(iso: string, withDate = false): string {
   const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+  const t = d.toLocaleTimeString([], { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+  if (!withDate) return t;
+  return `${d.toLocaleDateString([], { day: "2-digit", month: "short" })} ${t}`;
+}
+
+// Absolute "DD Mon HH:MM:SS" for last-seen/last-event/last-hit, so those read as a real point in
+// time rather than only "3h ago".
+function absStamp(iso: string): string {
+  const d = new Date(iso);
+  return `${d.toLocaleDateString([], { day: "2-digit", month: "short" })} ${d.toLocaleTimeString([], { hour12: false })}`;
+}
+
+// Full locale date+time, used as the hover title so the exact instant is always one hover away.
+function fullStamp(iso: string): string {
+  return new Date(iso).toLocaleString();
 }
 
 function ago(iso: string): string {
@@ -342,7 +358,7 @@ function ManageGatewaysDialog({ token, onClose }: { token: string; onClose: () =
                         {g.enabled ? "enabled" : "disabled"}
                       </span>
                     </td>
-                    <td className="px-3 py-2 font-mono text-muted">{g.last_event_at ? ago(g.last_event_at) : "never"}</td>
+                    <td className="px-3 py-2 font-mono text-muted" title={g.last_event_at ? `${fullStamp(g.last_event_at)} · ${ago(g.last_event_at)}` : undefined}>{g.last_event_at ? absStamp(g.last_event_at) : "never"}</td>
                   </tr>
                 ))}
                 {!loading && gateways.length === 0 ? (
@@ -496,6 +512,8 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
     { requests: 0, throttled: 0 }
   );
   const detail = sources.find((s) => s.client_ip === selected);
+  // On wide windows the per-request/last-hit times get a date prefix, since they can span days.
+  const wideRange = range === "6h" || range === "24h";
 
   return (
     <div className="px-6 py-6">
@@ -605,7 +623,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
                   </span>
                   <span className="tabular-nums">{fmt(g.sources)} addresses</span>
                   <span className="tabular-nums">{fmt(g.endpoints)} endpoints</span>
-                  <span className="ml-auto">{g.last_event_at ? ago(g.last_event_at) : "no traffic yet"}</span>
+                  <span className="ml-auto" title={g.last_event_at ? fullStamp(g.last_event_at) : undefined}>{g.last_event_at ? ago(g.last_event_at) : "no traffic yet"}</span>
                 </div>
               </button>
             ))}
@@ -670,7 +688,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
                       <ShareBar share={s.throttled_share} />
                     </td>
                     <td className="px-3 py-2.5 text-right font-mono tabular-nums">{s.endpoints}</td>
-                    <td className="px-3 py-2.5 font-mono text-muted">{ago(s.last_seen)}</td>
+                    <td className="px-3 py-2.5 font-mono text-muted" title={`${fullStamp(s.last_seen)} · ${ago(s.last_seen)}`}>{absStamp(s.last_seen)}</td>
                   </tr>
                 ))}
                 {!loading && sources.length === 0 ? (
@@ -693,7 +711,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
             {detail ? (
               <span className="text-sm text-muted">
                 {fmt(detail.requests)} requests · {fmt(detail.throttled)} throttled ·{" "}
-                {detail.rate_per_min}/min · last seen {ago(detail.last_seen)}
+                {detail.rate_per_min}/min · last seen <span title={ago(detail.last_seen)}>{absStamp(detail.last_seen)}</span>
               </span>
             ) : null}
           </div>
@@ -737,7 +755,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
                           <span className="text-muted">0</span>
                         )}
                       </td>
-                      <td className="px-3 py-2.5 font-mono text-muted">{timeOf(e.last_hit)}</td>
+                      <td className="px-3 py-2.5 font-mono text-muted" title={fullStamp(e.last_hit)}>{timeOf(e.last_hit, wideRange)}</td>
                     </tr>
                   ))}
                   {endpoints.length === 0 ? (
@@ -771,7 +789,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
                 <tbody>
                   {events.map((e, i) => (
                     <tr key={`${e.ts}-${i}`} className="border-b border-edge/60 last:border-0">
-                      <td className="px-3 py-2 font-mono tabular-nums text-muted">{timeOf(e.ts)}</td>
+                      <td className="px-3 py-2 font-mono tabular-nums text-muted" title={fullStamp(e.ts)}>{timeOf(e.ts, wideRange)}</td>
                       <td className="px-3 py-2 font-mono">{e.method}</td>
                       <td className="px-3 py-2 font-mono">{e.path}</td>
                       <td className="px-3 py-2 text-right">
