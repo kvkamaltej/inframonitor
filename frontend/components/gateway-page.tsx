@@ -13,7 +13,7 @@
 // header implies.
 
 import { AlertTriangle, ArrowLeft, Check, Copy, Loader2, Plus, Server, ShieldAlert, X } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
 import {
@@ -32,6 +32,7 @@ import {
   type GatewaySource,
   type GatewaySourceSort,
   type GatewaySummary,
+  type GatewayWindow,
   type Me,
   type SortDir
 } from "@/lib/api";
@@ -388,7 +389,23 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
   const isAdmin = me.role === "admin";
   const [manageOpen, setManageOpen] = useState(false);
   const [range, setRange] = useState<GatewayRange>("5m");
+  // Relative preset, or an absolute From/To window (datetime-local strings). Absolute lets an
+  // operator pick e.g. Sep 1 -> now for a forensic sweep beyond the presets.
+  const [rangeMode, setRangeMode] = useState<"relative" | "absolute">("relative");
+  const [absFrom, setAbsFrom] = useState("");
+  const [absTo, setAbsTo] = useState("");
   const [refreshSeconds, setRefreshSeconds] = useState(30);
+
+  // The window every read covers. Absolute only when From is set; an empty To means "until now"
+  // (so "Sep 1 -> now" keeps advancing on refresh).
+  const gwWindow = useMemo<GatewayWindow>(() => {
+    if (rangeMode === "absolute" && absFrom) {
+      const since = Math.floor(new Date(absFrom).getTime() / 1000);
+      const until = absTo ? Math.floor(new Date(absTo).getTime() / 1000) : undefined;
+      if (Number.isFinite(since)) return { since, until: Number.isFinite(until as number) ? until : undefined };
+    }
+    return { range };
+  }, [rangeMode, absFrom, absTo, range]);
 
   // Three levels of drill-down: the registered gateways (tiles), then one
   // gateway's calling addresses, then one address's endpoints + requests.
@@ -428,24 +445,24 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
 
   const loadOverview = useCallback(async () => {
     if (gateway) return;
-    setOverview(await getGatewayOverview(token, range));
-  }, [token, range, gateway]);
+    setOverview(await getGatewayOverview(token, gwWindow));
+  }, [token, gwWindow, gateway]);
 
   const loadSources = useCallback(async () => {
     if (!gateway) return;
-    const rows = await getGatewaySources(token, range, sourceSort, sourceDir, gateway.id);
+    const rows = await getGatewaySources(token, gwWindow, sourceSort, sourceDir, gateway.id);
     setSources(rows);
-  }, [token, range, sourceSort, sourceDir, gateway]);
+  }, [token, gwWindow, sourceSort, sourceDir, gateway]);
 
   const loadDetail = useCallback(async () => {
     if (!gateway || !selected) return;
     const [rows, stream] = await Promise.all([
-      getGatewayEndpoints(token, selected, range, endpointSort, endpointDir, gateway.id),
-      getGatewayEvents(token, selected, range, { limit: 100, gatewayId: gateway.id })
+      getGatewayEndpoints(token, selected, gwWindow, endpointSort, endpointDir, gateway.id),
+      getGatewayEvents(token, selected, gwWindow, { limit: 100, gatewayId: gateway.id })
     ]);
     setEndpoints(rows);
     setEvents(stream);
-  }, [token, selected, range, endpointSort, endpointDir, gateway]);
+  }, [token, selected, gwWindow, endpointSort, endpointDir, gateway]);
 
   const load = useCallback(async () => {
     setError("");
@@ -513,7 +530,12 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
   );
   const detail = sources.find((s) => s.client_ip === selected);
   // On wide windows the per-request/last-hit times get a date prefix, since they can span days.
-  const wideRange = range === "6h" || range === "24h";
+  const wideRange = rangeMode === "absolute" || range === "6h" || range === "24h";
+  // Human label for the active window, used in the summary/empty-state copy.
+  const rangeLabel =
+    rangeMode === "absolute" && absFrom
+      ? `${absStamp(new Date(absFrom).toISOString())}${absTo ? ` → ${absStamp(new Date(absTo).toISOString())}` : " → now"}`
+      : `last ${range}`;
 
   return (
     <div className="px-6 py-6">
@@ -540,7 +562,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
             <span className="flex items-center gap-2 text-sm text-muted">
               <ShieldAlert size={16} className="text-accent" />
               <span className="font-semibold text-fg">{gateway.name}</span>
-              {fmt(totals.requests)} requests, {fmt(totals.throttled)} throttled in the last {range}
+              {fmt(totals.requests)} requests, {fmt(totals.throttled)} throttled · {rangeLabel}
             </span>
           </>
         ) : (
@@ -560,7 +582,47 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
               Manage gateways
             </button>
           ) : null}
-          <RangePicker value={range} onChange={setRange} />
+          <div className="flex items-center rounded-full border border-edge bg-surface p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => setRangeMode("relative")}
+              className={`rounded-full px-2.5 py-1 font-medium ${rangeMode === "relative" ? "bg-accent text-white" : "text-muted hover:text-fg"}`}
+            >
+              Relative
+            </button>
+            <button
+              type="button"
+              onClick={() => setRangeMode("absolute")}
+              className={`rounded-full px-2.5 py-1 font-medium ${rangeMode === "absolute" ? "bg-accent text-white" : "text-muted hover:text-fg"}`}
+            >
+              Absolute
+            </button>
+          </div>
+          {rangeMode === "relative" ? (
+            <RangePicker value={range} onChange={setRange} />
+          ) : (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
+              <label className="flex items-center gap-1">
+                From
+                <input
+                  type="datetime-local"
+                  value={absFrom}
+                  onChange={(e) => setAbsFrom(e.target.value)}
+                  className="h-8 rounded-lg border border-edge bg-surface px-2 text-fg outline-none focus:ring-2 focus:ring-accent/40"
+                />
+              </label>
+              <label className="flex items-center gap-1">
+                To
+                <input
+                  type="datetime-local"
+                  value={absTo}
+                  onChange={(e) => setAbsTo(e.target.value)}
+                  className="h-8 rounded-lg border border-edge bg-surface px-2 text-fg outline-none focus:ring-2 focus:ring-accent/40"
+                />
+                <span className="text-[10px] text-muted/70">(blank = now)</span>
+              </label>
+            </div>
+          )}
           <AutoRefreshSelect value={refreshSeconds} onChange={setRefreshSeconds} />
         </div>
       </div>
@@ -611,7 +673,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
                 ) : null}
                 <div className="flex items-baseline gap-2">
                   <span className="font-mono text-2xl font-semibold tabular-nums text-fg">{fmt(g.requests)}</span>
-                  <span className="text-xs text-muted">requests · last {range}</span>
+                  <span className="text-xs text-muted">requests · {rangeLabel}</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
                   <span>
@@ -694,7 +756,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
                 {!loading && sources.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="px-4 py-10 text-center text-sm text-muted">
-                      No traffic through {gateway?.name} in the last {range}. If this gateway has
+                      No traffic through {gateway?.name} in the {rangeLabel}. If this gateway has
                       never reached this page, check that Kong&apos;s http-log plugin points at{" "}
                       <span className="font-mono">/api/gateway/ingest</span> with its token.
                     </td>
@@ -720,7 +782,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
             <div className="flex items-center gap-2 border-b border-edge px-4 py-3">
               <h2 className="text-sm font-semibold text-fg">Endpoints called by this address</h2>
               <span className="ml-auto text-xs text-muted">
-                last {range} · {endpoints.length} endpoints
+                {rangeLabel} · {endpoints.length} endpoints
               </span>
             </div>
             <div className="overflow-x-auto">
@@ -761,7 +823,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
                   {endpoints.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="px-4 py-8 text-center text-sm text-muted">
-                        Nothing from this address in the last {range}.
+                        Nothing from this address in the {rangeLabel}.
                       </td>
                     </tr>
                   ) : null}

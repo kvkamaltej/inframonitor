@@ -2006,22 +2006,38 @@ export type GatewayOverview = {
   last_event_at: string | null;
 };
 
+// The window a gateway read covers: either a relative preset, or an absolute [since, until]
+// in unix epoch seconds (until defaults to now server-side).
+export type GatewayWindow = { range: GatewayRange } | { since: number; until?: number };
+
+function gatewayWindowParams(w: GatewayWindow): URLSearchParams {
+  const q = new URLSearchParams();
+  if ("since" in w) {
+    q.set("since", String(Math.floor(w.since)));
+    if (w.until !== undefined) q.set("until", String(Math.floor(w.until)));
+  } else {
+    q.set("range", w.range);
+  }
+  return q;
+}
+
 export async function getGatewayOverview(
   token: string,
-  range: GatewayRange
+  window: GatewayWindow
 ): Promise<GatewayOverview[]> {
-  const query = new URLSearchParams({ range });
-  return request<GatewayOverview[]>(`/gateway/overview?${query}`, token);
+  return request<GatewayOverview[]>(`/gateway/overview?${gatewayWindowParams(window)}`, token);
 }
 
 export async function getGatewaySources(
   token: string,
-  range: GatewayRange,
+  window: GatewayWindow,
   sort: GatewaySourceSort,
   dir: SortDir,
   gatewayId?: number
 ): Promise<GatewaySource[]> {
-  const query = new URLSearchParams({ range, sort, dir });
+  const query = gatewayWindowParams(window);
+  query.set("sort", sort);
+  query.set("dir", dir);
   if (gatewayId !== undefined) query.set("gateway", String(gatewayId));
   return request<GatewaySource[]>(`/gateway/sources?${query}`, token);
 }
@@ -2029,12 +2045,14 @@ export async function getGatewaySources(
 export async function getGatewayEndpoints(
   token: string,
   clientIp: string,
-  range: GatewayRange,
+  window: GatewayWindow,
   sort: GatewayEndpointSort,
   dir: SortDir,
   gatewayId?: number
 ): Promise<GatewayEndpoint[]> {
-  const query = new URLSearchParams({ range, sort, dir });
+  const query = gatewayWindowParams(window);
+  query.set("sort", sort);
+  query.set("dir", dir);
   if (gatewayId !== undefined) query.set("gateway", String(gatewayId));
   return request<GatewayEndpoint[]>(
     `/gateway/sources/${encodeURIComponent(clientIp)}/endpoints?${query}`,
@@ -2045,10 +2063,10 @@ export async function getGatewayEndpoints(
 export async function getGatewayEvents(
   token: string,
   clientIp: string,
-  range: GatewayRange,
+  window: GatewayWindow,
   options: { path?: string; status?: number; limit?: number; gatewayId?: number } = {}
 ): Promise<GatewayEvent[]> {
-  const query = new URLSearchParams({ range });
+  const query = gatewayWindowParams(window);
   if (options.path) query.set("path", options.path);
   if (options.status !== undefined) query.set("status", String(options.status));
   if (options.limit !== undefined) query.set("limit", String(options.limit));

@@ -4053,10 +4053,33 @@ _GW_DEFAULT_TIERS: list[tuple[str, str, str]] = [
 ]
 
 
-def _gw_window(range_key: str) -> tuple[datetime, str]:
+# The widest absolute window worth serving: rollups are kept 90 days, so a span beyond that just
+# scans empty index. A generous cap keeps a pathological request bounded.
+_GW_MAX_SPAN = timedelta(days=100)
+
+
+def _gw_window(range_key: str, since: int | None = None, until: int | None = None) -> tuple[datetime, datetime, float]:
+    """Resolve the query window as (start, end, span_in_minutes).
+
+    Absolute mode when `since` (unix epoch seconds) is given -> [since, until or now]. Otherwise a
+    whitelisted relative preset -> [now - range, now]. span_in_minutes drives the per-minute rate.
+    """
+    now = datetime.now(timezone.utc)
+    if since is not None:
+        try:
+            start = datetime.fromtimestamp(since, tz=timezone.utc)
+            end = datetime.fromtimestamp(until, tz=timezone.utc) if until is not None else now
+        except (ValueError, OverflowError, OSError) as exc:
+            raise HTTPException(status_code=400, detail="invalid 'from'/'to' timestamp") from exc
+        if end <= start:
+            raise HTTPException(status_code=400, detail="'from' must be before 'to'")
+        if end - start > _GW_MAX_SPAN:
+            raise HTTPException(status_code=400, detail="range too wide (max 100 days)")
+        return start, end, max((end - start).total_seconds() / 60.0, 1.0)
     if range_key not in _GW_RANGES:
         raise HTTPException(status_code=400, detail=f"unknown range '{range_key}'")
-    return datetime.now(timezone.utc) - _GW_RANGES[range_key], range_key
+    delta = _GW_RANGES[range_key]
+    return now - delta, now, max(delta.total_seconds() / 60.0, 1.0)
 
 
 def _gw_match(rules: list[tuple[str, str, str]], path: str) -> tuple[str, str, str] | None:
@@ -4269,10 +4292,12 @@ def gateway_sources(
     sort: str = "throttled",
     dir: str = "desc",
     gateway: int | None = None,
+    since: int | None = None,
+    until: int | None = None,
     _: dict = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[GatewaySourceRead]:
-    since, key = _gw_window(range)
+    start, end, minutes = _gw_window(range, since, until)
     if sort not in _GW_SOURCE_SORTS:
         raise HTTPException(status_code=400, detail=f"cannot sort by '{sort}'")
 
@@ -4285,7 +4310,7 @@ def gateway_sources(
             func.count(func.distinct(GatewayRollup.path)).label("endpoints"),
             func.max(GatewayRollup.last_ts).label("last_seen"),
         )
-        .filter(GatewayRollup.minute >= since)
+        .filter(GatewayRollup.minute >= start, GatewayRollup.minute <= end)
     )
     # Scoped to one gateway when the UI has drilled into its tile; unscoped
     # aggregates every gateway that ships here.
@@ -4293,7 +4318,6 @@ def gateway_sources(
         query = query.filter(GatewayRollup.gateway_id == gateway)
     rows = query.group_by(GatewayRollup.client_ip).all()
 
-    minutes = max(_GW_RANGES[key].total_seconds() / 60.0, 1.0)
     out = [
         GatewaySourceRead(
             client_ip=r.client_ip,
@@ -4321,10 +4345,12 @@ def gateway_source_endpoints(
     sort: str = "hits",
     dir: str = "desc",
     gateway: int | None = None,
+    since: int | None = None,
+    until: int | None = None,
     _: dict = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[GatewayEndpointRead]:
-    since, _key = _gw_window(range)
+    start, end, _minutes = _gw_window(range, since, until)
     if sort not in _GW_ENDPOINT_SORTS:
         raise HTTPException(status_code=400, detail=f"cannot sort by '{sort}'")
 
@@ -4344,7 +4370,7 @@ def gateway_source_endpoints(
         func.sum(GatewayRollup.allowed).label("allowed"),
         func.sum(GatewayRollup.throttled).label("throttled"),
         func.max(GatewayRollup.last_ts).label("last_hit"),
-    ).filter(GatewayRollup.minute >= since, GatewayRollup.client_ip == client_ip)
+    ).filter(GatewayRollup.minute >= start, GatewayRollup.minute <= end, GatewayRollup.client_ip == client_ip)
     if gateway is not None:
         query = query.filter(GatewayRollup.gateway_id == gateway)
     rows = (
@@ -4371,12 +4397,14 @@ def gateway_source_events(
     status: int | None = None,
     limit: int = 200,
     gateway: int | None = None,
+    since: int | None = None,
+    until: int | None = None,
     _: dict = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[GatewayEventRead]:
-    since, _key = _gw_window(range)
+    start, end, _minutes = _gw_window(range, since, until)
     query = db.query(GatewayEvent).filter(
-        GatewayEvent.ts >= since, GatewayEvent.client_ip == client_ip
+        GatewayEvent.ts >= start, GatewayEvent.ts <= end, GatewayEvent.client_ip == client_ip
     )
     if gateway is not None:
         query = query.filter(GatewayEvent.gateway_id == gateway)
@@ -4398,6 +4426,8 @@ def gateway_source_events(
 @router.get("/gateway/overview", response_model=list[GatewayOverviewRead])
 def gateway_overview(
     range: str = "5m",
+    since: int | None = None,
+    until: int | None = None,
     _: dict = Depends(require_user),
     db: Session = Depends(get_db),
 ) -> list[GatewayOverviewRead]:
@@ -4405,7 +4435,7 @@ def gateway_overview(
     the window. Readable by any signed-in role (the token-management list is
     admin-only); a gateway with no traffic still gets a tile so it is visibly
     registered-but-quiet rather than absent."""
-    since, _key = _gw_window(range)
+    start, end, _minutes = _gw_window(range, since, until)
     stats = {
         r.gateway_id: r
         for r in db.query(
@@ -4415,7 +4445,7 @@ def gateway_overview(
             func.count(func.distinct(GatewayRollup.path)).label("endpoints"),
             func.count(func.distinct(GatewayRollup.client_ip)).label("sources"),
         )
-        .filter(GatewayRollup.minute >= since)
+        .filter(GatewayRollup.minute >= start, GatewayRollup.minute <= end)
         .group_by(GatewayRollup.gateway_id)
         .all()
     }
