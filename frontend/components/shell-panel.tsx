@@ -2,6 +2,7 @@
 
 import {
   ChevronDown,
+  ClipboardPaste,
   Columns2,
   Copy,
   FolderOpen,
@@ -19,6 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ShellFavorites } from "@/components/shell-favorites";
 import { SftpPanel } from "@/components/sftp-panel";
 import { shellHandshake, shellSocketUrl } from "@/lib/api";
+import { copyText, readClipboardText } from "@/lib/clipboard";
 import { currentTheme, termPalette, THEME_EVENT, type ThemeName } from "@/lib/theme";
 // xterm's stylesheet must be bundled; the CSP forbids fetching it from a CDN
 import "@xterm/xterm/css/xterm.css";
@@ -63,6 +65,10 @@ type SessionApi = {
   focus: () => void;
   insert: (text: string) => void;
   run: (text: string) => void;
+  // Copy the current selection to the clipboard (returns false when nothing is selected); paste the
+  // clipboard into the terminal. Both work on the plain-HTTP LAN origin via the clipboard fallback.
+  copy: () => Promise<boolean>;
+  paste: () => Promise<void>;
   close: () => void;
 };
 
@@ -280,6 +286,54 @@ function ShellSessionView({
       terminal.onData((data: string) => {
         if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ d: data }));
       });
+
+      // Send text to the PTY (the paste primitive), normalising CRLF to CR.
+      function sendToPty(text: string) {
+        if (text && socket?.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ d: text.replace(/\r\n/g, "\r") }));
+        }
+      }
+      async function copySelection(): Promise<boolean> {
+        const sel = terminal.getSelection();
+        if (!sel) return false;
+        await copyText(sel);
+        return true;
+      }
+      async function pasteClipboard(): Promise<void> {
+        const text = await readClipboardText();
+        // On the insecure LAN origin readClipboardText() returns null; there the browser's native
+        // Ctrl+V / Shift+Insert paste (handled by xterm's textarea) still works, so we no-op here.
+        if (text) sendToPty(text);
+        terminal.focus();
+      }
+
+      // Terminal copy/paste that does not depend on the browser's right-click menu:
+      //   Ctrl/Cmd+Shift+C or Ctrl+Insert -> copy the selection (works on the insecure LAN origin too)
+      //   Ctrl/Cmd+Shift+V               -> paste (only where a programmatic clipboard read is allowed)
+      // The NATIVE paste keys (Ctrl+V and Shift+Insert) are intentionally NOT intercepted: xterm's own
+      // textarea handles them via the browser's paste event, which works even on an insecure origin.
+      // Ctrl+C with no selection still passes through to send SIGINT.
+      terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+        if (event.type !== "keydown") return true;
+        const mod = event.ctrlKey || event.metaKey;
+        const key = event.key.toLowerCase();
+        if ((mod && event.shiftKey && key === "c") || (event.ctrlKey && key === "insert")) {
+          if (terminal.getSelection()) { void copySelection(); return false; }
+          return true; // nothing selected: let Ctrl+C be SIGINT
+        }
+        if (mod && event.shiftKey && key === "v") {
+          void pasteClipboard();
+          return false;
+        }
+        return true;
+      });
+
+      // Auto-copy on select (classic terminal behaviour): when a drag-selection finishes with text
+      // highlighted, put it on the clipboard so a plain select-then-paste works without a shortcut.
+      mountRef.current.addEventListener("mouseup", () => {
+        if (terminal.hasSelection()) void copySelection();
+      });
+
       terminal.onSelectionChange(() => selectionRef.current(sessionKey, terminal.getSelection()));
 
       // Covers everything that changes this terminal's box: window resizes, entering and
@@ -307,6 +361,8 @@ function ShellSessionView({
           if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ d: `${payload}\r` }));
           terminal.focus();
         },
+        copy: () => copySelection(),
+        paste: () => pasteClipboard(),
         close: () => {
           try {
             socket?.close();
@@ -1060,6 +1116,14 @@ export function ShellPanel({
     apis.current.get(activeKeyRef.current)?.run(command);
   }
 
+  function copyActive() {
+    void apis.current.get(activeKeyRef.current)?.copy();
+  }
+
+  function pasteActive() {
+    void apis.current.get(activeKeyRef.current)?.paste();
+  }
+
   const targets = (servers ?? [])
     .filter((target) => target.has_credentials !== false)
     .filter((target, index, all) => all.findIndex((other) => other.id === target.id) === index)
@@ -1144,6 +1208,20 @@ export function ShellPanel({
               {isWide ? (paneFirst ? "Right" : "Left") : paneFirst ? "Bottom" : "Top"}
             </button>
           ) : null}
+          <button
+            onClick={copyActive}
+            title="Copy the selected text (or select text — it copies automatically). Shortcut: Ctrl+Shift+C"
+            className={iconButton}
+          >
+            <Copy size={16} /> Copy
+          </button>
+          <button
+            onClick={pasteActive}
+            title="Paste into the terminal. Shortcut: Ctrl+Shift+V or Shift+Insert (plain Ctrl+V also works)"
+            className={iconButton}
+          >
+            <ClipboardPaste size={16} /> Paste
+          </button>
           <button
             onClick={() => (immersive ? exitFullscreen() : enterFullscreen())}
             aria-pressed={immersive}
