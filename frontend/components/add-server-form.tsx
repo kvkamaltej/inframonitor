@@ -86,6 +86,12 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
         os_kind: String(form.get("os_kind") ?? "linux"),
         password: String(form.get("password") ?? ""),
         private_key: String(form.get("private_key") ?? ""),
+        // Optional SSH jump host (bastion). Blank jump_host = direct connection.
+        jump_host: String(form.get("jump_host") ?? "").trim(),
+        jump_port: Number(form.get("jump_port") || 22),
+        jump_username: String(form.get("jump_username") ?? "").trim(),
+        jump_password: String(form.get("jump_password") ?? ""),
+        jump_private_key: String(form.get("jump_private_key") ?? ""),
         folder_id: folderId
       };
       await addServer(token, payload);
@@ -177,6 +183,18 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
       <input name="tags" placeholder="Tags, comma separated" className={`${fieldClass} md:col-span-3`} />
       <textarea name="private_key" placeholder="SSH private key, optional" className="min-h-24 rounded-xl border-none bg-slate-100 px-4 py-3 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100 md:col-span-6" />
       <p className="text-xs font-medium text-slate-500 dark:text-slate-400 md:col-span-6">Credentials are used for connection test/discovery and container log operations. Leave them blank to add inventory only.</p>
+
+      {/* Optional SSH jump host (bastion): every connection to this server tunnels through it. */}
+      <div className="md:col-span-6 mt-1 border-t border-slate-200 pt-3 dark:border-slate-700">
+        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Jump host (bastion) — optional</p>
+        <p className="mt-0.5 text-xs font-medium text-slate-500 dark:text-slate-400">Reach this server through an SSH bastion. Leave the host blank for a direct connection; leave the jump credentials blank to reuse the server&apos;s own login.</p>
+      </div>
+      <input name="jump_host" placeholder="Jump host / bastion IP" className={`${fieldClass} md:col-span-3`} />
+      <input name="jump_port" type="number" min="1" max="65535" placeholder="Jump port (22)" className={`${fieldClass} md:col-span-1`} />
+      <input name="jump_username" placeholder="Jump user (defaults to SSH user)" className={`${fieldClass} md:col-span-2`} />
+      <input name="jump_password" type="password" placeholder="Jump password, optional" className={`${fieldClass} md:col-span-3`} />
+      <textarea name="jump_private_key" placeholder="Jump private key, optional" className="min-h-20 rounded-xl border-none bg-slate-100 px-4 py-3 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100 md:col-span-3" />
+
       <div className="md:col-span-6 flex justify-end">
         <button disabled={saving} className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-accent px-6 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">
           <Plus size={16} />

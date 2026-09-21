@@ -32,6 +32,13 @@ settings = get_settings()
 EXPECTED_SERVER_COLUMNS: list[tuple[str, str]] = [
     ("encrypted_password", "''"),
     ("encrypted_private_key", "''"),
+    # Optional SSH jump host (bastion) + its own encrypted credentials. All default empty, so an
+    # existing server starts life with a direct connection.
+    ("jump_host", "''"),
+    ("jump_port", "22"),
+    ("jump_username", "''"),
+    ("encrypted_jump_password", "''"),
+    ("encrypted_jump_private_key", "''"),
     ("public_id", "''"),
     ("server_type", "'application'"),
     ("discovered_services_json", "'[]'"),

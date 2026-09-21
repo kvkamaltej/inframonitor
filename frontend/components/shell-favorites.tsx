@@ -6,6 +6,7 @@ import {
   ClipboardPaste,
   CornerDownLeft,
   Loader2,
+  Pencil,
   Play,
   Plus,
   Save,
@@ -14,7 +15,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import { ShellFavorite, createShellFavorite, deleteShellFavorite, getShellFavorites } from "@/lib/api";
+import { ShellFavorite, createShellFavorite, deleteShellFavorite, getShellFavorites, updateShellFavorite } from "@/lib/api";
 
 export type ShellFavoritesProps = {
   token: string;
@@ -99,6 +100,8 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
   const [failure, setFailure] = useState<Failure | null>(null);
   const [notice, setNotice] = useState("");
   const [formOpen, setFormOpen] = useState(false);
+  // 0 = the form is creating a new favorite; a non-zero id = editing that favorite in place.
+  const [editingId, setEditingId] = useState(0);
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
   const [saving, setSaving] = useState(false);
@@ -155,18 +158,37 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
     setFailure(null);
     setNotice("");
     try {
-      const created = await createShellFavorite(token, nextName, nextCommand);
-      setFavorites((current) => [created, ...current.filter((row) => row.id !== created.id)]);
+      if (editingId) {
+        const updated = await updateShellFavorite(token, editingId, { name: nextName, command: nextCommand });
+        setFavorites((current) => current.map((row) => (row.id === updated.id ? updated : row)));
+        setNotice(`Updated “${updated.name}”.`);
+      } else {
+        const created = await createShellFavorite(token, nextName, nextCommand);
+        setFavorites((current) => [created, ...current.filter((row) => row.id !== created.id)]);
+        setNotice(`Saved “${created.name}”.`);
+      }
       setName("");
       setCommand("");
       setFormOpen(false);
-      setNotice(`Saved “${created.name}”.`);
+      setEditingId(0);
     } catch (error) {
       const { kind, detail } = classify(error);
       setFailure({ kind, detail, name: nextName });
     } finally {
       setSaving(false);
     }
+  }
+
+  // Open the form prefilled to edit an existing favorite (rename and/or change its command).
+  function edit(favorite: ShellFavorite) {
+    setArmedRun(0);
+    setArmedDelete(0);
+    setFailure(null);
+    setNotice("");
+    setEditingId(favorite.id);
+    setName(favorite.name);
+    setCommand(favorite.command);
+    setFormOpen(true);
   }
 
   async function remove(favorite: ShellFavorite) {
@@ -239,7 +261,17 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
           <button
             type="button"
             onClick={() => {
-              setFormOpen((open) => !open);
+              setFormOpen((open) => {
+                const next = !open;
+                // Opening the toolbar button is always a NEW favorite, so shed any edit-in-progress
+                // and clear the fields; closing just cancels.
+                if (next) {
+                  setEditingId(0);
+                  setName("");
+                  setCommand("");
+                }
+                return next;
+              });
               setFailure(null);
             }}
             className="inline-flex h-8 items-center gap-1.5 rounded-full bg-accent px-3 text-xs font-semibold text-white transition-colors hover:bg-accent/80"
@@ -283,8 +315,8 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
               disabled={saving || !name.trim() || !command.trim() || remaining < 0}
               className="inline-flex h-8 items-center gap-1.5 rounded-full bg-accent px-4 text-xs font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
             >
-              {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-              {saving ? "Saving…" : "Save"}
+              {saving ? <Loader2 size={14} className="animate-spin" /> : editingId ? <Pencil size={14} /> : <Save size={14} />}
+              {saving ? "Saving…" : editingId ? "Update" : "Save"}
             </button>
             {remaining < 500 ? (
               <span className={`text-[11px] font-semibold ${remaining < 0 ? "text-danger dark:text-red-400" : "text-warn dark:text-amber-400"}`}>
@@ -403,6 +435,18 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
                         </button>
                       )
                     ) : null}
+                    <button
+                      type="button"
+                      onClick={() => edit(favorite)}
+                      title="Edit this favorite (rename or change the command)"
+                      className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-colors ${
+                        editingId === favorite.id
+                          ? "bg-accent/15 text-accent"
+                          : "text-slate-400 hover:bg-slate-100 hover:text-accent dark:text-slate-500 dark:hover:bg-slate-800"
+                      }`}
+                    >
+                      <Pencil size={12} />
+                    </button>
                     {armedDelete === favorite.id ? (
                       <button
                         type="button"

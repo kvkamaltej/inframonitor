@@ -12,6 +12,7 @@ import uuid
 
 import paramiko
 
+from app.core.crypto import decrypt_secret
 from app.models.entities import Server
 from app.schemas.contracts import ContainerRead, CredentialPayload, ImageRead
 from app.services import commands
@@ -27,6 +28,29 @@ class SudoPasswordRequired(RuntimeError):
     pass
 
 
+# Tolerant of remote / WAN / hardened hosts: a distant "live" server (or one whose sshd does slow
+# PAM/LDAP auth or fail2ban banner delays) can need well over 8s to connect + authenticate, which
+# made SOME features flap while quick ones succeeded. 20s is still short enough that a genuinely-down
+# host fails reasonably fast.
+_SSH_TIMEOUTS = {"timeout": 20, "banner_timeout": 20, "auth_timeout": 20}
+
+
+def _apply_auth(kwargs: dict, private_key: str, password: str) -> None:
+    """Fill `kwargs` with a paramiko key or password. A private key wins when both are present."""
+    key_text = (private_key or "").strip()
+    if key_text:
+        last_error: Exception | None = None
+        for key_class in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.DSSKey):
+            try:
+                kwargs["pkey"] = key_class.from_private_key(StringIO(key_text))
+                return
+            except Exception as exc:
+                last_error = exc
+        raise SshOperationError(f"Unable to parse private key: {last_error}")
+    if password:
+        kwargs["password"] = password
+
+
 def _client(server: Server, credentials: CredentialPayload) -> paramiko.SSHClient:
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -34,28 +58,57 @@ def _client(server: Server, credentials: CredentialPayload) -> paramiko.SSHClien
         "hostname": server.ip_address,
         "port": server.ssh_port,
         "username": server.username,
-        # Tolerant of remote / WAN / hardened hosts: a distant "live" server (or one whose
-        # sshd does slow PAM/LDAP auth or fail2ban banner delays) can need well over the old 8s
-        # to connect + authenticate, which made SOME features flap while quick ones succeeded.
-        # 20s is still short enough that a genuinely-down host fails reasonably fast.
-        "timeout": 20,
-        "banner_timeout": 20,
-        "auth_timeout": 20,
+        **_SSH_TIMEOUTS,
     }
-    if credentials.private_key.strip():
-        key_text = credentials.private_key.strip()
-        last_error: Exception | None = None
-        for key_class in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.DSSKey):
-            try:
-                kwargs["pkey"] = key_class.from_private_key(StringIO(key_text))
-                break
-            except Exception as exc:
-                last_error = exc
-        if "pkey" not in kwargs:
-            raise SshOperationError(f"Unable to parse private key: {last_error}")
-    elif credentials.password:
-        kwargs["password"] = credentials.password
+    _apply_auth(kwargs, credentials.private_key, credentials.password)
+
+    # Optional jump host (bastion): open the connection to the target THROUGH it. The jump keeps
+    # its own credentials, falling back to the server's when blank (one key often reaches both).
+    jump_client: paramiko.SSHClient | None = None
+    if (getattr(server, "jump_host", "") or "").strip():
+        jump_password = decrypt_secret(server.encrypted_jump_password) if server.encrypted_jump_password else ""
+        jump_key = decrypt_secret(server.encrypted_jump_private_key) if server.encrypted_jump_private_key else ""
+        if not jump_password and not jump_key:
+            jump_password, jump_key = credentials.password, credentials.private_key
+        jump_client = paramiko.SSHClient()
+        jump_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        jkwargs: dict = {
+            "hostname": server.jump_host.strip(),
+            "port": server.jump_port or 22,
+            "username": (server.jump_username or "").strip() or server.username,
+            **_SSH_TIMEOUTS,
+        }
+        _apply_auth(jkwargs, jump_key, jump_password)
+        try:
+            jump_client.connect(**jkwargs)
+        except Exception as exc:
+            jump_client.close()
+            raise SshOperationError(f"Jump host {server.jump_host}: {exc}") from exc
+        transport = jump_client.get_transport()
+        try:
+            kwargs["sock"] = transport.open_channel(
+                "direct-tcpip", (server.ip_address, server.ssh_port), ("", 0)
+            )
+        except Exception as exc:
+            jump_client.close()
+            raise SshOperationError(
+                f"Jump host {server.jump_host} cannot open a channel to {server.ip_address}:{server.ssh_port}: {exc}"
+            ) from exc
+
     client.connect(**kwargs)
+
+    # Keep the jump connection alive for the target's lifetime, and close it when the target closes.
+    if jump_client is not None:
+        client._jump_client = jump_client  # type: ignore[attr-defined]  # hold a reference so it is not GC'd
+        _original_close = client.close
+
+        def _close_both() -> None:
+            try:
+                _original_close()
+            finally:
+                jump_client.close()
+
+        client.close = _close_both  # type: ignore[method-assign]
     return client
 
 

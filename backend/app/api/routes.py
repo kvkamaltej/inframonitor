@@ -136,6 +136,7 @@ from app.schemas.contracts import (
     SftpUploadResult,
     ShellFavoriteCreate,
     ShellFavoriteRead,
+    ShellFavoriteUpdate,
     Summary,
     TokenResponse,
     TomcatActionRequest,
@@ -1292,6 +1293,14 @@ def create_server(payload: ServerCreate, _: dict = Depends(require_admin), db: S
     if server and (payload.password or payload.private_key):
         _save_credentials(db, server,CredentialPayload(password=payload.password, private_key=payload.private_key))
         db.commit()
+    # Jump-host credentials are encrypted straight onto the row (Fernet, not Vault) -- blank leaves
+    # the bastion reusing the server's own credentials.
+    if server and (payload.jump_password or payload.jump_private_key):
+        if payload.jump_password:
+            server.encrypted_jump_password = encrypt_secret(payload.jump_password)
+        if payload.jump_private_key:
+            server.encrypted_jump_private_key = encrypt_secret(payload.jump_private_key)
+        db.commit()
     if payload.password or payload.private_key:
         if server:
             try:
@@ -1300,7 +1309,9 @@ def create_server(payload: ServerCreate, _: dict = Depends(require_admin), db: S
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Server saved, but discovery failed: {exc}") from exc
             db.refresh(server)
             return to_read(server)
-    return created
+    # Re-read so the response reflects post-create mutations (e.g. jump credentials encrypted above);
+    # `created` was computed before those and would report has_jump_credentials=False.
+    return to_read(server) if server else created
 
 
 @router.post("/servers/import", response_model=ServerImportResult)
@@ -1565,7 +1576,7 @@ def delete_server(server_id: str, _: dict = Depends(require_admin), db: Session 
     db.commit()
 
 
-_EDITABLE_TEXT_FIELDS = ("hostname", "alias", "ip_address", "username", "environment", "server_type", "business_owner", "support_contact", "os_kind")
+_EDITABLE_TEXT_FIELDS = ("hostname", "alias", "ip_address", "username", "environment", "server_type", "business_owner", "support_contact", "os_kind", "jump_host", "jump_username")
 
 
 @router.patch("/servers/{server_id}", response_model=ServerRead)
@@ -1602,8 +1613,16 @@ def update_server(server_id: str, payload: ServerUpdate, _: dict = Depends(requi
             setattr(server, field, data[field].strip())
     if "ssh_port" in data and data["ssh_port"] is not None:
         server.ssh_port = int(data["ssh_port"])
+    if "jump_port" in data and data["jump_port"] is not None:
+        server.jump_port = int(data["jump_port"]) or 22
     if "tags" in data and data["tags"] is not None:
         server.tags = ",".join(sorted({tag.strip() for tag in data["tags"] if tag.strip()}))
+    # Jump credentials: only overwrite when a non-empty value is supplied (blank keeps the stored
+    # one, mirroring how the server's own password/key edit works via PUT /credentials).
+    if data.get("jump_password"):
+        server.encrypted_jump_password = encrypt_secret(data["jump_password"])
+    if data.get("jump_private_key"):
+        server.encrypted_jump_private_key = encrypt_secret(data["jump_private_key"])
 
     db.commit()
     db.refresh(server)
@@ -2983,6 +3002,36 @@ def create_shell_favorite(payload: ShellFavoriteCreate, claims: dict = Depends(r
         # actually guarantees uniqueness, so report the conflict instead of a 500
         db.rollback()
         raise _favorite_conflict(name) from exc
+    db.refresh(favorite)
+    return _favorite_read(favorite)
+
+
+@router.patch("/shell/favorites/{favorite_id}", response_model=ShellFavoriteRead)
+def update_shell_favorite(favorite_id: int, payload: ShellFavoriteUpdate, claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> ShellFavoriteRead:
+    user = _current_user(db, claims)
+    favorite = db.scalar(select(ShellFavorite).where(ShellFavorite.id == favorite_id, ShellFavorite.user_id == user.id))
+    if not favorite:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Favorite not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "name" in data and data["name"] is not None:
+        name = data["name"].strip()
+        if not name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A favorite name is required")
+        # a rename that collides with another of this user's favorites is a clean 409
+        clash = db.scalar(select(ShellFavorite).where(
+            ShellFavorite.user_id == user.id, ShellFavorite.name == name, ShellFavorite.id != favorite.id))
+        if clash:
+            raise _favorite_conflict(name)
+        favorite.name = name
+    if "command" in data and data["command"] is not None:
+        if not data["command"].strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A command is required")
+        favorite.command = data["command"]
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise _favorite_conflict(favorite.name) from exc
     db.refresh(favorite)
     return _favorite_read(favorite)
 

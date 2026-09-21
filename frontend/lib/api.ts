@@ -104,6 +104,12 @@ export type Server = {
   database_logs: Array<Record<string, string>>;
   tomcat: TomcatInstance[];
   has_credentials: boolean;
+  // optional SSH jump host (bastion). jump_host "" = direct. has_jump_credentials says whether a
+  // bastion-specific credential is stored (vs reusing the server's own).
+  jump_host: string;
+  jump_port: number;
+  jump_username: string;
+  has_jump_credentials: boolean;
   last_discovery: string | null;
   // vitals as of vitals_checked_at. cpu_percent is -1 when never sampled, which is not 0%.
   uptime_seconds: number;
@@ -719,6 +725,12 @@ export type ServerUpdate = Partial<{
   business_owner: string;
   support_contact: string;
   os_kind: string;
+  jump_host: string;
+  jump_port: number;
+  jump_username: string;
+  // blank string keeps the stored jump credential
+  jump_password: string;
+  jump_private_key: string;
 }>;
 
 export async function updateServer(token: string, serverId: string, payload: ServerUpdate): Promise<Server> {
@@ -1404,6 +1416,18 @@ export async function createShellFavorite(token: string, name: string, command: 
   return request<ShellFavorite>("/shell/favorites", token, {
     method: "POST",
     body: JSON.stringify({ name, command })
+  });
+}
+
+export async function updateShellFavorite(
+  token: string,
+  id: number,
+  payload: { name?: string; command?: string }
+): Promise<ShellFavorite> {
+  // A rename that collides with another favorite comes back 409, surfaced as a thrown Error.
+  return request<ShellFavorite>(`/shell/favorites/${id}`, token, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
   });
 }
 

@@ -80,6 +80,13 @@ class Server(Base):
     ip_address: Mapped[str] = mapped_column(String(64), index=True)
     ssh_port: Mapped[int] = mapped_column(Integer, default=22)
     username: Mapped[str] = mapped_column(String(128))
+    # Optional SSH jump host (bastion). When jump_host is set, every connection to this server is
+    # tunnelled through it (paramiko direct-tcpip channel). jump_username defaults to `username`
+    # and the jump credentials (below) fall back to the server's own when left blank -- common when
+    # one key/login reaches both. "" means a direct connection.
+    jump_host: Mapped[str] = mapped_column(String(255), default="")
+    jump_port: Mapped[int] = mapped_column(Integer, default=22)
+    jump_username: Mapped[str] = mapped_column(String(128), default="")
     environment: Mapped[str] = mapped_column(String(64), index=True)
     server_type: Mapped[str] = mapped_column(String(64), default="application", index=True)
     tags: Mapped[str] = mapped_column(String(512), default="")
@@ -103,6 +110,10 @@ class Server(Base):
     installed_exporters: Mapped[str] = mapped_column(Text, default="")
     encrypted_password: Mapped[str] = mapped_column(Text, default="")
     encrypted_private_key: Mapped[str] = mapped_column(Text, default="")
+    # Jump-host credentials, encrypted with the same Fernet path as the server's own. Blank means
+    # "reuse the server credentials for the bastion too".
+    encrypted_jump_password: Mapped[str] = mapped_column(Text, default="")
+    encrypted_jump_private_key: Mapped[str] = mapped_column(Text, default="")
     discovered_services_json: Mapped[str] = mapped_column(Text, default="[]")
     storage_json: Mapped[str] = mapped_column(Text, default="[]")
     database_logs_json: Mapped[str] = mapped_column(Text, default="[]")

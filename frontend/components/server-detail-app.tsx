@@ -1838,6 +1838,11 @@ function EditServerDialog({ server, onClose, onSave }: { server: Server; onClose
   const [businessOwner, setBusinessOwner] = useState(server.business_owner ?? "");
   const [supportContact, setSupportContact] = useState(server.support_contact ?? "");
   const [osKind, setOsKind] = useState(server.os_kind || "linux");
+  const [jumpHost, setJumpHost] = useState(server.jump_host ?? "");
+  const [jumpPort, setJumpPort] = useState(String(server.jump_port || 22));
+  const [jumpUsername, setJumpUsername] = useState(server.jump_username ?? "");
+  const [jumpPassword, setJumpPassword] = useState("");
+  const [jumpPrivateKey, setJumpPrivateKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [localError, setLocalError] = useState("");
 
@@ -1865,7 +1870,13 @@ function EditServerDialog({ server, onClose, onSave }: { server: Server; onClose
         tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
         business_owner: businessOwner.trim(),
         support_contact: supportContact.trim(),
-        os_kind: osKind
+        os_kind: osKind,
+        jump_host: jumpHost.trim(),
+        jump_port: Number(jumpPort) || 22,
+        jump_username: jumpUsername.trim(),
+        // blank keeps the stored jump credential (backend only overwrites on a non-empty value)
+        jump_password: jumpPassword,
+        jump_private_key: jumpPrivateKey
       });
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : "Unable to save changes");
@@ -1932,6 +1943,32 @@ function EditServerDialog({ server, onClose, onSave }: { server: Server; onClose
           <div>
             <label className={labelClass}>Support contact</label>
             <input value={supportContact} onChange={(event) => setSupportContact(event.target.value)} placeholder="optional" className={field} />
+          </div>
+          <div className="sm:col-span-2 border-t border-line pt-3 dark:border-slate-700">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Jump host (bastion) — optional</p>
+            <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">Tunnel every connection through an SSH bastion. Blank host = direct. Leave the jump credentials blank to keep the stored ones (or reuse the server&apos;s own).</p>
+          </div>
+          <div>
+            <label className={labelClass}>Jump host / bastion IP</label>
+            <input value={jumpHost} onChange={(event) => setJumpHost(event.target.value)} placeholder="none (direct)" className={field} />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className={labelClass}>Jump port</label>
+              <input value={jumpPort} onChange={(event) => setJumpPort(event.target.value)} type="number" min={1} max={65535} className={field} />
+            </div>
+            <div>
+              <label className={labelClass}>Jump user</label>
+              <input value={jumpUsername} onChange={(event) => setJumpUsername(event.target.value)} placeholder={server.username} className={field} />
+            </div>
+          </div>
+          <div>
+            <label className={labelClass}>Jump password <span className="font-normal normal-case text-slate-400">{server.has_jump_credentials ? "(stored — blank keeps it)" : "(optional)"}</span></label>
+            <input value={jumpPassword} onChange={(event) => setJumpPassword(event.target.value)} type="password" autoComplete="new-password" placeholder={server.has_jump_credentials ? "••••••••" : "optional"} className={field} />
+          </div>
+          <div>
+            <label className={labelClass}>Jump private key <span className="font-normal normal-case text-slate-400">(blank keeps stored)</span></label>
+            <textarea value={jumpPrivateKey} onChange={(event) => setJumpPrivateKey(event.target.value)} placeholder="optional" className={`${field} min-h-11 py-2`} />
           </div>
           {localError ? <p className="text-xs font-medium text-danger dark:text-red-400 sm:col-span-2">{localError}</p> : null}
           <p className="text-xs text-slate-500 dark:text-slate-400 sm:col-span-2">SSH credentials and discovered facts are unchanged — use “Manage SSH credentials” for those.</p>

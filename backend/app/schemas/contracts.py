@@ -51,6 +51,13 @@ class ServerCreate(BaseModel):
     os_kind: str = "linux"
     password: str = ""
     private_key: str = ""
+    # Optional SSH jump host (bastion). jump_host "" = direct connection. jump credentials blank =
+    # reuse the server's own for the bastion too.
+    jump_host: str = ""
+    jump_port: int = 22
+    jump_username: str = ""
+    jump_password: str = ""
+    jump_private_key: str = ""
     # optional group (folder public_id) to create the server directly into; "" / None means the
     # "Unassigned" bucket. Hostname uniqueness is scoped to this group.
     folder_id: str | None = None
@@ -71,6 +78,12 @@ class ServerUpdate(BaseModel):
     business_owner: str | None = None
     support_contact: str | None = None
     os_kind: str | None = None
+    jump_host: str | None = None
+    jump_port: int | None = None
+    jump_username: str | None = None
+    # blank string keeps the stored jump credential (mirrors password/private_key on the server).
+    jump_password: str | None = None
+    jump_private_key: str | None = None
 
 
 class ServerRead(BaseModel):
@@ -103,6 +116,12 @@ class ServerRead(BaseModel):
     database_logs: list[dict] = Field(default_factory=list)
     tomcat: list[dict] = Field(default_factory=list)
     has_credentials: bool = False
+    # jump host (bastion) config, read-only. jump_host "" = direct. has_jump_credentials says
+    # whether a bastion-specific credential is stored (vs reusing the server's).
+    jump_host: str = ""
+    jump_port: int = 22
+    jump_username: str = ""
+    has_jump_credentials: bool = False
     business_owner: str
     support_contact: str
     # per-server monitoring ingestion state (read-only here; mutated through the dedicated
@@ -510,6 +529,12 @@ class ShellFavoriteRead(BaseModel):
 class ShellFavoriteCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     command: str = Field(min_length=1, max_length=4000)
+
+
+class ShellFavoriteUpdate(BaseModel):
+    # PATCH: either field may be sent on its own. Both are validated non-empty when present.
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    command: str | None = Field(default=None, min_length=1, max_length=4000)
 
 
 class SftpEntry(BaseModel):
