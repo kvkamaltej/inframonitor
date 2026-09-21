@@ -288,17 +288,28 @@ def _ensure_shell_favorites_unique() -> None:
         return
     new_target = {"user_id", "name", "server_public_id"}
     old_target = {"user_id", "name"}
-    for constraint in inspector.get_unique_constraints("shell_favorites"):
-        if set(constraint.get("column_names") or ()) == new_target:
-            return  # fresh table created by create_all already carries the composite constraint
-    for index in inspector.get_indexes("shell_favorites"):
-        if index.get("unique") and set(index.get("column_names") or ()) == new_target:
-            return
+    constraints = inspector.get_unique_constraints("shell_favorites")
+    indexes = inspector.get_indexes("shell_favorites")
+    if any(set(c.get("column_names") or ()) == new_target for c in constraints):
+        return  # fresh table created by create_all already carries the composite constraint
+    if any(ix.get("unique") and set(ix.get("column_names") or ()) == new_target for ix in indexes):
+        return
+    is_pg = engine.dialect.name == "postgresql"
+    # Names that back a UNIQUE CONSTRAINT: on PostgreSQL these must be dropped as constraints, never
+    # as indexes (DROP INDEX on a constraint-backed index errors) -- that was the first-deploy crash.
+    constraint_names = {c.get("name") for c in constraints if c.get("name")}
     with engine.begin() as conn:
-        # drop any old 2-column unique index (its name varies by how it was created)
-        for index in inspector.get_indexes("shell_favorites"):
-            if index.get("unique") and set(index.get("column_names") or ()) == old_target and index.get("name"):
-                conn.execute(text(f"DROP INDEX IF EXISTS {index['name']}"))
+        for constraint in constraints:
+            name = constraint.get("name")
+            if set(constraint.get("column_names") or ()) == old_target and name and is_pg:
+                conn.execute(text(f"ALTER TABLE shell_favorites DROP CONSTRAINT IF EXISTS {name}"))
+        for index in indexes:
+            name = index.get("name")
+            # a plain unique index (SQLite's original ix_shell_favorites_user_name) can be dropped;
+            # skip auto-indexes and anything that actually backs a constraint (handled above).
+            if (index.get("unique") and set(index.get("column_names") or ()) == old_target and name
+                    and name not in constraint_names and not name.startswith("sqlite_autoindex")):
+                conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
         conn.execute(
             text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ix_shell_favorites_user_name_server "
