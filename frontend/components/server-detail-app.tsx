@@ -1605,6 +1605,22 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                   >
                     <FileText size={14} /> Fetch
                   </button>
+                  {/* One-click common system logs — /var/log/messages (RHEL/CentOS), /var/log/syslog
+                      (Debian/Ubuntu), auth/secure, dmesg. Picks the file source and fetches. */}
+                  <div className="flex w-full flex-wrap items-center gap-1.5 pt-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Quick</span>
+                    {["/var/log/messages", "/var/log/syslog", "/var/log/secure", "/var/log/auth.log", "/var/log/dmesg"].map((path) => (
+                      <button
+                        key={path}
+                        type="button"
+                        disabled={busy !== ""}
+                        onClick={() => { setLogSource("file"); setLogQuery(path); void loadOnDemandLog("file", path); }}
+                        className="inline-flex h-7 items-center rounded-full bg-white px-2.5 font-mono text-[11px] font-medium text-slate-600 ring-1 ring-slate-200 transition-colors hover:text-accent disabled:opacity-50 dark:bg-slate-950 dark:text-slate-300 dark:ring-slate-700"
+                      >
+                        {path}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               ) : null}
               <pre className={`${isFullscreen ? "flex-1 max-h-none" : "max-h-[560px]"} whitespace-pre-wrap break-words overflow-auto bg-slate-950 p-4 text-xs leading-relaxed text-slate-100`}>{logs.length ? logs.join("\n") : "Pick a source above and Fetch, or open a container / service / Tomcat / database log."}</pre>

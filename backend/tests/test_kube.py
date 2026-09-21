@@ -249,6 +249,29 @@ def test_pod_logs_route(client, cluster_id, monkeypatch):
     assert body["container"] == "api" and body["tail"] == 50 and "line1" in body["log"]
 
 
+def test_services_route(client, cluster_id, monkeypatch):
+    services = [{
+        "name": "api", "namespace": "default", "type": "ClusterIP", "cluster_ip": "10.96.0.10",
+        "ports": "80:8080/TCP", "selector": "app=api", "age": "5d",
+    }]
+    monkeypatch.setattr(kube, "list_services", lambda conn, namespace: services)
+    r = client.get(f"/api/kube/clusters/{cluster_id}/services?namespace=default")
+    assert r.status_code == 200
+    body = r.json()[0]
+    assert body["name"] == "api" and body["selector"] == "app=api" and body["ports"] == "80:8080/TCP"
+
+
+def test_service_pods_route(client, cluster_id, monkeypatch):
+    pods = [{
+        "name": "api-abc", "namespace": "default", "phase": "Running", "ready": "1/1",
+        "restarts": 0, "node": "worker-1", "pod_ip": "10.1.2.3", "age": "3h", "containers": ["api"],
+    }]
+    monkeypatch.setattr(kube, "service_pods", lambda conn, ns, name: pods)
+    r = client.get(f"/api/kube/clusters/{cluster_id}/services/default/api/pods")
+    assert r.status_code == 200
+    assert r.json()[0]["containers"] == ["api"]
+
+
 def test_deployments_route(client, cluster_id, monkeypatch):
     deps = [{
         "name": "web", "namespace": "default", "ready": "2/3", "replicas": 3,

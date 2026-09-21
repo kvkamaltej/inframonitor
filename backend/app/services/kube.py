@@ -420,6 +420,68 @@ def list_pods(conn: dict, namespace: str = "") -> list[dict]:
         raise KubeError(_clean(exc)) from exc
 
 
+def _service_dict(svc: Any) -> dict:
+    spec = getattr(svc, "spec", None)
+    ports = []
+    for p in (getattr(spec, "ports", None) or []):
+        port = getattr(p, "port", "")
+        target = getattr(p, "target_port", "")
+        proto = getattr(p, "protocol", "") or "TCP"
+        ports.append(f"{port}:{target}/{proto}" if str(target) else f"{port}/{proto}")
+    # the label selector that maps this Service to its backing pods; "" for a selector-less service
+    selector = getattr(spec, "selector", None) or {}
+    selector_str = ",".join(f"{k}={v}" for k, v in selector.items())
+    return {
+        "name": str(svc.metadata.name),
+        "namespace": str(getattr(svc.metadata, "namespace", "") or ""),
+        "type": str(getattr(spec, "type", "") or ""),
+        "cluster_ip": str(getattr(spec, "cluster_ip", "") or ""),
+        "ports": ", ".join(ports),
+        "selector": selector_str,
+        "age": _age(getattr(svc.metadata, "creation_timestamp", None)),
+    }
+
+
+def list_services(conn: dict, namespace: str = "") -> list[dict]:
+    try:
+        with _api_client(conn) as api_client:
+            from kubernetes import client  # type: ignore
+
+            core = client.CoreV1Api(api_client)
+            if namespace:
+                result = core.list_namespaced_service(namespace, _request_timeout=REQUEST_TIMEOUT_SECONDS)
+            else:
+                result = core.list_service_for_all_namespaces(_request_timeout=REQUEST_TIMEOUT_SECONDS)
+            return [_service_dict(svc) for svc in result.items]
+    except KubeError:
+        raise
+    except Exception as exc:
+        raise KubeError(_clean(exc)) from exc
+
+
+def service_pods(conn: dict, namespace: str, name: str) -> list[dict]:
+    """The pods backing a Service, resolved through its label selector -- so "view logs for a
+    service" can offer the service's own pods. A selector-less service returns []."""
+    try:
+        with _api_client(conn) as api_client:
+            from kubernetes import client  # type: ignore
+
+            core = client.CoreV1Api(api_client)
+            svc = core.read_namespaced_service(name, namespace, _request_timeout=REQUEST_TIMEOUT_SECONDS)
+            selector = getattr(getattr(svc, "spec", None), "selector", None) or {}
+            if not selector:
+                return []
+            label_selector = ",".join(f"{k}={v}" for k, v in selector.items())
+            result = core.list_namespaced_pod(
+                namespace, label_selector=label_selector, _request_timeout=REQUEST_TIMEOUT_SECONDS
+            )
+            return [_pod_dict(pod) for pod in result.items]
+    except KubeError:
+        raise
+    except Exception as exc:
+        raise KubeError(_clean(exc)) from exc
+
+
 def pod_logs(conn: dict, namespace: str, pod: str, container: str = "", tail: int = 200, previous: bool = False) -> dict:
     try:
         with _api_client(conn) as api_client:

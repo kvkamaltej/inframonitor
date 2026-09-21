@@ -1641,6 +1641,17 @@ export type KubeDeployment = {
   age: string;
 };
 
+export type KubeService = {
+  name: string;
+  namespace: string;
+  type: string;
+  cluster_ip: string;
+  ports: string;
+  // label selector "k=v,k2=v2" that maps the service to its pods; "" for a selector-less service
+  selector: string;
+  age: string;
+};
+
 export type KubeHealth = {
   livez_ok: boolean;
   readyz_ok: boolean;
@@ -1754,6 +1765,19 @@ export async function getKubePodLogs(
 export async function getKubeDeployments(token: string, id: string, namespace?: string): Promise<KubeDeployment[]> {
   const query = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
   return request<KubeDeployment[]>(`/kube/clusters/${encodeURIComponent(id)}/deployments${query}`, token);
+}
+
+export async function getKubeServices(token: string, id: string, namespace?: string): Promise<KubeService[]> {
+  const query = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+  return request<KubeService[]>(`/kube/clusters/${encodeURIComponent(id)}/services${query}`, token);
+}
+
+// The pods backing a service (via its label selector), so the UI can view a service's logs.
+export async function getKubeServicePods(token: string, id: string, namespace: string, name: string): Promise<KubePod[]> {
+  return request<KubePod[]>(
+    `/kube/clusters/${encodeURIComponent(id)}/services/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/pods`,
+    token
+  );
 }
 
 export async function getKubeHealth(token: string, id: string): Promise<KubeHealth> {

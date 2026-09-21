@@ -1070,6 +1070,17 @@ class KubePod(BaseModel):
     containers: list[str] = Field(default_factory=list)
 
 
+class KubeService(BaseModel):
+    name: str
+    namespace: str = ""
+    type: str = ""          # ClusterIP | NodePort | LoadBalancer | ExternalName
+    cluster_ip: str = ""
+    ports: str = ""         # "80:8080/TCP, 443:8443/TCP"
+    # label selector that maps the service to its pods ("k=v,k2=v2"); "" for a selector-less service
+    selector: str = ""
+    age: str = ""
+
+
 class KubePodLogs(BaseModel):
     container: str = ""
     log: str = ""

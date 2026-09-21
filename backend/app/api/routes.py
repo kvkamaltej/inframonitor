@@ -103,6 +103,7 @@ from app.schemas.contracts import (
     KubeOverview,
     KubePod,
     KubePodLogs,
+    KubeService,
     KubeScaleRequest,
     KubeTestResult,
     LoginRequest,
@@ -4288,6 +4289,21 @@ def kube_events(cluster_id: str, namespace: str = "", _: dict = Depends(require_
     cluster = _cluster_or_404(db, cluster_id)
     events = _kube_call(kube.list_events, _cluster_conn(cluster), namespace)
     return [KubeEvent(**ev) for ev in events]
+
+
+@router.get("/kube/clusters/{cluster_id}/services", response_model=list[KubeService])
+def kube_services(cluster_id: str, namespace: str = "", _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubeService]:
+    cluster = _cluster_or_404(db, cluster_id)
+    services = _kube_call(kube.list_services, _cluster_conn(cluster), namespace)
+    return [KubeService(**svc) for svc in services]
+
+
+@router.get("/kube/clusters/{cluster_id}/services/{namespace}/{name}/pods", response_model=list[KubePod])
+def kube_service_pods(cluster_id: str, namespace: str, name: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubePod]:
+    """The pods backing a Service (via its label selector), so the UI can view a service's logs."""
+    cluster = _cluster_or_404(db, cluster_id)
+    pods = _kube_call(kube.service_pods, _cluster_conn(cluster), namespace, name)
+    return [KubePod(**pod) for pod in pods]
 
 
 @router.post("/kube/clusters/{cluster_id}/pods/{namespace}/{pod}/restart", response_model=ActionResult)
