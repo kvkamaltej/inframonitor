@@ -729,6 +729,13 @@ function ConnectionDialog({
   const [environment, setEnvironment] = useState(editing?.environment ?? "");
   const [group, setGroup] = useState(editing?.group ?? "");
   const [showAllDatabases, setShowAllDatabases] = useState<boolean>(editing?.show_all_databases ?? false);
+  // Optional SSH tunnel (bastion). Typed here, independent of any managed server.
+  const [sshHost, setSshHost] = useState(editing?.ssh_host ?? "");
+  const [sshPort, setSshPort] = useState<number>(editing?.ssh_port ?? 22);
+  const [sshUsername, setSshUsername] = useState(editing?.ssh_username ?? "");
+  const [sshPassword, setSshPassword] = useState("");
+  const [sshPrivateKey, setSshPrivateKey] = useState("");
+  const [sshOpen, setSshOpen] = useState<boolean>(Boolean(editing?.ssh_host));
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [note, setNote] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
@@ -767,7 +774,11 @@ function ConnectionDialog({
       database: database.trim(),
       environment: environment || "",
       group: group.trim() ? group.trim() : null,
-      show_all_databases: showAllDatabases
+      show_all_databases: showAllDatabases,
+      // SSH tunnel: blank host = direct. Credentials are write-only, added by the save/test spreads.
+      ssh_host: sshHost.trim(),
+      ssh_port: Number(sshPort) || 22,
+      ssh_username: sshUsername.trim()
     };
   }
 
@@ -778,7 +789,7 @@ function ConnectionDialog({
     setTesting(true);
     setNote(null);
     try {
-      const res = await testDbConnection(token, { ...input(), password });
+      const res = await testDbConnection(token, { ...input(), password, ssh_password: sshPassword, ssh_private_key: sshPrivateKey });
       setNote({ kind: res.ok ? "ok" : "error", text: res.message });
     } catch (e) {
       setNote({ kind: "error", text: e instanceof Error ? e.message : "Connection test failed" });
@@ -794,11 +805,13 @@ function ConnectionDialog({
     try {
       if (editing) {
         const payload: Partial<DbConnectionInput> = { ...input() };
-        // A blank password on edit keeps the stored one; only send it when the user typed one.
+        // A blank password/key on edit keeps the stored one; only send when the user typed one.
         if (password) payload.password = password;
+        if (sshPassword) payload.ssh_password = sshPassword;
+        if (sshPrivateKey) payload.ssh_private_key = sshPrivateKey;
         await updateDbConnection(token, editing.id, payload);
       } else {
-        await createDbConnection(token, { ...input(), password });
+        await createDbConnection(token, { ...input(), password, ssh_password: sshPassword, ssh_private_key: sshPrivateKey });
       }
       onSaved();
     } catch (e) {
@@ -906,6 +919,47 @@ function ConnectionDialog({
               <span className="ml-1.5 font-normal text-muted">— browse every database on the server, not just the default</span>
             </span>
           </label>
+        )}
+
+        {/* Optional SSH tunnel (bastion): reach the DB through a jump host. Typed here, not chosen. */}
+        {!isSqlite && (
+          <div className="md:col-span-2 overflow-hidden rounded-xl ring-1 ring-edge">
+            <button type="button" onClick={() => setSshOpen((v) => !v)} className="flex w-full items-center gap-2 px-4 py-2.5 text-left transition-colors hover:bg-surface">
+              <span className="text-xs font-semibold uppercase tracking-wider text-muted">SSH tunnel (jump host)</span>
+              {sshHost.trim() ? (
+                <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-accent">on · {sshHost.trim()}</span>
+              ) : (
+                <span className="text-[11px] font-normal normal-case text-muted">optional — reach the database through a bastion</span>
+              )}
+              <span className="ml-auto text-[10px] text-muted">{sshOpen ? "▲" : "▼"}</span>
+            </button>
+            {sshOpen ? (
+              <div className="grid gap-3 border-t border-edge px-4 py-3 md:grid-cols-2">
+                <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+                  Jump host / bastion
+                  <input value={sshHost} onChange={(e) => setSshHost(e.target.value)} placeholder="bastion.example — blank = direct" className={inputClass} />
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+                    SSH port
+                    <input type="number" min={1} max={65535} value={sshPort} onChange={(e) => setSshPort(Number(e.target.value))} className={inputClass} />
+                  </label>
+                  <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+                    SSH user
+                    <input value={sshUsername} onChange={(e) => setSshUsername(e.target.value)} placeholder="user" className={inputClass} />
+                  </label>
+                </div>
+                <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+                  SSH password <span className="font-normal normal-case text-muted">{editing?.has_ssh_credentials ? "(stored — blank keeps it)" : "(optional)"}</span>
+                  <input type="password" value={sshPassword} onChange={(e) => setSshPassword(e.target.value)} autoComplete="new-password" placeholder={editing?.has_ssh_credentials ? "••••••••" : "optional"} className={inputClass} />
+                </label>
+                <label className="grid gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted md:col-span-2">
+                  SSH private key <span className="font-normal normal-case text-muted">(blank keeps stored)</span>
+                  <textarea value={sshPrivateKey} onChange={(e) => setSshPrivateKey(e.target.value)} placeholder="optional — paste an OpenSSH private key" className="min-h-20 w-full rounded-xl border-none bg-surface px-4 py-2 text-sm font-medium text-fg outline-none ring-1 ring-edge transition-colors focus:ring-2 focus:ring-accent" />
+                </label>
+              </div>
+            ) : null}
+          </div>
         )}
 
         <div className="flex flex-wrap items-center gap-3 md:col-span-2">

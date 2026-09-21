@@ -1079,6 +1079,12 @@ export type DbConnection = {
   // expands to every database on the server rather than only its stored default database.
   show_all_databases: boolean;
   has_password: boolean;
+  // optional SSH tunnel (bastion). ssh_host "" = direct. has_ssh_credentials = a tunnel credential
+  // is stored (vs none / agent).
+  ssh_host: string;
+  ssh_port: number;
+  ssh_username: string;
+  has_ssh_credentials: boolean;
   created_at: string;
 };
 
@@ -1095,6 +1101,13 @@ export type DbConnectionInput = {
   environment?: string;
   // persisted "Show all databases" default; optional so older callers stay backward-compatible
   show_all_databases?: boolean;
+  // optional SSH tunnel (bastion). ssh_host "" = direct; ssh credentials write-only (blank keeps
+  // the stored one on edit).
+  ssh_host?: string;
+  ssh_port?: number;
+  ssh_username?: string;
+  ssh_password?: string;
+  ssh_private_key?: string;
 };
 
 export type DbTable = {

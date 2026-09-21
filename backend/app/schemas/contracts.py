@@ -666,6 +666,12 @@ class DbConnectionCreate(BaseModel):
     # when true the schema browser lists every database on the server, not just this connection's
     # own `database`. Persisted on the connection; defaults False.
     show_all_databases: bool = False
+    # Optional SSH tunnel (bastion). ssh_host "" = direct connection. Credentials blank = none.
+    ssh_host: str = Field(default="", max_length=255)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_username: str = Field(default="", max_length=255)
+    ssh_password: str = Field(default="", max_length=1024)
+    ssh_private_key: str = Field(default="", max_length=32768)
     # folder name (the "group"); resolved to an existing Folder in the route, else left unassigned.
     group: str | None = None
 
@@ -682,6 +688,12 @@ class DbConnectionUpdate(BaseModel):
     database: str | None = None
     environment: str | None = Field(default=None, max_length=32)
     show_all_databases: bool | None = None
+    ssh_host: str | None = None
+    ssh_port: int | None = Field(default=None, ge=1, le=65535)
+    ssh_username: str | None = None
+    # blank keeps the stored ssh credential (mirrors password)
+    ssh_password: str | None = None
+    ssh_private_key: str | None = None
     group: str | None = None
 
 
@@ -697,6 +709,12 @@ class DbConnectionRead(BaseModel):
     database: str = ""
     environment: str = ""
     show_all_databases: bool = False
+    # SSH tunnel config, read-only. ssh_host "" = direct. has_ssh_credentials says whether a tunnel
+    # credential is stored.
+    ssh_host: str = ""
+    ssh_port: int = 22
+    ssh_username: str = ""
+    has_ssh_credentials: bool = False
     group: str | None = None
     has_password: bool = False
     created_at: datetime

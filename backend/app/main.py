@@ -131,6 +131,13 @@ EXPECTED_DB_CONNECTION_COLUMNS: list[tuple[str, str]] = [
     # feature/db-connect follow-on: browse every database on the server, not just the connection's
     # own `database`. A boolean, so the DEFAULT literal is dialect-specific -- see _db_connection_ddl.
     ("show_all_databases", "0"),
+    # SSH tunnel (bastion) for the connection + its own encrypted credentials. All default empty, so
+    # an existing connection keeps its direct connection.
+    ("ssh_host", "''"),
+    ("ssh_port", "22"),
+    ("ssh_username", "''"),
+    ("encrypted_ssh_password", "''"),
+    ("encrypted_ssh_private_key", "''"),
 ]
 
 

@@ -155,6 +155,7 @@ from app.services.csv_import import CsvImportError, import_servers
 from app.services.db_console import DEFAULT_PORTS, ENGINES, DbConsoleError
 from app.services import db_console
 from app.services import db_metadata
+from app.services import db_ssh
 from app.services import redis_ops
 from app.services import kube
 from app.services.kube import KubeError
@@ -3098,7 +3099,7 @@ def _redis_test(conn_or_payload) -> DbConnectionResult:
             conn_or_payload["password"], conn_or_payload["database"],
         )
         return DbConnectionResult(ok=True, message=message)
-    except redis_ops.RedisOpError as exc:
+    except (redis_ops.RedisOpError, DbConsoleError) as exc:
         return DbConnectionResult(ok=False, message=str(exc))
 
 
@@ -3168,6 +3169,10 @@ def _db_connection_read(db: Session, conn: DbConnection) -> DbConnectionRead:
         database=conn.database,
         environment=conn.environment or "",
         show_all_databases=bool(conn.show_all_databases),
+        ssh_host=conn.ssh_host or "",
+        ssh_port=conn.ssh_port or 22,
+        ssh_username=conn.ssh_username or "",
+        has_ssh_credentials=bool(conn.encrypted_ssh_password or conn.encrypted_ssh_private_key),
         group=_db_connection_group_name(db, conn),
         has_password=bool(conn.encrypted_password),
         created_at=conn.created_at,
@@ -3205,6 +3210,11 @@ def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_
         database=payload.database,
         environment=(payload.environment or "").strip(),
         show_all_databases=bool(payload.show_all_databases),
+        ssh_host=(payload.ssh_host or "").strip(),
+        ssh_port=payload.ssh_port or 22,
+        ssh_username=(payload.ssh_username or "").strip(),
+        encrypted_ssh_password=encrypt_secret(payload.ssh_password) if payload.ssh_password else "",
+        encrypted_ssh_private_key=encrypt_secret(payload.ssh_private_key) if payload.ssh_private_key else "",
         folder_id=_resolve_group_to_folder_id(db, payload.group),
     )
     db.add(conn)
@@ -3219,14 +3229,25 @@ def test_unsaved_db_connection(payload: DbConnectionCreate, _: dict = Depends(re
     # expected outcome, reported as ok=false with HTTP 200 (like the ad-hoc db_test_connection).
     engine = _conn_engine_or_400(payload.engine)
     port = payload.port or _conn_default_port(engine)
-    if engine == "redis":
-        return _redis_test({"host": payload.host, "port": port, "username": payload.username,
-                            "password": payload.password, "database": payload.database})
+    # One-shot SSH tunnel when a bastion is typed, so "Test" works before the connection is saved.
     try:
-        message = db_console.test_connection(engine, payload.host, port, payload.username, payload.password, payload.database)
-        return DbConnectionResult(ok=True, message=message)
+        host, tport, forwarder = db_ssh.temp_target(
+            payload.ssh_host, payload.ssh_port, payload.ssh_username,
+            payload.ssh_password, payload.ssh_private_key, payload.host, port,
+        )
     except DbConsoleError as exc:
         return DbConnectionResult(ok=False, message=str(exc))
+    try:
+        if engine == "redis":
+            return _redis_test({"host": host, "port": tport, "username": payload.username,
+                                "password": payload.password, "database": payload.database})
+        try:
+            message = db_console.test_connection(engine, host, tport, payload.username, payload.password, payload.database)
+            return DbConnectionResult(ok=True, message=message)
+        except DbConsoleError as exc:
+            return DbConnectionResult(ok=False, message=str(exc))
+    finally:
+        db_ssh.stop(forwarder)
 
 
 @router.get("/db/connections/{connection_id}", response_model=DbConnectionRead)
@@ -3267,17 +3288,31 @@ def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dic
     # blank keeps the stored credential instead of wiping it (mirrors the kube secret handling).
     if data.get("password"):
         conn.encrypted_password = encrypt_secret(data["password"])
+    if "ssh_host" in data and data["ssh_host"] is not None:
+        conn.ssh_host = data["ssh_host"].strip()
+    if "ssh_port" in data and data["ssh_port"] is not None:
+        conn.ssh_port = int(data["ssh_port"]) or 22
+    if "ssh_username" in data and data["ssh_username"] is not None:
+        conn.ssh_username = data["ssh_username"].strip()
+    if data.get("ssh_password"):
+        conn.encrypted_ssh_password = encrypt_secret(data["ssh_password"])
+    if data.get("ssh_private_key"):
+        conn.encrypted_ssh_private_key = encrypt_secret(data["ssh_private_key"])
     if "group" in data:
         conn.folder_id = _resolve_group_to_folder_id(db, data["group"])
 
     db.commit()
     db.refresh(conn)
+    # The tunnel-relevant fields may have changed; drop any cached forwarder so the next op rebuilds
+    # it against the new target/credentials.
+    db_ssh.close(conn.public_id)
     return _db_connection_read(db, conn)
 
 
 @router.delete("/db/connections/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_db_connection(connection_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> None:
     conn = _db_connection_or_404(db, connection_id)
+    db_ssh.close(conn.public_id)
     db.delete(conn)
     db.commit()
 
@@ -3285,12 +3320,16 @@ def delete_db_connection(connection_id: str, _: dict = Depends(require_user), db
 @router.post("/db/connections/{connection_id}/test", response_model=DbConnectionResult)
 def test_saved_db_connection(connection_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbConnectionResult:
     conn = _db_connection_or_404(db, connection_id)
+    try:
+        host, port = db_ssh.target(conn)  # opens the SSH tunnel if one is configured
+    except DbConsoleError as exc:
+        return DbConnectionResult(ok=False, message=str(exc))
     if conn.engine == "redis":
-        return _redis_test({"host": conn.host, "port": conn.port, "username": conn.username,
+        return _redis_test({"host": host, "port": port, "username": conn.username,
                             "password": decrypt_secret(conn.encrypted_password), "database": conn.database})
     try:
         message = db_console.test_connection(
-            conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database
+            conn.engine, host, port, conn.username, decrypt_secret(conn.encrypted_password), conn.database
         )
         return DbConnectionResult(ok=True, message=message)
     except DbConsoleError as exc:
@@ -3323,8 +3362,8 @@ def _redis_db_index(conn: DbConnection, db_param: int | None) -> int:
 def redis_keyspaces(connection_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[RedisKeyspace]:
     conn = _redis_conn_or_400(db, connection_id)
     try:
-        rows = redis_ops.keyspaces(conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database)
-    except redis_ops.RedisOpError as exc:
+        rows = redis_ops.keyspaces(*db_ssh.target(conn), conn.username, decrypt_secret(conn.encrypted_password), conn.database)
+    except (redis_ops.RedisOpError, DbConsoleError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return [RedisKeyspace(**row) for row in rows]
 
@@ -3334,10 +3373,10 @@ def redis_scan_keys(connection_id: str, db_num: int | None = None, pattern: str 
     conn = _redis_conn_or_400(db, connection_id)
     try:
         result = redis_ops.scan_keys(
-            conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database,
+            *db_ssh.target(conn), conn.username, decrypt_secret(conn.encrypted_password), conn.database,
             _redis_db_index(conn, db_num), pattern, cursor, count or redis_ops.SCAN_COUNT,
         )
-    except redis_ops.RedisOpError as exc:
+    except (redis_ops.RedisOpError, DbConsoleError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return RedisScanResult(keys=[RedisKeyEntry(**k) for k in result["keys"]], cursor=result["cursor"])
 
@@ -3347,10 +3386,10 @@ def redis_get_key(connection_id: str, key: str, db_num: int | None = None, _: di
     conn = _redis_conn_or_400(db, connection_id)
     try:
         detail = redis_ops.get_key(
-            conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database,
+            *db_ssh.target(conn), conn.username, decrypt_secret(conn.encrypted_password), conn.database,
             _redis_db_index(conn, db_num), key,
         )
-    except redis_ops.RedisOpError as exc:
+    except (redis_ops.RedisOpError, DbConsoleError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return RedisKeyDetail(**detail)
 
@@ -3360,10 +3399,10 @@ def redis_command(connection_id: str, payload: RedisCommandRequest, claims: dict
     conn = _redis_conn_or_400(db, connection_id)
     try:
         result = redis_ops.run_command(
-            conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database,
+            *db_ssh.target(conn), conn.username, decrypt_secret(conn.encrypted_password), conn.database,
             _redis_db_index(conn, payload.db), payload.command,
         )
-    except redis_ops.RedisOpError as exc:
+    except (redis_ops.RedisOpError, DbConsoleError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return RedisCommandResult(command=result["command"], reply=result["reply"])
 
@@ -3373,7 +3412,7 @@ def list_db_connection_tables(connection_id: str, _: dict = Depends(require_user
     conn = _db_connection_or_404(db, connection_id)
     try:
         tables = db_console.list_tables(
-            conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), conn.database
+            conn.engine, *db_ssh.target(conn), conn.username, decrypt_secret(conn.encrypted_password), conn.database
         )
     except DbConsoleError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -3417,7 +3456,7 @@ def query_db_connection(connection_id: str, payload: DbConnectionQueryRequest, d
     row_cap = min(db_console.parse_limit(payload.sql) or _DB_DEFAULT_ROW_LIMIT, _DB_MAX_ROW_LIMIT)
     try:
         result = db_console.run_query(
-            conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), effective_database, payload.sql, row_cap
+            conn.engine, *db_ssh.target(conn), conn.username, decrypt_secret(conn.encrypted_password), effective_database, payload.sql, row_cap
         )
     except DbConsoleError as exc:
         _record_db_query_history(
@@ -3451,7 +3490,7 @@ def _db_meta_args(conn: DbConnection, database: str | None = None) -> tuple:
     ignores it) without editing the saved connection. Blank/None falls back to the stored database.
     """
     effective_database = database or conn.database
-    return (conn.engine, conn.host, conn.port, conn.username, decrypt_secret(conn.encrypted_password), effective_database)
+    return (conn.engine, *db_ssh.target(conn), conn.username, decrypt_secret(conn.encrypted_password), effective_database)
 
 
 @router.get("/db/connections/{connection_id}/databases", response_model=list[DbDatabase])

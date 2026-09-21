@@ -34,6 +34,10 @@ python-multipart==0.0.20
 # Redis engine for the database module's key/value browser + command console
 # (app/services/redis_ops.py). Pure-python client, no system libraries.
 redis==5.2.1
+# SSH tunnel (bastion / jump host) for database connections -- app/services/db_ssh.py forwards a
+# local port through paramiko to reach a DB that only listens behind a bastion. Pure-python, uses
+# the paramiko already pinned above.
+sshtunnel==0.4.0
 pytest==8.3.4
 # In-memory Redis used only by tests/test_redis_ops.py, so the Redis service can
 # be exercised without a live server.

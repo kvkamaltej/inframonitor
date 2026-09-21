@@ -266,6 +266,14 @@ class DbConnection(Base):
     username: Mapped[str] = mapped_column(String(255), default="")
     encrypted_password: Mapped[str] = mapped_column(Text, default="")
     database: Mapped[str] = mapped_column(String(255), default="")
+    # Optional SSH tunnel (bastion / jump host). When ssh_host is set, the DB is reached by forwarding
+    # a local port through this bastion (app.services.db_ssh). Typed here, independent of any managed
+    # server. Credentials encrypted with the same Fernet path. "" ssh_host = a direct connection.
+    ssh_host: Mapped[str] = mapped_column(String(255), default="")
+    ssh_port: Mapped[int] = mapped_column(Integer, default=22)
+    ssh_username: Mapped[str] = mapped_column(String(255), default="")
+    encrypted_ssh_password: Mapped[str] = mapped_column(Text, default="")
+    encrypted_ssh_private_key: Mapped[str] = mapped_column(Text, default="")
     # free-form environment tag ("dev" | "qa" | "uat" | "prod" | ""), so the UI can badge and
     # group saved connections the way servers are tagged. "" means unspecified.
     environment: Mapped[str] = mapped_column(String(32), default="")
