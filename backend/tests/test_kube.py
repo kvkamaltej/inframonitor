@@ -62,85 +62,63 @@ def test_create_cluster_kubeconfig_mode(client):
     assert "kubeconfig" not in body and "token" not in body
 
 
-def test_cluster_ssh_tunnel_stored_and_used(client, monkeypatch):
-    # A cluster reachable only through a jump host: the SSH tunnel is stored (creds never echoed),
-    # and a live read opens the bastion forward via db_ssh._forwarder before talking to the API server.
+def _ssh_config(client, name, host, user="ops", password="pw"):
+    r = client.post("/api/ssh-configs", json={"name": name, "host": host, "port": 22, "username": user, "password": password})
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def test_cluster_ssh_chain_stored_and_used(client, monkeypatch):
+    # A cluster reachable through an ORDERED chain of saved SSH configs (jump1 -> jump2 -> node): the
+    # chain is stored as public_ids, and a live read builds the forward via db_ssh._forwarder_chain.
+    jump1 = _ssh_config(client, "jump-1", "j1.dmz", user="hop1")
+    jump2 = _ssh_config(client, "jump-2", "j2.dmz", user="hop2")
+    node = _ssh_config(client, "the-node", "10.9.9.55", user="kube")
+
     r = client.post("/api/kube/clusters", json={
-        "name": "behind-bastion",
+        "name": "behind-chain",
         "auth_method": "token",
         "api_server_url": "https://10.9.9.55:6443",
         "token": "bearer",
         "verify_tls": False,
-        "ssh_host": "bastion.local",
-        "ssh_port": 2222,
-        "ssh_username": "ops",
-        "ssh_password": "s3cret",
+        "ssh_chain": [jump1, jump2, node],   # app -> jump1 -> jump2 -> node -> API
     })
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["ssh_host"] == "bastion.local"
-    assert body["ssh_port"] == 2222
-    assert body["has_ssh_credentials"] is True
-    assert "ssh_password" not in body
+    assert body["ssh_chain"] == [jump1, jump2, node]
+    assert body["ssh_chain_names"] == ["jump-1", "jump-2", "the-node"]
     cid = body["id"]
-
-    # a live read must open the tunnel to the API server host:port through the bastion
-    from app.services import db_ssh, kube
-    calls = {}
-
-    def fake_forwarder(ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key, dest_host, dest_port):
-        calls["args"] = (ssh_host, ssh_port, ssh_user, dest_host, dest_port)
-        raise RuntimeError("bastion refused")  # stop before a real k8s call
-
-    monkeypatch.setattr(db_ssh, "_forwarder", fake_forwarder)
-    r = client.get(f"/api/kube/clusters/{cid}/namespaces")
-    assert r.status_code == 400  # KubeError -> clean 400, not 500
-    assert "bastion" in r.json()["detail"].lower()
-    assert calls["args"] == ("bastion.local", 2222, "ops", "10.9.9.55", 6443)
-
-
-def test_cluster_two_hop_tunnel(client, monkeypatch):
-    # A control-plane node (.55) reachable only by SSHing into it THROUGH a bastion: the tunnel host
-    # is .55 (inline), and a saved SSH config is the jump host in front. A live read must build the
-    # two-hop forward (app -> jump -> .55 -> API port) via db_ssh._forwarder_via.
-    bastion = client.post("/api/ssh-configs", json={
-        "name": "the-bastion", "host": "bastion.dmz", "port": 22, "username": "hop", "password": "pw"})
-    assert bastion.status_code == 201, bastion.text
-    jump_id = bastion.json()["id"]
-
-    r = client.post("/api/kube/clusters", json={
-        "name": "cp-via-bastion",
-        "auth_method": "token",
-        "api_server_url": "https://10.9.9.55:6443",
-        "token": "bearer",
-        "verify_tls": False,
-        "ssh_host": "10.9.9.55",           # the control-plane node (the tunnel/endpoint host)
-        "ssh_username": "kube",
-        "ssh_password": "nodepw",
-        "ssh_jump_config_id": jump_id,     # reached THROUGH the bastion
-    })
-    assert r.status_code == 201, r.text
-    body = r.json()
-    assert body["ssh_host"] == "10.9.9.55"
-    assert body["ssh_jump_config_id"] == jump_id
-    assert body["ssh_jump_config_name"] == "the-bastion"
 
     from app.services import db_ssh
     calls = {}
 
-    def fake_via(jump, endpoint, dest_host, dest_port):
-        calls["jump"] = jump
-        calls["endpoint"] = endpoint
+    def fake_chain(hops, dest_host, dest_port):
+        calls["hops"] = hops
         calls["dest"] = (dest_host, dest_port)
-        raise RuntimeError("proxy channel refused")
+        raise RuntimeError("chain refused")  # stop before a real k8s call
 
-    monkeypatch.setattr(db_ssh, "_forwarder_via", fake_via)
-    r = client.get(f"/api/kube/clusters/{body['id']}/namespaces")
-    assert r.status_code == 400
-    # jump host = the bastion's decrypted creds; endpoint = .55; dest = the API host:port
-    assert calls["jump"][0] == "bastion.dmz" and calls["jump"][2] == "hop"
-    assert calls["endpoint"][0] == "10.9.9.55" and calls["endpoint"][2] == "kube"
+    monkeypatch.setattr(db_ssh, "_forwarder_chain", fake_chain)
+    r = client.get(f"/api/kube/clusters/{cid}/namespaces")
+    assert r.status_code == 400  # KubeError -> clean 400, not 500
+    # the resolved hops carry each config's decrypted host/user, in order; dest = the API host:port
+    assert [h[0] for h in calls["hops"]] == ["j1.dmz", "j2.dmz", "10.9.9.55"]
+    assert [h[2] for h in calls["hops"]] == ["hop1", "hop2", "kube"]
     assert calls["dest"] == ("10.9.9.55", 6443)
+
+
+def test_deleting_config_prunes_cluster_chain(client):
+    a = _ssh_config(client, "chain-a", "a.dmz")
+    b = _ssh_config(client, "chain-b", "b.dmz")
+    r = client.post("/api/kube/clusters", json={
+        "name": "prune-me", "auth_method": "token", "api_server_url": "https://x:6443",
+        "token": "t", "verify_tls": False, "ssh_chain": [a, b]})
+    cid = r.json()["id"]
+    assert r.json()["ssh_chain"] == [a, b]
+
+    assert client.delete(f"/api/ssh-configs/{a}").status_code == 204
+    # the deleted config drops out of the cluster's chain, leaving the rest intact
+    r = client.get(f"/api/kube/clusters/{cid}")
+    assert r.json()["ssh_chain"] == [b]
 
 
 def test_create_cluster_token_mode(client):

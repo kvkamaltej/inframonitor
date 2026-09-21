@@ -73,54 +73,76 @@ def _forwarder(ssh_host, ssh_port, ssh_username, ssh_password, ssh_key_text, db_
         raise DbTunnelError(f"SSH tunnel via {ssh_host}: {str(exc).splitlines()[0][:300]}") from exc
 
 
-def _forwarder_via(jump, endpoint, dest_host, dest_port):
-    """A tunnel whose SSH host (the endpoint) is itself reached THROUGH a jump host — two hops. Both
-    `jump` and `endpoint` are (host, port, user, password, private_key) tuples. Opens a paramiko
-    connection to the jump, a direct-tcpip channel to the endpoint's SSH port, and hands that channel
-    to sshtunnel as its transport socket, so the forwarder logs in to the endpoint through the jump
-    and then forwards (dest_host, dest_port) from the ENDPOINT's side. The jump client is attached to
-    the returned forwarder so `_stop` closes both together.
-
-    Used for a Kubernetes API server reachable only by SSHing into a control-plane node that itself
-    sits behind a bastion: app -> jump -> node -> node's own :6443.
-    """
-    import sshtunnel  # noqa: PLC0415
-
-    j_host, j_port, j_user, j_pass, j_key = jump
-    e_host, e_port, e_user, e_pass, e_key = endpoint
-    jump_client = paramiko.SSHClient()
-    jump_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    jkwargs: dict = {
-        "hostname": (j_host or "").strip(),
-        "port": int(j_port or 22),
-        "username": (j_user or "").strip() or None,
+def _connect_ssh(hop, sock=None):
+    """Open a paramiko SSHClient to one hop `(host, port, user, password, private_key)`, optionally
+    over an existing channel `sock` (the previous hop's direct-tcpip channel). Raises DbTunnelError."""
+    host, port, user, password, key = hop
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kwargs: dict = {
+        "hostname": (host or "").strip(),
+        "port": int(port or 22),
+        "username": (user or "").strip() or None,
         "timeout": CONNECT_TIMEOUT_SECONDS,
         "banner_timeout": CONNECT_TIMEOUT_SECONDS,
         "auth_timeout": CONNECT_TIMEOUT_SECONDS,
     }
-    jpkey = _pkey(j_key)
-    if jpkey is not None:
-        jkwargs["pkey"] = jpkey
-    elif j_pass:
-        jkwargs["password"] = j_pass
+    if sock is not None:
+        kwargs["sock"] = sock
+    pkey = _pkey(key)
+    if pkey is not None:
+        kwargs["pkey"] = pkey
+    elif password:
+        kwargs["password"] = password
     try:
-        jump_client.connect(**jkwargs)
+        client.connect(**kwargs)
     except Exception as exc:
-        jump_client.close()
-        raise DbTunnelError(f"Jump host {j_host}: {str(exc).splitlines()[0][:300]}") from exc
+        client.close()
+        raise DbTunnelError(f"Jump host {host}: {str(exc).splitlines()[0][:300]}") from exc
+    return client
+
+
+def _forwarder_chain(hops, dest_host, dest_port):
+    """A tunnel whose SSH host is reached through an ORDERED CHAIN of jump hosts — one or more hops.
+    `hops` is a list of (host, port, user, password, private_key) tuples: hops[0] is dialed from the
+    app, each subsequent hop is reached THROUGH the previous one's direct-tcpip channel, and the LAST
+    hop is where (dest_host, dest_port) is forwarded FROM. Handles a single hop (a plain bastion) and
+    N hops (app -> jump1 -> jump2 -> ... -> node -> dest). Intermediate paramiko clients are attached
+    to the forwarder so `_stop` closes the whole chain.
+    """
+    import sshtunnel  # noqa: PLC0415
+
+    if not hops:
+        raise DbTunnelError("Empty SSH chain")
+    if len(hops) == 1:
+        return _forwarder(*hops[0], dest_host, dest_port)
+
+    # Build paramiko clients for every hop EXCEPT the last, chaining each through the previous one's
+    # channel, ending with a channel that reaches the last hop's SSH port.
+    clients: list = []
+    channel = None
     try:
-        channel = jump_client.get_transport().open_channel(
-            "direct-tcpip", (e_host, int(e_port or 22)), ("", 0)
-        )
-    except Exception as exc:
-        jump_client.close()
-        raise DbTunnelError(f"Jump host {j_host} cannot reach {e_host}:{e_port or 22}: {str(exc).splitlines()[0][:300]}") from exc
+        for i in range(len(hops) - 1):
+            client = _connect_ssh(hops[i], sock=channel)
+            clients.append(client)
+            nxt = hops[i + 1]
+            channel = client.get_transport().open_channel(
+                "direct-tcpip", ((nxt[0] or "").strip(), int(nxt[1] or 22)), ("", 0)
+            )
+    except Exception:
+        for c in clients:
+            with _suppress():
+                c.close()
+        raise
+
+    last = hops[-1]
+    l_host, l_port, l_user, l_pass, l_key = last
     try:
         forwarder = sshtunnel.SSHTunnelForwarder(
-            (e_host, int(e_port or 22)),
-            ssh_username=(e_user or "").strip() or None,
-            ssh_password=e_pass or None,
-            ssh_pkey=_pkey(e_key),
+            ((l_host or "").strip(), int(l_port or 22)),
+            ssh_username=(l_user or "").strip() or None,
+            ssh_password=l_pass or None,
+            ssh_pkey=_pkey(l_key),
             ssh_proxy=channel,
             ssh_proxy_enabled=True,
             remote_bind_address=(dest_host, int(dest_port or 0)),
@@ -132,13 +154,24 @@ def _forwarder_via(jump, endpoint, dest_host, dest_port):
         forwarder.SSH_TIMEOUT = CONNECT_TIMEOUT_SECONDS
         forwarder.start()
     except DbTunnelError:
-        jump_client.close()
+        for c in clients:
+            with _suppress():
+                c.close()
         raise
     except Exception as exc:
-        jump_client.close()
-        raise DbTunnelError(f"SSH tunnel via {e_host} (through {j_host}): {str(exc).splitlines()[0][:300]}") from exc
-    forwarder._jump_client = jump_client  # type: ignore[attr-defined]  # keep alive; closed in _stop
+        for c in clients:
+            with _suppress():
+                c.close()
+        raise DbTunnelError(f"SSH tunnel via {l_host}: {str(exc).splitlines()[0][:300]}") from exc
+    forwarder._chain_clients = clients  # type: ignore[attr-defined]  # keep alive; closed in _stop
     return forwarder
+
+
+import contextlib as _contextlib  # noqa: E402
+
+
+def _suppress():
+    return _contextlib.suppress(Exception)
 
 
 def target(conn) -> tuple[str, int]:
@@ -221,11 +254,10 @@ def _stop(forwarder) -> None:
         forwarder.stop()
     except Exception:
         pass
-    # a two-hop forwarder (_forwarder_via) carries the jump client that owns its proxy channel; close
-    # it too so the bastion connection is not leaked.
-    jump_client = getattr(forwarder, "_jump_client", None)
-    if jump_client is not None:
+    # a multi-hop forwarder (_forwarder_chain) carries the intermediate jump clients that own the
+    # proxy channels; close them too so the chain of connections is not leaked.
+    for client in getattr(forwarder, "_chain_clients", None) or []:
         try:
-            jump_client.close()
+            client.close()
         except Exception:
             pass

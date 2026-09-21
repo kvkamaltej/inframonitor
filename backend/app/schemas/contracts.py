@@ -983,6 +983,9 @@ class KubeClusterCreate(BaseModel):
     # Optional SECOND hop: a saved SSH config (public_id) used as a jump host IN FRONT of the tunnel
     # host, so the API server is reached app -> jump -> tunnel host -> API. "" / None = no jump.
     ssh_jump_config_id: str | None = None
+    # The SSH access path: an ORDERED list of saved SSH config public_ids [hop1, ..., node]. The API
+    # is reached app -> hop1 -> ... -> last hop -> API. [] = direct. Supersedes the ssh_* fields above.
+    ssh_chain: list[str] = Field(default_factory=list)
     # folder name (the "group"); resolved to an existing Folder in the route, else left unassigned.
     group: str | None = None
 
@@ -1009,6 +1012,8 @@ class KubeClusterUpdate(BaseModel):
     ssh_config_id: str | None = None
     # second-hop jump host (saved SSH config public_id); "" clears, None leaves.
     ssh_jump_config_id: str | None = None
+    # ordered SSH access path (saved SSH config public_ids); [] clears it, None leaves untouched.
+    ssh_chain: list[str] | None = None
     group: str | None = None
 
 
@@ -1034,6 +1039,10 @@ class KubeClusterRead(BaseModel):
     # second-hop jump host (a saved SSH config) in front of the tunnel host, when set.
     ssh_jump_config_id: str = ""
     ssh_jump_config_name: str = ""
+    # the SSH access path: ordered saved-SSH-config public_ids [hop1, ..., node], and their display
+    # names, so the UI can render the chain. [] = direct connection.
+    ssh_chain: list[str] = Field(default_factory=list)
+    ssh_chain_names: list[str] = Field(default_factory=list)
     # feature/k8s-log-shipping: whether this cluster's pod logs are tailed into Loki, and the
     # namespaces shipped ([] = all). Present on read so the UI can render the toggle state.
     log_shipping_enabled: bool = False

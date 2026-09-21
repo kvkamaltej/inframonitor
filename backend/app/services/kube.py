@@ -143,8 +143,10 @@ def _api_client(conn: dict) -> Iterator[Any]:
         # bastion, dial it over SSH. conn["tunnel"] is a resolved (host, port, user, password,
         # private_key) tuple (the route decrypts it), or None for a direct connection. We open a local
         # port forward to the API server's host:port and repoint the client at 127.0.0.1:<local port>.
-        tunnel = conn.get("tunnel")
-        if tunnel:
+        # SSH chain (jump hosts): an ordered list of (host,port,user,pw,key) hops. The API server is
+        # reached app -> hop1 -> hop2 -> ... -> last hop -> API port. Empty = direct connection.
+        chain = conn.get("chain") or []
+        if chain:
             from urllib.parse import urlsplit, urlunsplit
             parts = urlsplit(cfg.host or "")
             api_host = parts.hostname or ""
@@ -152,16 +154,9 @@ def _api_client(conn: dict) -> Iterator[Any]:
             if not api_host:
                 raise KubeError("Cannot open an SSH tunnel: the API server host could not be determined.")
             from app.services import db_ssh
-            # A second-hop jump host in front of the tunnel host: app -> jump -> tunnel host ->
-            # forward the API port. Used for a control-plane node reachable only via a bastion.
-            jump = conn.get("tunnel_jump")
             try:
-                if jump:
-                    forwarder = db_ssh._forwarder_via(jump, tunnel, api_host, api_port)
-                else:
-                    ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key = tunnel
-                    forwarder = db_ssh._forwarder(ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key, api_host, api_port)
-            except Exception as exc:  # auth, unreachable bastion, remote host closed, ...
+                forwarder = db_ssh._forwarder_chain(chain, api_host, api_port)
+            except Exception as exc:  # auth, unreachable hop, remote host closed, ...
                 raise KubeError(_clean(exc)) from exc
             local_port = forwarder.local_bind_port
             cfg.host = urlunsplit((parts.scheme or "https", f"127.0.0.1:{local_port}", parts.path, parts.query, parts.fragment))

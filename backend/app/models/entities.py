@@ -263,6 +263,11 @@ class KubeCluster(Base):
     # almost always shared). NULL = the tunnel host is reached directly.
     ssh_jump_config_id: Mapped[int | None] = mapped_column(ForeignKey("ssh_configs.id"), nullable=True, index=True)
     ssh_jump_config: Mapped["SshConfig | None"] = relationship("SshConfig", foreign_keys=[ssh_jump_config_id])
+    # The SSH access path as an ORDERED JSON list of SshConfig public_ids: [hop1, hop2, ..., node].
+    # hop1 is dialed from the app, each next hop through the previous, and the API server is forwarded
+    # from the LAST hop. "[]" = direct connection. This is the current model (dropdown-only, N hops);
+    # the ssh_host/ssh_config_id/ssh_jump_config_id columns above are legacy and no longer read.
+    ssh_chain_json: Mapped[str] = mapped_column(Text, default="[]")
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

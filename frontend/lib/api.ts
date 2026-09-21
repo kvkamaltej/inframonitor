@@ -1579,6 +1579,10 @@ export type KubeCluster = {
   // optional second-hop jump host (a saved SSH config) in front of the tunnel host.
   ssh_jump_config_id: string;
   ssh_jump_config_name: string;
+  // the SSH access path: an ordered list of saved-SSH-config public_ids [hop1, ..., node] and their
+  // display names. The API is reached app -> hop1 -> ... -> last hop. [] = direct connection.
+  ssh_chain: string[];
+  ssh_chain_names: string[];
   // feature/k8s-log-shipping: whether this cluster's pod logs are tailed into Loki, and which
   // namespaces ([] = all).
   log_shipping_enabled: boolean;
@@ -1605,6 +1609,8 @@ export type KubeClusterInput = {
   ssh_config_id?: string;
   // optional second-hop jump host (a saved SSH config public_id) in front of the tunnel host
   ssh_jump_config_id?: string;
+  // the SSH access path: ordered saved-SSH-config public_ids [hop1, ..., node]; [] = direct.
+  ssh_chain?: string[];
   group?: string | null;
 };
 

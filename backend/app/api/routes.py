@@ -3372,6 +3372,11 @@ def delete_ssh_config(config_id: str, _: dict = Depends(require_admin), db: Sess
     db.execute(update(DbConnection).where(DbConnection.ssh_config_id == config.id).values(ssh_config_id=None))
     db.execute(update(KubeCluster).where(KubeCluster.ssh_config_id == config.id).values(ssh_config_id=None))
     db.execute(update(KubeCluster).where(KubeCluster.ssh_jump_config_id == config.id).values(ssh_jump_config_id=None))
+    # Prune the deleted config from any cluster's SSH access chain (stored as a JSON list of public_ids).
+    for cluster in db.scalars(select(KubeCluster)).all():
+        ids = _chain_public_ids(cluster)
+        if config.public_id in ids:
+            cluster.ssh_chain_json = json.dumps([pid for pid in ids if pid != config.public_id])
     db.delete(config)
     db.commit()
 
@@ -4079,6 +4084,8 @@ def _cluster_read(db: Session, cluster: KubeCluster) -> KubeClusterRead:
         ssh_config_name=cluster.ssh_config.name if getattr(cluster, "ssh_config", None) else "",
         ssh_jump_config_id=cluster.ssh_jump_config.public_id if getattr(cluster, "ssh_jump_config", None) else "",
         ssh_jump_config_name=cluster.ssh_jump_config.name if getattr(cluster, "ssh_jump_config", None) else "",
+        ssh_chain=_chain_public_ids(cluster),
+        ssh_chain_names=_chain_names(db, _chain_public_ids(cluster)),
         log_shipping_enabled=bool(getattr(cluster, "log_shipping_enabled", False)),
         log_namespaces=_cluster_namespaces(cluster),
         created_at=cluster.created_at,
@@ -4093,10 +4100,50 @@ def _cluster_namespaces(cluster: KubeCluster) -> list[str]:
         return []
 
 
-def _cluster_conn(cluster: KubeCluster) -> dict:
-    # Decrypt the stored secrets just-in-time for a single service call, and resolve the optional
-    # SSH tunnel (referenced global config OR inline) to a plaintext (host,port,user,pw,key) tuple so
-    # kube.py can open the bastion forward without touching the ORM/crypto.
+def _chain_public_ids(cluster: KubeCluster) -> list[str]:
+    try:
+        value = json.loads(getattr(cluster, "ssh_chain_json", "") or "[]")
+        return [str(x) for x in value] if isinstance(value, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def _chain_names(db: Session, public_ids: list[str]) -> list[str]:
+    """Display names for a chain of SshConfig public_ids (unknown/deleted ids show as '(removed)')."""
+    names: list[str] = []
+    for pid in public_ids:
+        config = db.scalar(select(SshConfig).where(SshConfig.public_id == str(pid)))
+        names.append(config.name if config else "(removed)")
+    return names
+
+
+def _validate_ssh_chain(db: Session, public_ids) -> str:
+    """Validate an ordered list of SshConfig public_ids (each must exist) and return it as JSON for
+    storage. A missing id is a clean 404."""
+    ids = [str(pid).strip() for pid in (public_ids or []) if str(pid).strip()]
+    for pid in ids:
+        _ssh_config_or_404(db, pid)
+    return json.dumps(ids)
+
+
+def _resolve_ssh_chain(db: Session, public_ids: list[str]) -> list[tuple]:
+    """Resolve an ordered list of SshConfig public_ids to (host,port,user,password,private_key) hops
+    (decrypted), skipping any id that no longer resolves to a config."""
+    hops: list[tuple] = []
+    for pid in public_ids:
+        config = db.scalar(select(SshConfig).where(SshConfig.public_id == str(pid)))
+        if not config:
+            continue
+        resolved = resolve_ssh(config, "", None, None, None, None)
+        if resolved is not None:
+            hops.append(resolved)
+    return hops
+
+
+def _cluster_conn(db: Session, cluster: KubeCluster) -> dict:
+    # Decrypt the stored secrets just-in-time for a single service call, and resolve the SSH access
+    # path (ordered saved SSH configs) to plaintext (host,port,user,pw,key) hops so kube.py can open
+    # the tunnel chain without touching the ORM/crypto.
     return {
         "auth_method": cluster.auth_method,
         "api_server_url": cluster.api_server_url,
@@ -4104,13 +4151,8 @@ def _cluster_conn(cluster: KubeCluster) -> dict:
         "token": decrypt_secret(cluster.encrypted_token),
         "ca_cert": cluster.ca_cert,
         "verify_tls": bool(cluster.verify_tls),
-        "tunnel": resolve_ssh(
-            getattr(cluster, "ssh_config", None),
-            getattr(cluster, "ssh_host", ""), getattr(cluster, "ssh_port", 22), getattr(cluster, "ssh_username", ""),
-            getattr(cluster, "encrypted_ssh_password", ""), getattr(cluster, "encrypted_ssh_private_key", ""),
-        ),
-        # second-hop jump host (a saved SSH config) reached BEFORE the tunnel host, or None.
-        "tunnel_jump": resolve_ssh(getattr(cluster, "ssh_jump_config", None), "", None, None, None, None),
+        # ordered jump-host chain: app -> hops[0] -> ... -> hops[-1] -> API server.
+        "chain": _resolve_ssh_chain(db, _chain_public_ids(cluster)),
     }
 
 
@@ -4168,6 +4210,7 @@ def create_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_ad
         encrypted_ssh_private_key=encrypt_secret(payload.ssh_private_key) if payload.ssh_private_key else "",
         ssh_config_id=_resolve_ssh_config_fk(db, payload.ssh_config_id),
         ssh_jump_config_id=_resolve_ssh_config_fk(db, payload.ssh_jump_config_id),
+        ssh_chain_json=_validate_ssh_chain(db, payload.ssh_chain),
         folder_id=_resolve_group_to_folder_id(db, payload.group),
     )
     db.add(cluster)
@@ -4181,16 +4224,8 @@ def test_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_admi
     # Test the credentials as typed, without persisting anything. An unreachable cluster or bad
     # credentials is an expected outcome, reported as ok=false with HTTP 200 (like the DB console).
     conn = _conn_from_create(payload)
-    # Resolve the optional tunnel: a referenced saved config (stored creds) or the inline ssh_* fields.
-    if (payload.ssh_config_id or "").strip():
-        cfg = _ssh_config_or_404(db, payload.ssh_config_id.strip())
-        conn["tunnel"] = resolve_ssh(cfg, "", None, None, None, None)
-    elif (payload.ssh_host or "").strip():
-        conn["tunnel"] = (payload.ssh_host.strip(), payload.ssh_port or 22, payload.ssh_username,
-                          payload.ssh_password, payload.ssh_private_key)
-    if (payload.ssh_jump_config_id or "").strip():
-        jcfg = _ssh_config_or_404(db, payload.ssh_jump_config_id.strip())
-        conn["tunnel_jump"] = resolve_ssh(jcfg, "", None, None, None, None)
+    # Resolve the SSH access path (ordered saved SSH configs) for the test, as typed.
+    conn["chain"] = _resolve_ssh_chain(db, [pid for pid in (payload.ssh_chain or []) if str(pid).strip()])
     try:
         version = kube.test_connection(conn)
         where = payload.api_server_url.strip() or "cluster"
@@ -4249,6 +4284,8 @@ def update_kube_cluster(cluster_id: str, payload: KubeClusterUpdate, _: dict = D
         cluster.ssh_config_id = _resolve_ssh_config_fk(db, data["ssh_config_id"])
     if "ssh_jump_config_id" in data:
         cluster.ssh_jump_config_id = _resolve_ssh_config_fk(db, data["ssh_jump_config_id"])
+    if "ssh_chain" in data and data["ssh_chain"] is not None:
+        cluster.ssh_chain_json = _validate_ssh_chain(db, data["ssh_chain"])
     if "group" in data:
         cluster.folder_id = _resolve_group_to_folder_id(db, data["group"])
 
@@ -4276,13 +4313,13 @@ def _kube_call(func, *args):
 @router.get("/kube/clusters/{cluster_id}/overview", response_model=KubeOverview)
 def kube_overview(cluster_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> KubeOverview:
     cluster = _cluster_or_404(db, cluster_id)
-    return KubeOverview(**_kube_call(kube.overview, _cluster_conn(cluster)))
+    return KubeOverview(**_kube_call(kube.overview, _cluster_conn(db, cluster)))
 
 
 @router.get("/kube/clusters/{cluster_id}/nodes", response_model=list[KubeNode])
 def kube_nodes(cluster_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubeNode]:
     cluster = _cluster_or_404(db, cluster_id)
-    nodes = _kube_call(kube.list_nodes, _cluster_conn(cluster))
+    nodes = _kube_call(kube.list_nodes, _cluster_conn(db, cluster))
     # Link each node to a managed Server: primary match on internal IP, fallback on name==hostname
     # or name==alias (case-insensitive), so the UI can deep-link a node to its SSH host.
     servers = db.scalars(select(Server)).all()
@@ -4309,47 +4346,47 @@ def kube_nodes(cluster_id: str, _: dict = Depends(require_user), db: Session = D
 @router.get("/kube/clusters/{cluster_id}/namespaces", response_model=list[str])
 def kube_namespaces(cluster_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[str]:
     cluster = _cluster_or_404(db, cluster_id)
-    return _kube_call(kube.list_namespaces, _cluster_conn(cluster))
+    return _kube_call(kube.list_namespaces, _cluster_conn(db, cluster))
 
 
 @router.get("/kube/clusters/{cluster_id}/pods", response_model=list[KubePod])
 def kube_pods(cluster_id: str, namespace: str = "", _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubePod]:
     cluster = _cluster_or_404(db, cluster_id)
-    pods = _kube_call(kube.list_pods, _cluster_conn(cluster), namespace)
+    pods = _kube_call(kube.list_pods, _cluster_conn(db, cluster), namespace)
     return [KubePod(**pod) for pod in pods]
 
 
 @router.get("/kube/clusters/{cluster_id}/pods/{namespace}/{pod}/logs", response_model=KubePodLogs)
 def kube_pod_logs(cluster_id: str, namespace: str, pod: str, container: str = "", tail: int = 200, previous: bool = False, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> KubePodLogs:
     cluster = _cluster_or_404(db, cluster_id)
-    result = _kube_call(kube.pod_logs, _cluster_conn(cluster), namespace, pod, container, tail, previous)
+    result = _kube_call(kube.pod_logs, _cluster_conn(db, cluster), namespace, pod, container, tail, previous)
     return KubePodLogs(**result)
 
 
 @router.get("/kube/clusters/{cluster_id}/deployments", response_model=list[KubeDeployment])
 def kube_deployments(cluster_id: str, namespace: str = "", _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubeDeployment]:
     cluster = _cluster_or_404(db, cluster_id)
-    deployments = _kube_call(kube.list_deployments, _cluster_conn(cluster), namespace)
+    deployments = _kube_call(kube.list_deployments, _cluster_conn(db, cluster), namespace)
     return [KubeDeployment(**dep) for dep in deployments]
 
 
 @router.get("/kube/clusters/{cluster_id}/health", response_model=KubeHealth)
 def kube_health(cluster_id: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> KubeHealth:
     cluster = _cluster_or_404(db, cluster_id)
-    return KubeHealth(**_kube_call(kube.health, _cluster_conn(cluster)))
+    return KubeHealth(**_kube_call(kube.health, _cluster_conn(db, cluster)))
 
 
 @router.get("/kube/clusters/{cluster_id}/events", response_model=list[KubeEvent])
 def kube_events(cluster_id: str, namespace: str = "", _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubeEvent]:
     cluster = _cluster_or_404(db, cluster_id)
-    events = _kube_call(kube.list_events, _cluster_conn(cluster), namespace)
+    events = _kube_call(kube.list_events, _cluster_conn(db, cluster), namespace)
     return [KubeEvent(**ev) for ev in events]
 
 
 @router.get("/kube/clusters/{cluster_id}/services", response_model=list[KubeService])
 def kube_services(cluster_id: str, namespace: str = "", _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubeService]:
     cluster = _cluster_or_404(db, cluster_id)
-    services = _kube_call(kube.list_services, _cluster_conn(cluster), namespace)
+    services = _kube_call(kube.list_services, _cluster_conn(db, cluster), namespace)
     return [KubeService(**svc) for svc in services]
 
 
@@ -4357,42 +4394,42 @@ def kube_services(cluster_id: str, namespace: str = "", _: dict = Depends(requir
 def kube_service_pods(cluster_id: str, namespace: str, name: str, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[KubePod]:
     """The pods backing a Service (via its label selector), so the UI can view a service's logs."""
     cluster = _cluster_or_404(db, cluster_id)
-    pods = _kube_call(kube.service_pods, _cluster_conn(cluster), namespace, name)
+    pods = _kube_call(kube.service_pods, _cluster_conn(db, cluster), namespace, name)
     return [KubePod(**pod) for pod in pods]
 
 
 @router.post("/kube/clusters/{cluster_id}/pods/{namespace}/{pod}/restart", response_model=ActionResult)
 def kube_restart_pod(cluster_id: str, namespace: str, pod: str, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
     cluster = _cluster_or_404(db, cluster_id)
-    message = _kube_call(kube.restart_pod, _cluster_conn(cluster), namespace, pod)
+    message = _kube_call(kube.restart_pod, _cluster_conn(db, cluster), namespace, pod)
     return ActionResult(ok=True, message=message)
 
 
 @router.delete("/kube/clusters/{cluster_id}/pods/{namespace}/{pod}", response_model=ActionResult)
 def kube_delete_pod(cluster_id: str, namespace: str, pod: str, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
     cluster = _cluster_or_404(db, cluster_id)
-    message = _kube_call(kube.delete_pod, _cluster_conn(cluster), namespace, pod)
+    message = _kube_call(kube.delete_pod, _cluster_conn(db, cluster), namespace, pod)
     return ActionResult(ok=True, message=message)
 
 
 @router.post("/kube/clusters/{cluster_id}/deployments/{namespace}/{name}/scale", response_model=ActionResult)
 def kube_scale_deployment(cluster_id: str, namespace: str, name: str, payload: KubeScaleRequest, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
     cluster = _cluster_or_404(db, cluster_id)
-    message = _kube_call(kube.scale_deployment, _cluster_conn(cluster), namespace, name, payload.replicas)
+    message = _kube_call(kube.scale_deployment, _cluster_conn(db, cluster), namespace, name, payload.replicas)
     return ActionResult(ok=True, message=message)
 
 
 @router.post("/kube/clusters/{cluster_id}/deployments/{namespace}/{name}/restart", response_model=ActionResult)
 def kube_restart_deployment(cluster_id: str, namespace: str, name: str, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
     cluster = _cluster_or_404(db, cluster_id)
-    message = _kube_call(kube.restart_deployment, _cluster_conn(cluster), namespace, name)
+    message = _kube_call(kube.restart_deployment, _cluster_conn(db, cluster), namespace, name)
     return ActionResult(ok=True, message=message)
 
 
 @router.post("/kube/clusters/{cluster_id}/nodes/{name}/cordon", response_model=ActionResult)
 def kube_cordon_node(cluster_id: str, name: str, payload: KubeCordonRequest, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ActionResult:
     cluster = _cluster_or_404(db, cluster_id)
-    message = _kube_call(kube.cordon_node, _cluster_conn(cluster), name, payload.cordon)
+    message = _kube_call(kube.cordon_node, _cluster_conn(db, cluster), name, payload.cordon)
     return ActionResult(ok=True, message=message)
 
 

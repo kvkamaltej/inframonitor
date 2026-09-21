@@ -229,6 +229,8 @@ EXPECTED_KUBE_CLUSTER_COLUMNS: list[tuple[str, str]] = [
     ("ssh_config_id", "NULL"),
     # optional second-hop jump host in front of the tunnel host (FK to ssh_configs)
     ("ssh_jump_config_id", "NULL"),
+    # ordered SSH access path (JSON list of SshConfig public_ids); the current N-hop chain model
+    ("ssh_chain_json", "'[]'"),
 ]
 
 

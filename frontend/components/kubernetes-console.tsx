@@ -13,13 +13,7 @@ import {
   type KubeCluster,
   type KubeClusterInput
 } from "@/lib/api";
-import {
-  SshTunnelSection,
-  dbTunnelPayload,
-  emptySshTunnel,
-  sshTunnelFromKubeCluster,
-  type SshTunnelValue
-} from "@/components/ssh-tunnel-section";
+import { SshChainPicker } from "@/components/ssh-chain-picker";
 
 const inputClass =
   "h-11 w-full rounded-xl border-none bg-surface px-4 text-sm font-medium text-fg outline-none ring-1 ring-edge transition-colors focus:ring-2 focus:ring-accent";
@@ -71,8 +65,9 @@ export function KubernetesConsole({ token }: { token: string }) {
   const [verifyTls, setVerifyTls] = useState(true);
   const [defaultNamespace, setDefaultNamespace] = useState("");
   const [group, setGroup] = useState("");
-  // Optional SSH tunnel (jump host) to reach the API server — for a cluster behind a bastion.
-  const [ssh, setSsh] = useState<SshTunnelValue>(emptySshTunnel());
+  // SSH access path to the API server — an ordered chain of saved SSH configs (jump hosts). [] =
+  // direct connection.
+  const [sshChain, setSshChain] = useState<string[]>([]);
 
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -111,7 +106,7 @@ export function KubernetesConsole({ token }: { token: string }) {
     setVerifyTls(true);
     setDefaultNamespace("");
     setGroup("");
-    setSsh(emptySshTunnel());
+    setSshChain([]);
     setTestNote(null);
     setFormError("");
   }
@@ -136,7 +131,7 @@ export function KubernetesConsole({ token }: { token: string }) {
     setVerifyTls(cluster.verify_tls);
     setDefaultNamespace(cluster.default_namespace ?? "");
     setGroup(cluster.group ?? "");
-    setSsh(sshTunnelFromKubeCluster(cluster));
+    setSshChain(cluster.ssh_chain ?? []);
     setTestNote(null);
     setFormError("");
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
@@ -150,8 +145,8 @@ export function KubernetesConsole({ token }: { token: string }) {
       auth_method: authMethod,
       default_namespace: defaultNamespace.trim() || undefined,
       group: group.trim() || null,
-      // SSH tunnel: a referenced global config OR inline details, or all-blank for a direct connection.
-      ...dbTunnelPayload(ssh)
+      // ordered SSH access path (drop any empty hop rows); [] = direct connection.
+      ssh_chain: sshChain.filter(Boolean)
     };
     if (authMethod === "kubeconfig") {
       if (kubeconfig.trim()) payload.kubeconfig = kubeconfig;
@@ -438,9 +433,9 @@ export function KubernetesConsole({ token }: { token: string }) {
             </label>
           </div>
 
-          {/* Optional SSH tunnel (jump host) to reach the API server — for a cluster behind a
-              bastion. Hidden until opted in. Use the "Test bastion" inside it to check the hop. */}
-          <SshTunnelSection token={token} value={ssh} onChange={setSsh} kind="kube" />
+          {/* SSH access path to the API server: an ordered chain of saved jump hosts (bastions),
+              for a control-plane node reachable only through one or more hops. */}
+          <SshChainPicker token={token} value={sshChain} onChange={setSshChain} />
 
           <div className="flex flex-wrap items-center gap-3">
             <button
