@@ -322,8 +322,10 @@ class DbQueryHistory(Base):
 
 class ShellFavorite(Base):
     __tablename__ = "shell_favorites"
-    # one name per user, not globally: two people may both keep a "tail catalina" entry
-    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_shell_favorites_user_name"),)
+    # one name per (user, server-scope): two people may both keep a "tail catalina" entry, and one
+    # user may keep a global "restart" AND a server-specific "restart" -- they differ by
+    # server_public_id ("" for a global favorite). Replaces the older (user_id, name) constraint.
+    __table_args__ = (UniqueConstraint("user_id", "name", "server_public_id", name="uq_shell_favorites_user_name_server"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -331,6 +333,10 @@ class ShellFavorite(Base):
     # stored verbatim -- this is a command the user types into their own shell, so there is
     # nothing meaningful to sanitise here and pretending otherwise would be theatre
     command: Mapped[str] = mapped_column(Text, default="")
+    # visibility: "global" (every server, the default) or "server" (only the server named below).
+    scope: Mapped[str] = mapped_column(String(16), default="global")
+    # the Server.public_id this favorite is scoped to when scope == "server"; "" for a global one.
+    server_public_id: Mapped[str] = mapped_column(String(36), default="", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped[User] = relationship(back_populates="shell_favorites")

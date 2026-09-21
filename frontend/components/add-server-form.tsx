@@ -1,8 +1,8 @@
 "use client";
 
-import { Plus } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { addServer, createFolder, getFolders, getOptions, Folder, OptionList } from "@/lib/api";
+import { AlertTriangle, CheckCircle2, Loader2, PlugZap, Plus } from "lucide-react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { addServer, createFolder, getFolders, getOptions, testUnsavedServerConnection, Folder, OptionList } from "@/lib/api";
 import { addressError } from "@/lib/address";
 import { SshTunnelSection, emptySshTunnel, serverJumpPayload, type SshTunnelValue } from "@/components/ssh-tunnel-section";
 
@@ -26,6 +26,42 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
   // Optional SSH jump host (bastion): a reusable global SSH config or inline details. Hidden until
   // the user opts in.
   const [ssh, setSsh] = useState<SshTunnelValue>(emptySshTunnel());
+  const formRef = useRef<HTMLFormElement>(null);
+  const [testing, setTesting] = useState(false);
+  const [testNote, setTestNote] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Probe the server's own SSH login before saving (through the jump host when one is configured),
+  // reading the currently-typed fields straight off the form.
+  async function testConnection() {
+    const el = formRef.current;
+    if (!el) return;
+    const form = new FormData(el);
+    const ip = String(form.get("ip_address") ?? "").trim();
+    if (!ip) { setTestNote({ ok: false, text: "Enter an IP address / hostname first." }); return; }
+    const jump = serverJumpPayload(ssh);
+    setTesting(true);
+    setTestNote(null);
+    try {
+      const res = await testUnsavedServerConnection(token, {
+        ip_address: ip,
+        ssh_port: Number(form.get("ssh_port") || 22),
+        username: String(form.get("username") ?? "").trim(),
+        password: String(form.get("password") ?? ""),
+        private_key: String(form.get("private_key") ?? ""),
+        ssh_config_id: jump.ssh_config_id,
+        jump_host: jump.jump_host,
+        jump_port: jump.jump_port,
+        jump_username: jump.jump_username,
+        jump_password: jump.jump_password,
+        jump_private_key: jump.jump_private_key
+      });
+      setTestNote({ ok: res.ok, text: res.message });
+    } catch (error) {
+      setTestNote({ ok: false, text: error instanceof Error ? error.message : "Connection test failed" });
+    } finally {
+      setTesting(false);
+    }
+  }
 
   useEffect(() => {
     void getOptions(token).then(setOptions).catch(() => undefined);
@@ -127,7 +163,7 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
     "h-12 rounded-xl border-none bg-slate-100 px-4 text-sm font-medium text-slate-900 outline-none transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-800/50 dark:text-slate-100";
 
   return (
-    <form onSubmit={submit} className="grid gap-4 md:grid-cols-6">
+    <form ref={formRef} onSubmit={submit} className="grid gap-4 md:grid-cols-6">
       <input name="hostname" required placeholder="Hostname" className={fieldClass} />
       <input name="ip_address" required placeholder="IP address" className={fieldClass} />
       <input name="username" required placeholder="SSH user" className={fieldClass} />
@@ -192,7 +228,22 @@ export function AddServerForm({ token, onAdded }: { token: string; onAdded: () =
         <SshTunnelSection token={token} value={ssh} onChange={setSsh} kind="server" />
       </div>
 
-      <div className="md:col-span-6 flex justify-end">
+      {testNote ? (
+        <p className={`md:col-span-6 inline-flex items-start gap-1.5 text-sm font-medium ${testNote.ok ? "text-emerald-600 dark:text-emerald-400" : "text-danger dark:text-red-400"}`}>
+          {testNote.ok ? <CheckCircle2 size={16} className="mt-0.5 shrink-0" /> : <AlertTriangle size={16} className="mt-0.5 shrink-0" />}
+          <span className="break-words">{testNote.text}</span>
+        </p>
+      ) : null}
+      <div className="md:col-span-6 flex items-center justify-end gap-3">
+        <button
+          type="button"
+          onClick={() => void testConnection()}
+          disabled={testing}
+          className="inline-flex h-12 items-center justify-center gap-2 rounded-full border border-line px-5 text-sm font-semibold text-slate-700 transition-colors hover:text-accent disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+        >
+          {testing ? <Loader2 size={16} className="animate-spin" /> : <PlugZap size={16} />}
+          Test connection
+        </button>
         <button disabled={saving} className="inline-flex h-12 items-center justify-center gap-2 rounded-full bg-accent px-6 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">
           <Plus size={16} />
           {saving ? "Adding..." : "Add Server"}

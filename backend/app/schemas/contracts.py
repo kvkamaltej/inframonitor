@@ -533,18 +533,28 @@ class ShellFavoriteRead(BaseModel):
     id: int
     name: str
     command: str
+    # "global" (every server) or "server" (only the server named below). server_public_id is "" for a
+    # global favorite, else the Server.public_id it is scoped to.
+    scope: str = "global"
+    server_public_id: str = ""
     created_at: datetime
 
 
 class ShellFavoriteCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     command: str = Field(min_length=1, max_length=4000)
+    # "global" (default) or "server". When "server", server_public_id must be the current server.
+    scope: str = "global"
+    server_public_id: str = Field(default="", max_length=36)
 
 
 class ShellFavoriteUpdate(BaseModel):
     # PATCH: either field may be sent on its own. Both are validated non-empty when present.
     name: str | None = Field(default=None, min_length=1, max_length=128)
     command: str | None = Field(default=None, min_length=1, max_length=4000)
+    # scope may be re-targeted between global and a server; server_public_id accompanies "server".
+    scope: str | None = None
+    server_public_id: str | None = Field(default=None, max_length=36)
 
 
 class SftpEntry(BaseModel):
@@ -1262,6 +1272,22 @@ class SshConfigUpdate(BaseModel):
     username: str | None = None
     password: str | None = None
     private_key: str | None = None
+
+
+class ServerTestRequest(BaseModel):
+    # Probe an UNSAVED server's SSH login while adding it (host/user + typed credentials), optionally
+    # THROUGH a jump host — either a referenced saved config (ssh_config_id) or the inline jump_* fields.
+    ip_address: str = Field(default="", max_length=255)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(default="", max_length=128)
+    password: str = Field(default="", max_length=1024)
+    private_key: str = Field(default="", max_length=32768)
+    ssh_config_id: str | None = None
+    jump_host: str = Field(default="", max_length=255)
+    jump_port: int = Field(default=22, ge=1, le=65535)
+    jump_username: str = Field(default="", max_length=128)
+    jump_password: str = Field(default="", max_length=1024)
+    jump_private_key: str = Field(default="", max_length=32768)
 
 
 class SshTestRequest(BaseModel):

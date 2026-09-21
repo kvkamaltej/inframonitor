@@ -19,7 +19,7 @@ import asyncio
 
 from jose import jwt
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, StreamingResponse
@@ -136,6 +136,7 @@ from app.schemas.contracts import (
     SftpUploadResult,
     ShellFavoriteCreate,
     ShellFavoriteRead,
+    ServerTestRequest,
     ShellFavoriteUpdate,
     SshConfigCreate,
     SshConfigRead,
@@ -197,6 +198,7 @@ from app.services.ssh_ops import (
     sftp_stat,
     sftp_upload,
     test_bastion,
+    test_server_connection,
     tomcat_action,
     tomcat_logs,
 )
@@ -1536,6 +1538,8 @@ def _as_int(value: object, fallback: int = 0) -> int:
 
 
 _JOURNAL_UNIT = re.compile(r"^[A-Za-z0-9@._:-]{1,128}$")
+# An absolute POSIX path with no control characters (NUL/newline/carriage return), capped at PATH_MAX.
+_LOG_FILE_PATH = re.compile(r"^/[^\x00-\x1f]{0,4095}$")
 _UNKNOWN_LOG_PATH = "Log path is not a discovered log source for this server. Run discovery first."
 _SUDO_REJECTED_MARKERS = ("incorrect password", "sorry, try again", "authentication failure", "authentication failed")
 _SUDO_REQUIRED_MARKERS = ("a password is required", "no tty present", "askpass", "sudo: a terminal is required")
@@ -1569,11 +1573,18 @@ def _known_log_paths(server: Server) -> set[str]:
 def _validated_log_target(server: Server, source: str, name_or_path: str) -> str:
     target = name_or_path.strip()
     if source == "journal":
-        if not _JOURNAL_UNIT.fullmatch(target):
+        # A blank unit is allowed: it means the whole systemd journal (a live-syslog view).
+        if target and not _JOURNAL_UNIT.fullmatch(target):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Journal unit name contains unsupported characters")
         return target
-    if target not in _known_log_paths(server):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_UNKNOWN_LOG_PATH)
+    # File source: an operator may tail ANY absolute log path (e.g. /var/log/syslog, an app log on a
+    # particular VM), not only discovered DB/Tomcat logs. The path is passed to `tail` as a quoted
+    # value (never interpolated as shell), so arbitrary paths are safe; we only reject the obviously
+    # malformed (relative paths, control characters) so the shell line stays well-formed.
+    if not target:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A log file path is required")
+    if not _LOG_FILE_PATH.fullmatch(target):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Log path must be an absolute path (starting with /)")
     return target
 
 
@@ -1673,6 +1684,26 @@ def update_credentials(server_id: str, credentials: CredentialPayload, _: dict =
     _save_credentials(db, server,credentials)
     db.commit()
     return ConnectionResult(ok=True, message="Credentials saved encrypted")
+
+
+@router.post("/servers/test-connection", response_model=ConnectionResult)
+def test_unsaved_server_connection(payload: ServerTestRequest, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> ConnectionResult:
+    """Probe an UNSAVED server's SSH login while adding it — the same "does it connect?" check the
+    jump-host Test offers, but for the server's own credentials, and THROUGH the jump host when one is
+    configured (a referenced saved config or inline jump_* fields). Failure is ok=false / HTTP 200."""
+    if (payload.ssh_config_id or "").strip():
+        config = _ssh_config_or_404(db, payload.ssh_config_id.strip())
+        jump = resolve_ssh(config, "", None, None, None, None)  # decrypted (host,port,user,pw,key)
+    elif (payload.jump_host or "").strip():
+        jump = (payload.jump_host.strip(), payload.jump_port or 22, payload.jump_username,
+                payload.jump_password, payload.jump_private_key)
+    else:
+        jump = None
+    ok, message = test_server_connection(
+        payload.ip_address, payload.ssh_port, payload.username, payload.password, payload.private_key,
+        jump=jump,
+    )
+    return ConnectionResult(ok=ok, message=message)
 
 
 @router.post("/servers/{server_id}/test-connection", response_model=ConnectionResult)
@@ -3007,16 +3038,32 @@ def _favorite_conflict(name: str) -> HTTPException:
 
 
 @router.get("/shell/favorites", response_model=list[ShellFavoriteRead])
-def list_shell_favorites(claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[ShellFavoriteRead]:
+def list_shell_favorites(server: str = "", claims: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[ShellFavoriteRead]:
     user = _current_user(db, claims)
+    query = select(ShellFavorite).where(ShellFavorite.user_id == user.id)
+    # When operating a specific server, return that user's GLOBAL favorites plus the ones scoped to
+    # THIS server; a favorite scoped to another server stays hidden. With no server (a bare listing),
+    # return them all.
+    if (server or "").strip():
+        query = query.where(or_(ShellFavorite.scope == "global", ShellFavorite.server_public_id == server.strip()))
     favorites = db.scalars(
-        select(ShellFavorite)
-        .where(ShellFavorite.user_id == user.id)
+        query
         # id breaks the tie: created_at has one-second resolution on SQLite, so several
         # favorites saved in the same second would otherwise come back in arbitrary order
         .order_by(ShellFavorite.created_at.desc(), ShellFavorite.id.desc())
     ).all()
     return [_favorite_read(favorite) for favorite in favorites]
+
+
+def _favorite_scope(scope: str | None, server_public_id: str | None) -> tuple[str, str]:
+    """Normalise a favorite's (scope, server_public_id): a "server" scope needs a server id (400 if
+    missing); anything else is "global" with an empty server id."""
+    if (scope or "global") == "server":
+        sid = (server_public_id or "").strip()
+        if not sid:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A server-scoped favorite needs a server")
+        return "server", sid
+    return "global", ""
 
 
 @router.post("/shell/favorites", response_model=ShellFavoriteRead, status_code=status.HTTP_201_CREATED)
@@ -3029,9 +3076,16 @@ def create_shell_favorite(payload: ShellFavoriteCreate, claims: dict = Depends(r
     # for the user's own shell, and a validator here would only reject legitimate one-liners.
     if not payload.command.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A command is required")
-    if db.scalar(select(ShellFavorite).where(ShellFavorite.user_id == user.id, ShellFavorite.name == name)):
+    scope, server_public_id = _favorite_scope(payload.scope, payload.server_public_id)
+    # a name clash is scoped to the same (global vs this-server) bucket, mirroring the DB constraint
+    if db.scalar(select(ShellFavorite).where(
+        ShellFavorite.user_id == user.id, ShellFavorite.name == name,
+        ShellFavorite.server_public_id == server_public_id)):
         raise _favorite_conflict(name)
-    favorite = ShellFavorite(user_id=user.id, name=name, command=payload.command)
+    favorite = ShellFavorite(
+        user_id=user.id, name=name, command=payload.command,
+        scope=scope, server_public_id=server_public_id,
+    )
     db.add(favorite)
     try:
         db.commit()
@@ -3051,13 +3105,19 @@ def update_shell_favorite(favorite_id: int, payload: ShellFavoriteUpdate, claims
     if not favorite:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Favorite not found")
     data = payload.model_dump(exclude_unset=True)
+    # Re-target the scope first, so the rename-conflict check below is scoped to the right bucket.
+    if "scope" in data or "server_public_id" in data:
+        scope = data.get("scope", favorite.scope)
+        server_public_id = data.get("server_public_id", favorite.server_public_id)
+        favorite.scope, favorite.server_public_id = _favorite_scope(scope, server_public_id)
     if "name" in data and data["name"] is not None:
         name = data["name"].strip()
         if not name:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A favorite name is required")
-        # a rename that collides with another of this user's favorites is a clean 409
+        # a rename that collides with another of this user's favorites in the SAME bucket is a 409
         clash = db.scalar(select(ShellFavorite).where(
-            ShellFavorite.user_id == user.id, ShellFavorite.name == name, ShellFavorite.id != favorite.id))
+            ShellFavorite.user_id == user.id, ShellFavorite.name == name,
+            ShellFavorite.server_public_id == favorite.server_public_id, ShellFavorite.id != favorite.id))
         if clash:
             raise _favorite_conflict(name)
         favorite.name = name

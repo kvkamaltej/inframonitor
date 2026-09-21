@@ -56,6 +56,7 @@ import {
   ServerUpdate
 } from "@/lib/api";
 import { addressError } from "@/lib/address";
+import { recordServerAccess } from "@/lib/server-access";
 import { SshTunnelSection, serverJumpPayload, sshTunnelFromServer, type SshTunnelValue } from "@/components/ssh-tunnel-section";
 import { DefaultPasswordBanner } from "@/components/app-shell";
 import { useConfirm } from "@/components/confirm-dialog";
@@ -102,6 +103,9 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
   // source was last opened (container / Tomcat / service / database), so the timer reloads it.
   const [logsAuto, setLogsAuto] = useState(0);
   const [logRefresher, setLogRefresher] = useState<null | (() => void)>(null);
+  // On-demand log picker (no Loki required): pull a journal / file straight over SSH.
+  const [logSource, setLogSource] = useState<"system" | "unit" | "file">("system");
+  const [logQuery, setLogQuery] = useState("");
   const [message, setMessage] = useState("");
   const [tone, setTone] = useState<Tone>("info");
   // Which action is in flight ("" = idle). `loading` stays derived so every existing
@@ -245,6 +249,9 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       const [nextServer, nextMe] = await Promise.all([getServer(activeToken, serverId), getMe(activeToken)]);
       setServer(nextServer);
       setMe(nextMe);
+      // Record the open so the dashboard "Recent Servers" list and the "Most opened" sort are real
+      // (per-viewer, localStorage only). Keyed by the server's public_id, which is `serverId` here.
+      recordServerAccess(nextServer.id);
     } catch (error) {
       if (activeToken) notify(error instanceof Error ? error.message : "Unable to load server", "error");
       setMe(null);
@@ -615,6 +622,32 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       setTab("logs");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load service logs", "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  // Pull a log straight over SSH, on demand — the whole system journal, a specific journal unit, or
+  // an arbitrary file path (e.g. /var/log/syslog, an app log on this VM). No Loki / log-shipping
+  // required, and it rides the jump host automatically when one is configured.
+  async function loadOnDemandLog(source: "system" | "unit" | "file", query: string) {
+    const q = query.trim();
+    if (source !== "system" && !q) {
+      notify(source === "unit" ? "Enter a journal unit name." : "Enter an absolute file path.", "error");
+      return;
+    }
+    const payload = source === "file"
+      ? { source: "file", name_or_path: q, tail }
+      : { source: "journal", name_or_path: source === "unit" ? q : "", tail };
+    setLogRefresher(() => () => loadOnDemandLog(source, query));
+    setBusy("busy");
+    try {
+      const lines = await getServiceLogs(token, serverId, payload);
+      setSelected(source === "system" ? "system journal" : source === "unit" ? `journal: ${q}` : q);
+      setLogs(lines);
+      setTab("logs");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load logs", "error");
     } finally {
       setBusy("");
     }
@@ -1524,7 +1557,57 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                   </button>
                 </div>
               </div>
-              <pre className={`${isFullscreen ? "flex-1 max-h-none" : "max-h-[560px]"} whitespace-pre-wrap break-words overflow-auto bg-slate-950 p-4 text-xs leading-relaxed text-slate-100`}>{logs.length ? logs.join("\n") : "Select a container, service, Tomcat or database log source."}</pre>
+              {/* On-demand log picker — pull journald / syslog / any file straight over SSH, no Loki
+                  or log-shipping needed. Rides the jump host automatically. */}
+              {server?.has_credentials ? (
+                <div className="flex flex-wrap items-end gap-2 border-b border-slate-100 bg-slate-50 px-5 py-3 dark:border-slate-800 dark:bg-slate-800/30">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Source</span>
+                    <select
+                      value={logSource}
+                      onChange={(e) => { setLogSource(e.target.value as "system" | "unit" | "file"); setLogQuery(""); }}
+                      className="h-9 rounded-lg border-none bg-white px-3 text-xs font-medium text-slate-900 ring-1 ring-slate-200 focus:outline-none focus:ring-2 focus:ring-accent dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700"
+                    >
+                      <option value="system">System journal (syslog)</option>
+                      <option value="unit">Journal unit</option>
+                      <option value="file">File path</option>
+                    </select>
+                  </label>
+                  {logSource !== "system" ? (
+                    <label className="flex min-w-[16rem] flex-1 flex-col gap-1">
+                      <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{logSource === "unit" ? "Unit name" : "Absolute file path"}</span>
+                      <input
+                        value={logQuery}
+                        onChange={(e) => setLogQuery(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") void loadOnDemandLog(logSource, logQuery); }}
+                        spellCheck={false}
+                        placeholder={logSource === "unit" ? "nginx.service" : "/var/log/syslog"}
+                        className="h-9 rounded-lg border-none bg-white px-3 font-mono text-xs text-slate-900 ring-1 ring-slate-200 focus:outline-none focus:ring-2 focus:ring-accent dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700"
+                      />
+                    </label>
+                  ) : null}
+                  <label className="flex w-24 flex-col gap-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Lines</span>
+                    <input
+                      type="number"
+                      min={10}
+                      max={1000}
+                      value={tail}
+                      onChange={(e) => setTail(Math.max(10, Math.min(1000, Number(e.target.value) || 200)))}
+                      className="h-9 rounded-lg border-none bg-white px-3 text-xs font-medium text-slate-900 ring-1 ring-slate-200 focus:outline-none focus:ring-2 focus:ring-accent dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => void loadOnDemandLog(logSource, logQuery)}
+                    disabled={busy !== ""}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-accent px-4 text-xs font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
+                  >
+                    <FileText size={14} /> Fetch
+                  </button>
+                </div>
+              ) : null}
+              <pre className={`${isFullscreen ? "flex-1 max-h-none" : "max-h-[560px]"} whitespace-pre-wrap break-words overflow-auto bg-slate-950 p-4 text-xs leading-relaxed text-slate-100`}>{logs.length ? logs.join("\n") : "Pick a source above and Fetch, or open a container / service / Tomcat / database log."}</pre>
             </div>
           ) : null}
         </section>

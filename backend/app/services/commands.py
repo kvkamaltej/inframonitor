@@ -95,6 +95,12 @@ def journal_logs(unit: str, tail: int) -> str:
     return f"journalctl -u {_q(unit)} -n {tail} --no-pager"
 
 
+def journal_system(tail: int) -> str:
+    """The whole systemd journal (all units) -- the closest thing to a live syslog on a
+    journald host. Used when no unit is given."""
+    return f"journalctl -n {tail} --no-pager"
+
+
 def tail_logpath(path: str, tail: int) -> str:
     inner = f'tail -n {tail} -- "$LOGPATH"'
     return f"LOGPATH={_q(path)} sh -c {_q(inner)}"

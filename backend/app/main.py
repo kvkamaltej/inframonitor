@@ -250,29 +250,59 @@ def _migrate_kube_cluster_columns() -> None:
             conn.execute(text(f"ALTER TABLE kube_clusters ADD COLUMN {name} {ddl_type} DEFAULT {literal}"))
 
 
-def _ensure_shell_favorites_unique() -> None:
-    # create_all() DOES create a newly added table on an already-populated database
-    # (checkfirst=True: missing tables are created, existing ones are left completely
-    # alone) -- verified against the live SQLite file, rows and all other tables intact.
-    # What it will never do is add a constraint to a shell_favorites that already exists,
-    # so a database whose table predates the UniqueConstraint would silently keep
-    # accepting duplicate (user_id, name) pairs. Same CREATE UNIQUE INDEX IF NOT EXISTS
-    # approach as _backfill_public_ids below; a no-op on a table create_all just built.
+# (column name, SQL default) for shell_favorites columns added after the first release: the
+# per-favorite visibility scope and the server it is scoped to. Same compile-the-type-from-the-ORM
+# approach as the loops above.
+EXPECTED_SHELL_FAVORITE_COLUMNS: list[tuple[str, str]] = [
+    ("scope", "'global'"),
+    ("server_public_id", "''"),
+]
+
+
+def _migrate_shell_favorite_columns() -> None:
+    from app.models.entities import ShellFavorite
+
     inspector = inspect(engine)
     if "shell_favorites" not in inspector.get_table_names():
         return
-    target = {"user_id", "name"}
+    existing = {column["name"] for column in inspector.get_columns("shell_favorites")}
+    missing = [entry for entry in EXPECTED_SHELL_FAVORITE_COLUMNS if entry[0] not in existing]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for name, default in missing:
+            column = ShellFavorite.__table__.columns.get(name)
+            ddl_type = column.type.compile(dialect=engine.dialect) if column is not None else "VARCHAR(36)"
+            conn.execute(text(f"ALTER TABLE shell_favorites ADD COLUMN {name} {ddl_type} DEFAULT {default}"))
+
+
+def _ensure_shell_favorites_unique() -> None:
+    # Uniqueness is now per (user_id, name, server_public_id) so a user can keep a global favorite
+    # AND a server-scoped one of the same name (they differ by server_public_id, "" for global).
+    # create_all() never alters an existing table's constraints, and an older DB carries the previous
+    # (user_id, name) unique index -- which would wrongly reject that pair. So: if the 3-column index
+    # is already present, do nothing; otherwise drop the old 2-column one and create the 3-column one.
+    # Runs after _migrate_shell_favorite_columns so server_public_id exists. Idempotent.
+    inspector = inspect(engine)
+    if "shell_favorites" not in inspector.get_table_names():
+        return
+    new_target = {"user_id", "name", "server_public_id"}
+    old_target = {"user_id", "name"}
     for constraint in inspector.get_unique_constraints("shell_favorites"):
-        if set(constraint.get("column_names") or ()) == target:
-            return
+        if set(constraint.get("column_names") or ()) == new_target:
+            return  # fresh table created by create_all already carries the composite constraint
     for index in inspector.get_indexes("shell_favorites"):
-        if index.get("unique") and set(index.get("column_names") or ()) == target:
+        if index.get("unique") and set(index.get("column_names") or ()) == new_target:
             return
     with engine.begin() as conn:
+        # drop any old 2-column unique index (its name varies by how it was created)
+        for index in inspector.get_indexes("shell_favorites"):
+            if index.get("unique") and set(index.get("column_names") or ()) == old_target and index.get("name"):
+                conn.execute(text(f"DROP INDEX IF EXISTS {index['name']}"))
         conn.execute(
             text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ix_shell_favorites_user_name "
-                "ON shell_favorites (user_id, name)"
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_shell_favorites_user_name_server "
+                "ON shell_favorites (user_id, name, server_public_id)"
             )
         )
 
@@ -588,6 +618,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _migrate_folder_columns()
     _relax_folder_name_unique()
     _migrate_kube_cluster_columns()
+    _migrate_shell_favorite_columns()
     _ensure_shell_favorites_unique()
     _backfill_public_ids()
     _seed_defaults()

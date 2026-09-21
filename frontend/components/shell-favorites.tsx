@@ -19,6 +19,10 @@ import { ShellFavorite, createShellFavorite, deleteShellFavorite, getShellFavori
 
 export type ShellFavoritesProps = {
   token: string;
+  // The Server.public_id of the terminal this panel is attached to, when known. Enables the
+  // "this server only" scope and makes the list show global + this-server favorites (hiding ones
+  // scoped to other servers). Omitted -> only global favorites can be created and all are shown.
+  serverId?: string;
   // Insert is the default and never executes: the user presses Enter themselves, so a
   // mis-click cannot run something destructive.
   onInsert: (command: string) => void;
@@ -93,7 +97,7 @@ function messageFor(failure: Failure): string {
 }
 
 // Per-user saved commands. Clicking one inserts it into the active terminal; it does not run.
-export function ShellFavorites({ token, onInsert, onRun, selection, onClose, className }: ShellFavoritesProps) {
+export function ShellFavorites({ token, serverId, onInsert, onRun, selection, onClose, className }: ShellFavoritesProps) {
   const [favorites, setFavorites] = useState<ShellFavorite[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -111,12 +115,15 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
   // run a command. 0 means nothing is armed.
   const [armedRun, setArmedRun] = useState(0);
   const [armedDelete, setArmedDelete] = useState(0);
+  // Scope for the SAVE form: "global" (every server) or "server" (this server only). Only offered
+  // when a serverId is known.
+  const [scope, setScope] = useState<"global" | "server">("global");
 
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError("");
     try {
-      const rows = await getShellFavorites(token);
+      const rows = await getShellFavorites(token, serverId);
       // Server order is newest first; keep it rather than imposing another sort.
       setFavorites(rows);
     } catch (error) {
@@ -125,7 +132,7 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, serverId]);
 
   useEffect(() => {
     void load();
@@ -158,17 +165,30 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
     setFailure(null);
     setNotice("");
     try {
+      // "server" scope is only valid with a known server; fall back to global otherwise.
+      const effScope: "global" | "server" = scope === "server" && serverId ? "server" : "global";
+      const effServer = effScope === "server" ? (serverId ?? "") : "";
       if (editingId) {
-        const updated = await updateShellFavorite(token, editingId, { name: nextName, command: nextCommand });
-        setFavorites((current) => current.map((row) => (row.id === updated.id ? updated : row)));
+        const updated = await updateShellFavorite(token, editingId, {
+          name: nextName, command: nextCommand, scope: effScope, server_public_id: effServer
+        });
+        // a re-scoped favorite may now belong to a different server; drop it from the list if it no
+        // longer matches the current view, else replace it in place.
+        setFavorites((current) => {
+          const stillVisible = updated.scope === "global" || !serverId || updated.server_public_id === serverId;
+          return stillVisible
+            ? current.map((row) => (row.id === updated.id ? updated : row))
+            : current.filter((row) => row.id !== updated.id);
+        });
         setNotice(`Updated “${updated.name}”.`);
       } else {
-        const created = await createShellFavorite(token, nextName, nextCommand);
+        const created = await createShellFavorite(token, nextName, nextCommand, effScope, effServer);
         setFavorites((current) => [created, ...current.filter((row) => row.id !== created.id)]);
-        setNotice(`Saved “${created.name}”.`);
+        setNotice(`Saved “${created.name}”${effScope === "server" ? " for this server" : ""}.`);
       }
       setName("");
       setCommand("");
+      setScope("global");
       setFormOpen(false);
       setEditingId(0);
     } catch (error) {
@@ -188,6 +208,7 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
     setEditingId(favorite.id);
     setName(favorite.name);
     setCommand(favorite.command);
+    setScope(favorite.scope === "server" ? "server" : "global");
     setFormOpen(true);
   }
 
@@ -309,6 +330,25 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
             placeholder="Command — typed or pasted here"
             className="w-full resize-y rounded-xl border-none bg-white px-3 py-2 font-mono text-xs text-slate-900 outline-none ring-1 ring-line transition-colors focus:ring-2 focus:ring-accent dark:bg-slate-950 dark:text-slate-100 dark:ring-slate-700"
           />
+          {serverId ? (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Scope</span>
+              {(["global", "server"] as const).map((opt) => (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => setScope(opt)}
+                  className={`inline-flex h-7 items-center rounded-full px-3 text-[11px] font-semibold transition-colors ${
+                    scope === opt
+                      ? "bg-accent text-white"
+                      : "bg-white text-slate-600 ring-1 ring-line hover:text-accent dark:bg-slate-950 dark:text-slate-300 dark:ring-slate-700"
+                  }`}
+                >
+                  {opt === "global" ? "All servers" : "This server only"}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="submit"
@@ -405,6 +445,11 @@ export function ShellFavorites({ token, onInsert, onRun, selection, onClose, cla
                     <span className="flex items-center gap-1.5">
                       <CornerDownLeft size={12} className="shrink-0 text-accent" />
                       <span className="truncate text-xs font-semibold text-ink dark:text-slate-100">{favorite.name}</span>
+                      {favorite.scope === "server" ? (
+                        <span className="shrink-0 rounded-full bg-accent/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-accent" title="Visible only on this server">
+                          this server
+                        </span>
+                      ) : null}
                     </span>
                     <span className="mt-0.5 block break-all font-mono text-[11px] leading-snug text-slate-500 line-clamp-2 dark:text-slate-400">
                       {favorite.command}

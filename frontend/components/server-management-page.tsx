@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Activity, ArrowDown, ArrowLeft, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileSpreadsheet, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, LayoutGrid, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, TerminalSquare, Trash2, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Activity, ArrowDown, ArrowLeft, ArrowUp, ArrowUpDown, Check, ChevronDown, ChevronRight, ExternalLink, FileSpreadsheet, FileUp, Filter, Folder as FolderIcon, FolderPlus, FolderTree, LayoutGrid, List, Loader2, MonitorDot, MoreVertical, Pencil, Plus, RefreshCw, Search, Star, TerminalSquare, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AddServerForm } from "@/components/add-server-form";
 import { matchDistroLogo, OsLogo } from "@/components/os-logo";
 import { AppShell } from "@/components/app-shell";
@@ -12,6 +12,7 @@ import { CsvImportPanel } from "@/components/csv-import-panel";
 import { ShellPanel } from "@/components/shell-panel";
 import { StatusPill } from "@/components/status-pill";
 import { assignServerFolder, createFolder, deleteFolder, exportServersXlsx, getFolders, getServers, refreshVitals, Folder, Server } from "@/lib/api";
+import { getFavoriteGroups, toggleFavoriteGroup } from "@/lib/server-access";
 
 const ALL = "__all__";
 
@@ -198,7 +199,7 @@ function SortHeader({ label, column, sortKey, sortDir, onSort, className }: { la
 // has to translate between "" and some other placeholder.
 const UNASSIGNED = "";
 
-type ServerGroup = { key: string; name: string; count: number; rows: Server[] };
+type ServerGroup = { key: string; name: string; count: number; rows: Server[]; depth: number };
 
 // Distinct sentinel for the "Unassigned" *filter* option. Kept separate from UNASSIGNED ("")
 // so it never collides with the ALL sentinel, and from the wire value used for grouping.
@@ -582,7 +583,8 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
 
     const childFolders = folders
       .filter((f) => (f.parent_id || "") === (currentId || ""))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      // pinned (favorite) groups first, then alphabetical
+      .sort((a, b) => (favGroups.has(b.id) ? 1 : 0) - (favGroups.has(a.id) ? 1 : 0) || a.name.localeCompare(b.name));
     const unassignedCount = servers.filter((s) => !s.folder_id || !folderById.has(s.folder_id)).length;
     const directServers = isUnassignedView
       ? servers.filter((s) => !s.folder_id || !folderById.has(s.folder_id))
@@ -637,9 +639,18 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
                 className="group flex cursor-pointer flex-col gap-3 rounded-2xl bg-surface p-5 ring-1 ring-edge transition-all hover:ring-2 hover:ring-accent">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2 font-semibold text-fg"><FolderIcon size={18} className="text-accent" /> {f.name}</div>
-                  {role === "admin" ? (
-                    <button onClick={(e) => { e.stopPropagation(); void removeFolder(f); }} title={`Delete group ${f.name}`} className="inline-flex h-7 w-7 items-center justify-center rounded-full text-muted opacity-0 transition-opacity hover:bg-danger/10 hover:text-danger group-hover:opacity-100 dark:hover:bg-red-500/10 dark:hover:text-red-400"><Trash2 size={14} /></button>
-                  ) : null}
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); toggleFav(f.id); }}
+                      title={favGroups.has(f.id) ? "Unpin this group" : "Pin this group to the top"}
+                      className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-colors hover:bg-page ${favGroups.has(f.id) ? "text-accent" : "text-muted opacity-0 group-hover:opacity-100"}`}
+                    >
+                      <Star size={14} className={favGroups.has(f.id) ? "fill-accent text-accent" : ""} />
+                    </button>
+                    {role === "admin" ? (
+                      <button onClick={(e) => { e.stopPropagation(); void removeFolder(f); }} title={`Delete group ${f.name}`} className="inline-flex h-7 w-7 items-center justify-center rounded-full text-muted opacity-0 transition-opacity hover:bg-danger/10 hover:text-danger group-hover:opacity-100 dark:hover:bg-red-500/10 dark:hover:text-red-400"><Trash2 size={14} /></button>
+                    ) : null}
+                  </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-medium text-muted">
                   <span className="inline-flex items-center gap-1"><FolderTree size={13} /> {f.child_count} sub-group{f.child_count === 1 ? "" : "s"}</span>
@@ -679,6 +690,12 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   const environments = useMemo(() => distinctValues(servers, (server) => server.environment), [servers]);
   const groupPaths = useMemo(() => folderPaths(folders), [folders]);
 
+  // Per-viewer pinned groups (localStorage): pinned groups sort before their siblings in both the
+  // table and card views. Read once on mount.
+  const [favGroups, setFavGroups] = useState<Set<string>>(new Set());
+  useEffect(() => { setFavGroups(getFavoriteGroups()); }, []);
+  const toggleFav = useCallback((id: string) => { setFavGroups(new Set(toggleFavoriteGroup(id))); }, []);
+
   const filtersActive = typeFilter !== ALL || envFilter !== ALL || groupFilter !== ALL;
 
   // Filter only — sorting is applied afterwards, globally for the flat view and per-section for
@@ -706,26 +723,64 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   // section header with nothing under it is just noise, and admins assign into a folder from the
   // per-row picker, not by seeing an empty section). "Unassigned" is always rendered last.
   const groups = useMemo<ServerGroup[]>(() => {
-    const folderIds = new Set(folders.map((folder) => folder.id));
+    const byId = new Map(folders.map((folder) => [folder.id, folder] as const));
     const byKey = new Map<string, Server[]>();
     for (const server of filteredServers) {
       // a folder_id that no longer resolves (folder deleted out from under a cached row) falls
       // back to Unassigned rather than creating a ghost section
-      const key = server.folder_id && folderIds.has(server.folder_id) ? server.folder_id : UNASSIGNED;
+      const key = server.folder_id && byId.has(server.folder_id) ? server.folder_id : UNASSIGNED;
       const bucket = byKey.get(key);
       if (bucket) bucket.push(server);
       else byKey.set(key, [server]);
     }
-    // folders come from the API already ordered case-insensitively by name; keep that order
-    const result: ServerGroup[] = folders
-      .filter((folder) => byKey.has(folder.id))
-      .map((folder) => ({ key: folder.id, name: folder.name, count: byKey.get(folder.id)!.length, rows: byKey.get(folder.id)! }));
+
+    // Which folders to render as sections: every folder that has visible rows, PLUS all their
+    // ancestors — so a sub-group appears NESTED under its parent instead of as a duplicate
+    // top-level group. (Previously the table bucketed by direct folder_id only and labelled each
+    // section with the leaf name, so "MH / App-Servers" showed as a flat, sometimes duplicated,
+    // "App-Servers" section.)
+    const toShow = new Set<string>();
+    for (const folder of folders) {
+      if (!(byKey.get(folder.id) || []).length) continue;
+      let cursor: Folder | undefined = folder;
+      let guard = 0;
+      while (cursor && guard++ < 50) {
+        toShow.add(cursor.id);
+        cursor = cursor.parent_id ? byId.get(cursor.parent_id) : undefined;
+      }
+    }
+
+    // Children indexed by parent, preserving the API's case-insensitive order among siblings.
+    const childrenOf = new Map<string, Folder[]>();
+    for (const folder of folders) {
+      const parent = folder.parent_id && byId.has(folder.parent_id) ? folder.parent_id : "";
+      const list = childrenOf.get(parent);
+      if (list) list.push(folder);
+      else childrenOf.set(parent, [folder]);
+    }
+
+    // Depth-first tree walk: a parent header is emitted immediately before its descendants, so the
+    // hierarchy reads top-to-bottom. depth drives the indentation in the render. Pinned (favorite)
+    // groups sort before their siblings at every level.
+    const orderSiblings = (list: Folder[]) =>
+      [...list].sort((a, b) => (favGroups.has(b.id) ? 1 : 0) - (favGroups.has(a.id) ? 1 : 0));
+    const result: ServerGroup[] = [];
+    const walk = (parentKey: string, depth: number) => {
+      for (const folder of orderSiblings(childrenOf.get(parentKey) || [])) {
+        if (!toShow.has(folder.id)) continue;
+        const rows = byKey.get(folder.id) || [];
+        result.push({ key: folder.id, name: folder.name, count: rows.length, rows, depth });
+        walk(folder.id, depth + 1);
+      }
+    };
+    walk("", 0);
+
     const unassigned = byKey.get(UNASSIGNED);
     if (unassigned && unassigned.length) {
-      result.push({ key: UNASSIGNED, name: "Unassigned", count: unassigned.length, rows: unassigned });
+      result.push({ key: UNASSIGNED, name: "Unassigned", count: unassigned.length, rows: unassigned, depth: 0 });
     }
     return result;
-  }, [filteredServers, folders]);
+  }, [filteredServers, folders, favGroups]);
 
   // A type or environment can disappear from the inventory (renamed, or its last server
   // Collapse every group the first time the grouped view has something to show.
@@ -1093,14 +1148,30 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
                     onClick={() => toggleCollapse(group.key)}
                     aria-expanded={!isCollapsed}
                     title={isCollapsed ? "Expand group" : "Collapse group"}
-                    className="flex w-full items-center gap-2 px-6 py-3 text-left transition-colors hover:bg-page"
+                    className="flex w-full items-center gap-2 py-3 pr-6 text-left transition-colors hover:bg-page"
+                    // indent nested sub-groups so the hierarchy is visible (depth 0 sits at the
+                    // normal 24px gutter; each level adds 20px)
+                    style={{ paddingLeft: 24 + group.depth * 20 }}
                   >
                     {isCollapsed ? <ChevronRight size={16} className="shrink-0 text-muted" /> : <ChevronDown size={16} className="shrink-0 text-muted" />}
                     {group.key ? <FolderIcon size={16} className="text-accent" /> : <MonitorDot size={16} className="text-muted" />}
                     <h3 className="text-sm font-semibold text-fg">{group.name}</h3>
                     <span className="rounded-full bg-page px-2 py-0.5 text-[11px] font-semibold text-muted">{group.count}</span>
+                    {group.key ? (
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        onClick={(e) => { e.stopPropagation(); toggleFav(group.key); }}
+                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); toggleFav(group.key); } }}
+                        title={favGroups.has(group.key) ? "Unpin this group" : "Pin this group to the top"}
+                        className="ml-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-page hover:text-accent"
+                      >
+                        <Star size={14} className={favGroups.has(group.key) ? "fill-accent text-accent" : ""} />
+                      </span>
+                    ) : null}
                   </button>
-                  {isCollapsed ? null : serverTable(sortRows(group.rows, gsort.key, gsort.dir), gsort.key, gsort.dir, (column) => toggleGroupSort(group.key, column))}
+                  {/* A parent shown only for nesting context (no direct servers) renders no table. */}
+                  {isCollapsed || group.rows.length === 0 ? null : serverTable(sortRows(group.rows, gsort.key, gsort.dir), gsort.key, gsort.dir, (column) => toggleGroupSort(group.key, column))}
                 </div>
               );
             })}

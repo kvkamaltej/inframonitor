@@ -368,6 +368,9 @@ export type ShellFavorite = {
   id: number;
   name: string;
   command: string;
+  // "global" (every server) or "server" (only server_public_id). server_public_id is "" for global.
+  scope: "global" | "server";
+  server_public_id: string;
   created_at: string;
 };
 
@@ -757,6 +760,20 @@ export async function deleteServer(token: string, serverId: string): Promise<voi
 
 export async function testConnection(token: string, serverId: string, credentials: unknown): Promise<{ ok: boolean; message: string }> {
   return request(`/servers/${serverId}/test-connection`, token, { method: "POST", body: JSON.stringify(credentials) });
+}
+
+// Probe an UNSAVED server's SSH login while adding it (host/user + typed credentials), optionally
+// THROUGH a jump host (a referenced saved config id, or inline jump_* fields). A failed probe is a
+// normal ok=false result (HTTP 200), not a thrown error.
+export async function testUnsavedServerConnection(
+  token: string,
+  input: {
+    ip_address: string; ssh_port?: number; username?: string; password?: string; private_key?: string;
+    ssh_config_id?: string; jump_host?: string; jump_port?: number; jump_username?: string;
+    jump_password?: string; jump_private_key?: string;
+  }
+): Promise<{ ok: boolean; message: string }> {
+  return request(`/servers/test-connection`, token, { method: "POST", body: JSON.stringify(input) });
 }
 
 export async function discoverServer(token: string, serverId: string, credentials: unknown): Promise<{ ok: boolean; message: string }> {
@@ -1489,23 +1506,32 @@ export async function updateUser(
   });
 }
 
-export async function getShellFavorites(token: string): Promise<ShellFavorite[]> {
-  return request<ShellFavorite[]>("/shell/favorites", token);
+// When `server` (a Server.public_id) is given, returns this user's GLOBAL favorites plus the ones
+// scoped to THAT server; favorites scoped to other servers are hidden. Omit it for every favorite.
+export async function getShellFavorites(token: string, server?: string): Promise<ShellFavorite[]> {
+  const qs = server ? `?server=${encodeURIComponent(server)}` : "";
+  return request<ShellFavorite[]>(`/shell/favorites${qs}`, token);
 }
 
-export async function createShellFavorite(token: string, name: string, command: string): Promise<ShellFavorite> {
-  // A duplicate name for this user comes back 409, which request<T> surfaces as a thrown
-  // Error carrying the body text.
+export async function createShellFavorite(
+  token: string,
+  name: string,
+  command: string,
+  scope: "global" | "server" = "global",
+  serverPublicId = ""
+): Promise<ShellFavorite> {
+  // A duplicate name (within the same global/server bucket) comes back 409, which request<T>
+  // surfaces as a thrown Error carrying the body text.
   return request<ShellFavorite>("/shell/favorites", token, {
     method: "POST",
-    body: JSON.stringify({ name, command })
+    body: JSON.stringify({ name, command, scope, server_public_id: serverPublicId })
   });
 }
 
 export async function updateShellFavorite(
   token: string,
   id: number,
-  payload: { name?: string; command?: string }
+  payload: { name?: string; command?: string; scope?: "global" | "server"; server_public_id?: string }
 ): Promise<ShellFavorite> {
   // A rename that collides with another favorite comes back 409, surfaced as a thrown Error.
   return request<ShellFavorite>(`/shell/favorites/${id}`, token, {

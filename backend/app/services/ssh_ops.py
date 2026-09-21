@@ -151,6 +151,79 @@ def test_bastion(host: str, port: int, username: str, password: str, private_key
     return True, f"Connected to {host}:{port} as {username or '(default user)'}. The bastion is reachable."
 
 
+def test_server_connection(
+    host: str, port: int, username: str, password: str, private_key: str,
+    jump: tuple[str, int, str, str, str] | None = None,
+) -> tuple[bool, str]:
+    """Open a full SSH connection to a server (optionally THROUGH a jump host) and run `hostname`, so
+    the operator can check a server's own login while adding it — before it is saved. `jump`, when
+    given, is the already-resolved (host, port, user, password, private_key) of the bastion; its blank
+    credentials fall back to the server's own. Returns (ok, message); any failure is ok=False, never
+    raised. Credentials are used only to connect and are never echoed back."""
+    host = (host or "").strip()
+    if not host:
+        return False, "No host / IP given."
+    port = int(port or 22)
+    username = (username or "").strip()
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kwargs: dict = {"hostname": host, "port": port, "username": username, **_SSH_TIMEOUTS}
+    try:
+        _apply_auth(kwargs, private_key, password)
+    except SshOperationError as exc:
+        return False, str(exc)
+
+    jump_client: paramiko.SSHClient | None = None
+    if jump is not None and (jump[0] or "").strip():
+        j_host, j_port, j_user, j_pass, j_key = jump
+        if not j_pass and not j_key:  # bastion reuses the server's own credentials when blank
+            j_pass, j_key = password, private_key
+        jump_client = paramiko.SSHClient()
+        jump_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        jkwargs: dict = {"hostname": (j_host or "").strip(), "port": int(j_port or 22),
+                         "username": (j_user or "").strip() or username, **_SSH_TIMEOUTS}
+        try:
+            _apply_auth(jkwargs, j_key, j_pass)
+            jump_client.connect(**jkwargs)
+        except paramiko.AuthenticationException:
+            jump_client.close()
+            return False, f"Jump host {jkwargs['hostname']}:{jkwargs['port']}: authentication failed."
+        except Exception as exc:
+            jump_client.close()
+            return False, f"Jump host {jkwargs['hostname']}:{jkwargs['port']}: {str(exc).splitlines()[0][:300]}"
+        try:
+            kwargs["sock"] = jump_client.get_transport().open_channel("direct-tcpip", (host, port), ("", 0))
+        except Exception as exc:
+            jump_client.close()
+            return False, f"Jump host cannot reach {host}:{port}: {str(exc).splitlines()[0][:300]}"
+
+    try:
+        client.connect(**kwargs)
+    except paramiko.AuthenticationException:
+        if jump_client is not None:
+            jump_client.close()
+        via = " via the jump host" if jump_client is not None else ""
+        return False, f"Reached {host}:{port}{via} but authentication failed — check the user and credentials."
+    except Exception as exc:
+        if jump_client is not None:
+            jump_client.close()
+        via = " (through the jump host)" if jump_client is not None else ""
+        return False, f"{host}:{port}{via}: {str(exc).splitlines()[0][:300]}"
+
+    name = host
+    try:
+        _, out, _ = _exec_on(client, "hostname", timeout=10)
+        name = (out.strip() or host)
+    except Exception:
+        pass
+    finally:
+        client.close()
+        if jump_client is not None:
+            jump_client.close()
+    via = " through the jump host" if jump_client is not None else ""
+    return True, f"Connected to {name} ({host}:{port}){via}."
+
+
 def _exec_on(client: paramiko.SSHClient, command: str, stdin_data: str = "", timeout: int = 15) -> tuple[int, str, str]:
     """Run one command on an already-open client. Callers own the connection lifetime."""
     stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
@@ -2495,7 +2568,10 @@ def container_env_file(server: Server, credentials: CredentialPayload, runtime: 
 def service_logs(server: Server, credentials: CredentialPayload, source: str, name_or_path: str, tail: int = 200) -> list[str]:
     safe_tail = max(10, min(tail, 1000))
     if source == "journal":
-        output = run_command(server, credentials, commands.journal_logs(name_or_path, safe_tail))
+        # A blank unit means the whole systemd journal (a live-syslog view); a unit name scopes it.
+        unit = (name_or_path or "").strip()
+        cmd = commands.journal_logs(unit, safe_tail) if unit else commands.journal_system(safe_tail)
+        output = run_command(server, credentials, cmd)
     elif source in ("docker", "podman"):
         return container_logs(server, credentials, source, name_or_path, safe_tail)
     else:

@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { StatusPill } from "@/components/status-pill";
 import { getIntegrations, getServers, getSummary, Integration, Server, Summary } from "@/lib/api";
+import { recentServerIds } from "@/lib/server-access";
 
 function Metric({ label, value, icon, caption }: { label: string; value: string | number; icon: React.ReactNode; caption?: string }) {
   return (
@@ -33,6 +34,13 @@ function DashboardContent({ token }: { token: string }) {
   const [servers, setServers] = useState<Server[]>([]);
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [loadError, setLoadError] = useState("");
+  // public_ids of servers this viewer actually opened, most-recent first (localStorage). Read once
+  // on mount; the dashboard remounts on navigation, so it stays current.
+  const [recentIds, setRecentIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    setRecentIds(recentServerIds());
+  }, []);
 
   useEffect(() => {
     async function load() {
@@ -48,6 +56,13 @@ function DashboardContent({ token }: { token: string }) {
     }
     void load();
   }, [token]);
+
+  // Genuinely recently-opened servers, newest first, mapped back onto the loaded rows (which drops
+  // any that were deleted). Falls back to the first few servers when nothing has been opened yet.
+  const byId = new Map(servers.map((s) => [s.id, s] as const));
+  const recentOpened = recentIds.map((id) => byId.get(id)).filter((s): s is Server => Boolean(s)).slice(0, 8);
+  const recentServers = recentOpened.length > 0 ? recentOpened : servers.slice(0, 8);
+  const showingOpened = recentOpened.length > 0;
 
   return (
     <section className="space-y-6 px-6 py-6">
@@ -90,9 +105,12 @@ function DashboardContent({ token }: { token: string }) {
 
       <div className={`grid gap-6 ${integrations.length > 0 ? "lg:grid-cols-[1.3fr_1fr]" : ""}`}>
         <div className="overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-slate-200 dark:bg-[#1e1e1e] dark:ring-slate-800">
-          <div className="border-b border-slate-100 bg-white px-6 py-5 font-semibold text-slate-900 dark:border-slate-800 dark:bg-[#1e1e1e] dark:text-slate-100">Recent Servers</div>
+          <div className="border-b border-slate-100 bg-white px-6 py-5 font-semibold text-slate-900 dark:border-slate-800 dark:bg-[#1e1e1e] dark:text-slate-100">
+            Recent Servers
+            <span className="ml-2 text-xs font-normal text-slate-500 dark:text-slate-400">{showingOpened ? "— servers you opened, most recent first" : "— open a server and it appears here"}</span>
+          </div>
           <div className="divide-y divide-slate-100 dark:divide-slate-800/50">
-            {servers.slice(0, 8).map((server) => (
+            {recentServers.map((server) => (
               <Link key={server.id} href={`/server/?id=${encodeURIComponent(server.id)}`} className="flex items-center justify-between px-6 py-4 text-sm transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/50">
                 <div>
                   <div className="font-semibold text-slate-900 dark:text-slate-200">{server.hostname}</div>
