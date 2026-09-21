@@ -1242,6 +1242,16 @@ export async function updateSshConfig(token: string, id: string, input: Partial<
   return request<SshConfig>(`/ssh-configs/${encodeURIComponent(id)}`, token, { method: "PATCH", body: JSON.stringify(input) });
 }
 
+// Probe a bastion / jump host in isolation (does it accept an SSH login?). Pass ssh_config_id to
+// test a saved config with its stored credentials, or the inline host/user + typed credentials.
+// A failed probe is a normal ok=false result (HTTP 200), not a thrown error.
+export async function testSshBastion(
+  token: string,
+  input: { ssh_config_id?: string; host?: string; port?: number; username?: string; password?: string; private_key?: string }
+): Promise<DbConnectionResult> {
+  return request<DbConnectionResult>("/ssh-configs/test", token, { method: "POST", body: JSON.stringify(input) });
+}
+
 export async function deleteSshConfig(token: string, id: string): Promise<void> {
   // 204 No Content, so avoid request<T> (its response.json() throws on an empty body).
   const response = await fetch(`${API_URL}/ssh-configs/${encodeURIComponent(id)}`, {

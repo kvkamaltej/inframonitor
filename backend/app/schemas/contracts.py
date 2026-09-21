@@ -1264,6 +1264,17 @@ class SshConfigUpdate(BaseModel):
     private_key: str | None = None
 
 
+class SshTestRequest(BaseModel):
+    # Probe a bastion / jump host in isolation. Either name a saved config by id (its stored, encrypted
+    # credentials are used) OR pass the inline host/port/user + write-only credentials as typed.
+    ssh_config_id: str | None = None
+    host: str = Field(default="", max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(default="", max_length=128)
+    password: str = Field(default="", max_length=1024)
+    private_key: str = Field(default="", max_length=32768)
+
+
 class SshConfigRead(BaseModel):
     # id is the config's public_id (a uuid string), never the autoincrement key. Secrets are never
     # present; has_password / has_private_key tell the UI whether a credential is stored.

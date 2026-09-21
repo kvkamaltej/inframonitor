@@ -140,6 +140,7 @@ from app.schemas.contracts import (
     SshConfigCreate,
     SshConfigRead,
     SshConfigUpdate,
+    SshTestRequest,
     Summary,
     TokenResponse,
     TomcatActionRequest,
@@ -169,6 +170,7 @@ from app.services import node_exporter
 from app.services.node_exporter import NodeExporterError
 from app.services.inventory import InventoryService, to_read
 from app.services.validation import validate_host_address
+from app.services.ssh_common import resolve_ssh
 from app.services.ssh_ops import (
     ShellSession,
     SftpTooLarge,
@@ -194,6 +196,7 @@ from app.services.ssh_ops import (
     sftp_list,
     sftp_stat,
     sftp_upload,
+    test_bastion,
     tomcat_action,
     tomcat_logs,
 )
@@ -1647,6 +1650,11 @@ def update_server(server_id: str, payload: ServerUpdate, _: dict = Depends(requi
         server.encrypted_jump_password = encrypt_secret(data["jump_password"])
     if data.get("jump_private_key"):
         server.encrypted_jump_private_key = encrypt_secret(data["jump_private_key"])
+    # Removing the inline jump host (an explicit empty jump_host) also drops its stored credentials,
+    # so "remove jump host" leaves nothing orphaned behind rather than keeping undecipherable creds.
+    if "jump_host" in data and not (data["jump_host"] or "").strip():
+        server.encrypted_jump_password = ""
+        server.encrypted_jump_private_key = ""
     # Referenced global SSH config: sent explicitly (incl. "" to clear the reference) only when the
     # user changed it, so an edit that omits the field leaves the selection untouched.
     if "ssh_config_id" in data:
@@ -3213,6 +3221,24 @@ def list_ssh_configs(_: dict = Depends(require_user), db: Session = Depends(get_
     return [_ssh_config_read(c) for c in configs]
 
 
+@router.post("/ssh-configs/test", response_model=ConnectionResult)
+def test_ssh_bastion(payload: SshTestRequest, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> ConnectionResult:
+    """Probe a jump host / bastion in isolation, so the operator can check it works while adding or
+    editing a server or database connection. A referenced saved config uses its stored credentials;
+    otherwise the inline host/user + typed credentials are used. A failure is ok=false / HTTP 200."""
+    if (payload.ssh_config_id or "").strip():
+        config = _ssh_config_or_404(db, payload.ssh_config_id.strip())
+        resolved = resolve_ssh(config, "", None, None, None, None)  # decrypt the config's stored creds
+        if resolved is None:
+            return ConnectionResult(ok=False, message="The selected SSH config has no host configured.")
+        host, port, username, password, private_key = resolved
+    else:
+        host, port, username = payload.host, payload.port, payload.username
+        password, private_key = payload.password, payload.private_key
+    ok, message = test_bastion(host, port, username, password, private_key)
+    return ConnectionResult(ok=ok, message=message)
+
+
 @router.post("/ssh-configs", response_model=SshConfigRead, status_code=status.HTTP_201_CREATED)
 def create_ssh_config(payload: SshConfigCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> SshConfigRead:
     name = payload.name.strip()
@@ -3435,6 +3461,10 @@ def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dic
         conn.encrypted_ssh_password = encrypt_secret(data["ssh_password"])
     if data.get("ssh_private_key"):
         conn.encrypted_ssh_private_key = encrypt_secret(data["ssh_private_key"])
+    # Removing the inline tunnel (an explicit empty ssh_host) also drops its stored credentials.
+    if "ssh_host" in data and not (data["ssh_host"] or "").strip():
+        conn.encrypted_ssh_password = ""
+        conn.encrypted_ssh_private_key = ""
     if "ssh_config_id" in data:
         conn.ssh_config_id = _resolve_ssh_config_fk(db, data["ssh_config_id"])
     if "group" in data:

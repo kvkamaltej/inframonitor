@@ -10,10 +10,11 @@
 // payload keys with serverJumpPayload / dbTunnelPayload.
 
 import { useEffect, useState } from "react";
-import { ChevronDown, Loader2, Plus } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Loader2, PlugZap, Plus, X } from "lucide-react";
 import {
   createSshConfig,
   getSshConfigs,
+  testSshBastion,
   type DbConnection,
   type Server,
   type SshConfig
@@ -124,6 +125,9 @@ export function SshTunnelSection({
   const [savingName, setSavingName] = useState<string | null>(null); // null = closed
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState("");
+  // bastion connectivity probe
+  const [testing, setTesting] = useState(false);
+  const [testNote, setTestNote] = useState<{ ok: boolean; text: string } | null>(null);
 
   const title = kind === "server" ? "Jump host (bastion)" : "SSH tunnel (jump host)";
   const hostLabel = kind === "server" ? "Jump host / bastion" : "Jump host / bastion";
@@ -140,11 +144,41 @@ export function SshTunnelSection({
   }, [token]);
 
   function patch(partial: Partial<SshTunnelValue>) {
+    setTestNote(null); // any change invalidates the last probe result
     onChange({ ...value, ...partial });
   }
 
+  // Remove the jump host entirely: collapse the section and clear every field, so saving unlinks any
+  // referenced config and wipes the inline bastion (the backend also drops its stored credentials).
+  function removeJump() {
+    setTestNote(null);
+    setSavingName(null);
+    onChange({ ...value, enabled: false, configId: "", host: "", username: "", password: "", privateKey: "" });
+  }
+
+  async function testBastion() {
+    setTesting(true);
+    setTestNote(null);
+    try {
+      const res = value.configId
+        ? await testSshBastion(token, { ssh_config_id: value.configId })
+        : await testSshBastion(token, {
+            host: value.host.trim(),
+            port: Number(value.port) || 22,
+            username: value.username.trim(),
+            password: value.password,
+            private_key: value.privateKey
+          });
+      setTestNote({ ok: res.ok, text: res.message });
+    } catch (e) {
+      setTestNote({ ok: false, text: e instanceof Error ? e.message : "Bastion test failed" });
+    } finally {
+      setTesting(false);
+    }
+  }
+
   const selected = configs.find((c) => c.id === value.configId);
-  const inline = value.configId === "";
+  const canTest = value.configId !== "" || value.host.trim().length > 0;
 
   async function saveAsConfig() {
     const name = (savingName || "").trim();
@@ -180,24 +214,35 @@ export function SshTunnelSection({
 
   return (
     <div className="overflow-hidden rounded-xl ring-1 ring-edge">
-      <label className="flex cursor-pointer items-center gap-2.5 px-4 py-2.5">
-        <input
-          type="checkbox"
-          checked={value.enabled}
-          onChange={(e) => patch({ enabled: e.target.checked })}
-          className="h-4 w-4 shrink-0 rounded border-edge text-accent focus:ring-accent"
-        />
-        <span className="text-xs font-semibold uppercase tracking-wider text-muted">{title}</span>
+      <div className="flex items-center gap-2.5 px-4 py-2.5">
+        <label className="flex flex-1 cursor-pointer items-center gap-2.5">
+          <input
+            type="checkbox"
+            checked={value.enabled}
+            onChange={(e) => patch({ enabled: e.target.checked })}
+            className="h-4 w-4 shrink-0 rounded border-edge text-accent focus:ring-accent"
+          />
+          <span className="text-xs font-semibold uppercase tracking-wider text-muted">{title}</span>
+          {value.enabled ? (
+            <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-accent">
+              {selected ? `via ${selected.name}` : value.host.trim() ? `via ${value.host.trim()}` : "on"}
+            </span>
+          ) : (
+            <span className="text-[11px] font-normal normal-case text-muted">
+              optional — reach {kind === "server" ? "this server" : "the database"} through an SSH bastion
+            </span>
+          )}
+        </label>
         {value.enabled ? (
-          <span className="rounded-full bg-accent/10 px-2 py-0.5 text-[10px] font-semibold uppercase text-accent">
-            {selected ? `via ${selected.name}` : value.host.trim() ? `via ${value.host.trim()}` : "on"}
-          </span>
-        ) : (
-          <span className="text-[11px] font-normal normal-case text-muted">
-            optional — reach {kind === "server" ? "this server" : "the database"} through an SSH bastion
-          </span>
-        )}
-      </label>
+          <button
+            type="button"
+            onClick={removeJump}
+            className="inline-flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-muted transition-colors hover:bg-danger/10 hover:text-danger"
+          >
+            <X size={13} /> Remove jump host
+          </button>
+        ) : null}
+      </div>
 
       {value.enabled ? (
         <div className="grid gap-3 border-t border-edge px-4 py-3 md:grid-cols-2">
@@ -324,6 +369,30 @@ export function SshTunnelSection({
               )}
             </>
           )}
+
+          {/* Probe the bastion in isolation — does it accept an SSH login? — before saving the
+              server / connection that will ride on it. Works for a saved config or inline details. */}
+          <div className="md:col-span-2 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void testBastion()}
+              disabled={testing || !canTest}
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-surface px-3 text-sm font-semibold text-fg ring-1 ring-edge transition-colors hover:text-accent disabled:opacity-50"
+            >
+              {testing ? <Loader2 size={14} className="animate-spin" /> : <PlugZap size={14} />}
+              Test bastion
+            </button>
+            {testNote ? (
+              <span
+                className={`inline-flex items-center gap-1.5 text-xs font-medium ${
+                  testNote.ok ? "text-emerald-600 dark:text-emerald-400" : "text-danger"
+                }`}
+              >
+                {testNote.ok ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+                <span className="break-words">{testNote.text}</span>
+              </span>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </div>

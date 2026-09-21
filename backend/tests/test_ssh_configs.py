@@ -113,6 +113,49 @@ def test_referencing_unknown_config_404s(client):
     assert r.status_code == 404
 
 
+def test_bastion_test_endpoint_reports_unreachable(client):
+    # A refused/unreachable bastion is a normal ok=false result (HTTP 200), never a 500. Port 1 on
+    # loopback refuses immediately, so this stays fast.
+    r = client.post("/api/ssh-configs/test", json={"host": "127.0.0.1", "port": 1, "username": "x"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["message"]
+
+
+def test_bastion_test_requires_a_host(client):
+    r = client.post("/api/ssh-configs/test", json={})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+
+
+def test_bastion_test_by_config_id(client):
+    cfg = _create(client, name="probe-cfg", host="127.0.0.1", port=1)
+    r = client.post("/api/ssh-configs/test", json={"ssh_config_id": cfg["id"]})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False  # refused, but resolved the saved config's host/creds and tried
+
+
+def test_remove_inline_jump_clears_stored_credentials(client):
+    # Add a server with an inline jump host + a jump password, then remove the jump host: the stored
+    # credential must be dropped, not left orphaned.
+    r = client.post("/api/servers", json={
+        "hostname": "app-jump", "ip_address": "10.3.3.3", "username": "deploy",
+        "jump_host": "bastion.local", "jump_username": "ops", "jump_password": "s3cret",
+    })
+    assert r.status_code in (200, 201), r.text
+    sid = r.json()["id"]
+    assert r.json()["jump_host"] == "bastion.local"
+    assert r.json()["has_jump_credentials"] is True
+
+    r = client.patch(f"/api/servers/{sid}", json={"jump_host": "", "ssh_config_id": ""})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["jump_host"] == ""
+    assert body["ssh_config_id"] == ""
+    assert body["has_jump_credentials"] is False  # stored jump credential cleared on removal
+
+
 def test_delete_nulls_references(client):
     cfg = _create(client, name="to-delete")
     r = client.post("/api/servers", json={

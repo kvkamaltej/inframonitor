@@ -16,6 +16,7 @@ from app.core.crypto import decrypt_secret
 from app.models.entities import Server
 from app.schemas.contracts import ContainerRead, CredentialPayload, ImageRead
 from app.services import commands
+from app.services.ssh_common import resolve_ssh
 
 _q = shlex.quote
 
@@ -115,6 +116,39 @@ def _client(server: Server, credentials: CredentialPayload) -> paramiko.SSHClien
 
         client.close = _close_both  # type: ignore[method-assign]
     return client
+
+
+def test_bastion(host: str, port: int, username: str, password: str, private_key: str) -> tuple[bool, str]:
+    """Open an SSH session to a bastion / jump host and confirm authentication works, so the operator
+    can check the jump host in isolation before saving a server or database connection that rides on
+    it. Returns (ok, message); an auth failure, unreachable host or timeout is reported as ok=False,
+    never raised. Credentials are used only to connect and are never echoed back."""
+    host = (host or "").strip()
+    if not host:
+        return False, "No bastion host given."
+    port = int(port or 22)
+    username = (username or "").strip()
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kwargs: dict = {"hostname": host, "port": port, "username": username, **_SSH_TIMEOUTS}
+    try:
+        _apply_auth(kwargs, private_key, password)
+    except SshOperationError as exc:
+        return False, str(exc)
+    try:
+        client.connect(**kwargs)
+    except paramiko.AuthenticationException:
+        return False, f"Reached {host}:{port} but authentication failed — check the user and credentials."
+    except Exception as exc:  # unreachable host, timeout, banner failure, refused, ...
+        return False, f"{host}:{port}: {str(exc).splitlines()[0][:300]}"
+    try:
+        # a trivial round trip confirms the SSH session actually works, not just the TCP/auth handshake
+        client.exec_command("true", timeout=10)
+    except Exception:
+        pass
+    finally:
+        client.close()
+    return True, f"Connected to {host}:{port} as {username or '(default user)'}. The bastion is reachable."
 
 
 def _exec_on(client: paramiko.SSHClient, command: str, stdin_data: str = "", timeout: int = 15) -> tuple[int, str, str]:

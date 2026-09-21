@@ -5,11 +5,12 @@
 // the bastion details inline. Create / edit / delete here; the dropdowns elsewhere read this list.
 
 import { FormEvent, useEffect, useState } from "react";
-import { KeyRound, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, KeyRound, Loader2, Pencil, PlugZap, Plus, Trash2, X } from "lucide-react";
 import {
   createSshConfig,
   deleteSshConfig,
   getSshConfigs,
+  testSshBastion,
   updateSshConfig,
   type SshConfig,
   type SshConfigInput
@@ -155,6 +156,31 @@ function SshConfigDialog({
   const [privateKey, setPrivateKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [testNote, setTestNote] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function test() {
+    setTesting(true);
+    setTestNote(null);
+    try {
+      // Test with what's typed. On an edit with an unchanged (blank) secret, fall back to the saved
+      // config's stored credentials by testing it by id.
+      const res = editing && !password && !privateKey
+        ? await testSshBastion(token, { ssh_config_id: editing.id })
+        : await testSshBastion(token, {
+            host: host.trim(),
+            port: Number(port) || 22,
+            username: username.trim(),
+            password,
+            private_key: privateKey
+          });
+      setTestNote({ ok: res.ok, text: res.message });
+    } catch (e) {
+      setTestNote({ ok: false, text: e instanceof Error ? e.message : "Bastion test failed" });
+    } finally {
+      setTesting(false);
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -226,9 +252,24 @@ function SshConfigDialog({
             <label className={labelClass}>Private key <span className="font-normal normal-case text-slate-400">{editing?.has_private_key ? "(stored — blank keeps it)" : "(optional)"}</span></label>
             <textarea value={privateKey} onChange={(e) => setPrivateKey(e.target.value)} placeholder="optional — paste an OpenSSH private key" className={`${field} min-h-24 py-2`} />
           </div>
+          {testNote ? (
+            <p className={`inline-flex items-start gap-1.5 text-xs font-medium ${testNote.ok ? "text-emerald-600 dark:text-emerald-400" : "text-danger dark:text-red-400"}`}>
+              {testNote.ok ? <CheckCircle2 size={14} className="mt-0.5 shrink-0" /> : <AlertTriangle size={14} className="mt-0.5 shrink-0" />}
+              <span className="break-words">{testNote.text}</span>
+            </p>
+          ) : null}
           {error ? <p className="text-xs font-medium text-danger dark:text-red-400">{error}</p> : null}
-          <div className="flex items-center justify-end gap-2 pt-1">
-            <button type="button" onClick={onClose} className="h-10 rounded-full border border-line px-5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</button>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => void test()}
+              disabled={testing || !host.trim()}
+              className="inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm font-semibold text-slate-700 transition-colors hover:text-accent disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+            >
+              {testing ? <Loader2 size={16} className="animate-spin" /> : <PlugZap size={16} />}
+              Test
+            </button>
+            <button type="button" onClick={onClose} className="ml-auto h-10 rounded-full border border-line px-5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel</button>
             <button type="submit" disabled={saving} className="inline-flex h-10 items-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">
               {saving ? <Loader2 size={16} className="animate-spin" /> : null}
               {editing ? "Save changes" : "Create"}
