@@ -274,7 +274,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
     if (autoLinkHandled.current || !server || !me) return;
     autoLinkHandled.current = true;
     const params = new URLSearchParams(window.location.search);
-    if (params.get("shell") === "1" && me.role === "admin" && server.has_credentials) {
+    if (params.get("shell") === "1" && me.role === "admin" && server.has_credentials && server.is_active !== false) {
       setHostShellFullscreen(true);
       setHostShellOpen(true);
     }
@@ -366,6 +366,20 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
       notify(error instanceof Error ? error.message : "Unable to update folder", "error");
     } finally {
       setFolderBusy(false);
+    }
+  }
+
+  // Admin re-activates the server from its detail page (its live ops are gated while inactive).
+  async function reactivateServer() {
+    setBusy("reactivate");
+    try {
+      const updated = await updateServer(token, serverId, { is_active: true });
+      setServer(updated);
+      notify(`${updated.hostname} is active again.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to reactivate the server", "error");
+    } finally {
+      setBusy("");
     }
   }
 
@@ -809,7 +823,8 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
           </div>
           <div className="flex items-center gap-3 text-sm font-medium text-slate-700 dark:text-slate-200">
             {server ? <StatusPill status={server.status} /> : null}
-            {isAdmin && server?.has_credentials ? (
+            {server?.is_active === false ? <span className="rounded-full bg-slate-200 px-2.5 py-1 text-[11px] font-semibold uppercase text-slate-600 dark:bg-slate-700 dark:text-slate-300">Inactive</span> : null}
+            {isAdmin && server?.has_credentials && server?.is_active !== false ? (
               <button
                 type="button"
                 onClick={() => setHostShellOpen((open) => !open)}
@@ -846,7 +861,7 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
                   <>
                     <button aria-label="Dismiss actions" onClick={() => setActionsOpen(false)} className="fixed inset-0 z-40 cursor-default" />
                     <div role="menu" className="absolute right-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-2xl border border-line bg-panel py-1 text-left shadow-lg dark:border-slate-700 dark:bg-slate-900">
-                      <button role="menuitem" disabled={loading} onClick={() => { setActionsOpen(false); void runDiscovery(); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800">
+                      <button role="menuitem" disabled={loading || server?.is_active === false} title={server?.is_active === false ? "Reactivate the server to run discovery" : undefined} onClick={() => { setActionsOpen(false); void runDiscovery(); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800">
                         <RefreshCw size={15} className="text-accent" /> Discover services &amp; storage
                       </button>
                       <button role="menuitem" onClick={() => { setActionsOpen(false); setEditOpen(true); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800">
@@ -943,6 +958,27 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
             />
           ) : null}
 
+          {server && server.is_active === false ? (
+            <div className="rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 dark:border-amber-500/40 dark:bg-amber-950/40">
+              <div className="flex items-center gap-2 font-semibold text-amber-800 dark:text-amber-200"><Lock size={18} /> This server is inactive</div>
+              <p className="mt-1 text-sm text-amber-700 dark:text-amber-300">
+                An admin marked <span className="font-semibold">{server.hostname}</span> inactive. Its live operations — shell, discovery, containers, Tomcat, monitoring and on-demand logs — are hidden and it is not probed. Reactivate it to use them again.
+              </p>
+              {isAdmin ? (
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => void reactivateServer()}
+                    className="inline-flex h-9 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
+                  >
+                    {busy === "reactivate" ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} Mark active
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+          <>
           <div className="flex flex-wrap items-center gap-2">
             {([
               ["overview", "Overview", true],
@@ -1626,6 +1662,8 @@ export function ServerDetailApp({ serverId }: { serverId: string }) {
               <pre className={`${isFullscreen ? "flex-1 max-h-none" : "max-h-[560px]"} whitespace-pre-wrap break-words overflow-auto bg-slate-950 p-4 text-xs leading-relaxed text-slate-100`}>{logs.length ? logs.join("\n") : "Pick a source above and Fetch, or open a container / service / Tomcat / database log."}</pre>
             </div>
           ) : null}
+          </>
+          )}
         </section>
       </section>
       </div>
