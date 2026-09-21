@@ -152,11 +152,17 @@ def _api_client(conn: dict) -> Iterator[Any]:
             if not api_host:
                 raise KubeError("Cannot open an SSH tunnel: the API server host could not be determined.")
             from app.services import db_ssh
-            ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key = tunnel
+            # A second-hop jump host in front of the tunnel host: app -> jump -> tunnel host ->
+            # forward the API port. Used for a control-plane node reachable only via a bastion.
+            jump = conn.get("tunnel_jump")
             try:
-                forwarder = db_ssh._forwarder(ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key, api_host, api_port)
+                if jump:
+                    forwarder = db_ssh._forwarder_via(jump, tunnel, api_host, api_port)
+                else:
+                    ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key = tunnel
+                    forwarder = db_ssh._forwarder(ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key, api_host, api_port)
             except Exception as exc:  # auth, unreachable bastion, remote host closed, ...
-                raise KubeError(f"SSH tunnel via {ssh_host}: {_clean(exc)}") from exc
+                raise KubeError(_clean(exc)) from exc
             local_port = forwarder.local_bind_port
             cfg.host = urlunsplit((parts.scheme or "https", f"127.0.0.1:{local_port}", parts.path, parts.query, parts.fragment))
             # We now connect to localhost, but the API server's certificate is for its real hostname.
@@ -172,7 +178,8 @@ def _api_client(conn: dict) -> Iterator[Any]:
                 api_client.close()
         if forwarder is not None:
             with contextlib.suppress(Exception):
-                forwarder.stop()
+                from app.services import db_ssh
+                db_ssh.stop(forwarder)  # also closes a two-hop forwarder's jump client
         if ca_path:
             with contextlib.suppress(Exception):
                 os.remove(ca_path)

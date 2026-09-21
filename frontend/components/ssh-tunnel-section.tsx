@@ -34,10 +34,13 @@ export type SshTunnelValue = {
   privateKey: string;
   // whether the entity being edited already had a stored inline credential (drives the placeholder).
   hadStored: boolean;
+  // Optional SECOND hop (kube only): a saved SSH config used as a jump host in FRONT of the tunnel
+  // host, so a control-plane node behind a bastion is reached app -> jump -> node -> API. "" = none.
+  jumpConfigId: string;
 };
 
 export function emptySshTunnel(): SshTunnelValue {
-  return { enabled: false, configId: "", host: "", port: 22, username: "", password: "", privateKey: "", hadStored: false };
+  return { enabled: false, configId: "", host: "", port: 22, username: "", password: "", privateKey: "", hadStored: false, jumpConfigId: "" };
 }
 
 export function sshTunnelFromServer(server: Server): SshTunnelValue {
@@ -49,7 +52,8 @@ export function sshTunnelFromServer(server: Server): SshTunnelValue {
     username: server.jump_username || "",
     password: "",
     privateKey: "",
-    hadStored: Boolean(server.has_jump_credentials)
+    hadStored: Boolean(server.has_jump_credentials),
+    jumpConfigId: ""
   };
 }
 
@@ -62,23 +66,26 @@ export function sshTunnelFromDbConnection(conn: DbConnection): SshTunnelValue {
     username: conn.ssh_username || "",
     password: "",
     privateKey: "",
-    hadStored: Boolean(conn.has_ssh_credentials)
+    hadStored: Boolean(conn.has_ssh_credentials),
+    jumpConfigId: ""
   };
 }
 
 // Same shape, from a Kubernetes cluster's ssh_* tunnel fields (reaches the API server via a bastion).
 export function sshTunnelFromKubeCluster(cluster: {
   ssh_config_id?: string; ssh_host?: string; ssh_port?: number; ssh_username?: string; has_ssh_credentials?: boolean;
+  ssh_jump_config_id?: string;
 }): SshTunnelValue {
   return {
-    enabled: Boolean(cluster.ssh_config_id) || Boolean(cluster.ssh_host),
+    enabled: Boolean(cluster.ssh_config_id) || Boolean(cluster.ssh_host) || Boolean(cluster.ssh_jump_config_id),
     configId: cluster.ssh_config_id || "",
     host: cluster.ssh_host || "",
     port: cluster.ssh_port || 22,
     username: cluster.ssh_username || "",
     password: "",
     privateKey: "",
-    hadStored: Boolean(cluster.has_ssh_credentials)
+    hadStored: Boolean(cluster.has_ssh_credentials),
+    jumpConfigId: cluster.ssh_jump_config_id || ""
   };
 }
 
@@ -102,13 +109,15 @@ export function serverJumpPayload(v: SshTunnelValue) {
   };
 }
 
-// Same, for a DB connection's ssh_* tunnel fields.
+// Same, for a DB connection's ssh_* tunnel fields. Also carries ssh_jump_config_id (the optional
+// second-hop jump host); DB connections ignore that extra field, Kubernetes clusters use it.
 export function dbTunnelPayload(v: SshTunnelValue) {
   if (!v.enabled) {
-    return { ssh_host: "", ssh_port: 22, ssh_username: "", ssh_password: "", ssh_private_key: "", ssh_config_id: "" };
+    return { ssh_host: "", ssh_port: 22, ssh_username: "", ssh_password: "", ssh_private_key: "", ssh_config_id: "", ssh_jump_config_id: "" };
   }
+  const jump = { ssh_jump_config_id: v.jumpConfigId || "" };
   if (v.configId) {
-    return { ssh_host: "", ssh_port: 22, ssh_username: "", ssh_password: "", ssh_private_key: "", ssh_config_id: v.configId };
+    return { ssh_host: "", ssh_port: 22, ssh_username: "", ssh_password: "", ssh_private_key: "", ssh_config_id: v.configId, ...jump };
   }
   return {
     ssh_host: v.host.trim(),
@@ -116,7 +125,8 @@ export function dbTunnelPayload(v: SshTunnelValue) {
     ssh_username: v.username.trim(),
     ssh_password: v.password,
     ssh_private_key: v.privateKey,
-    ssh_config_id: ""
+    ssh_config_id: "",
+    ...jump
   };
 }
 
@@ -169,23 +179,29 @@ export function SshTunnelSection({
   function removeJump() {
     setTestNote(null);
     setSavingName(null);
-    onChange({ ...value, enabled: false, configId: "", host: "", username: "", password: "", privateKey: "" });
+    onChange({ ...value, enabled: false, configId: "", host: "", username: "", password: "", privateKey: "", jumpConfigId: "" });
   }
 
   async function testBastion() {
     setTesting(true);
     setTestNote(null);
     try {
-      const res = value.configId
-        ? await testSshBastion(token, { ssh_config_id: value.configId })
-        : await testSshBastion(token, {
-            host: value.host.trim(),
-            port: Number(value.port) || 22,
-            username: value.username.trim(),
-            password: value.password,
-            private_key: value.privateKey
-          });
-      setTestNote({ ok: res.ok, text: res.message });
+      // With a jump host in front (kube two-hop), the tunnel host itself is NOT directly reachable,
+      // so probe the JUMP host — the one hop this test can actually make. Otherwise probe the tunnel
+      // host (a saved config or the inline details).
+      const res = value.jumpConfigId
+        ? await testSshBastion(token, { ssh_config_id: value.jumpConfigId })
+        : value.configId
+          ? await testSshBastion(token, { ssh_config_id: value.configId })
+          : await testSshBastion(token, {
+              host: value.host.trim(),
+              port: Number(value.port) || 22,
+              username: value.username.trim(),
+              password: value.password,
+              private_key: value.privateKey
+            });
+      const prefix = value.jumpConfigId ? "Jump host: " : "";
+      setTestNote({ ok: res.ok, text: prefix + res.message });
     } catch (e) {
       setTestNote({ ok: false, text: e instanceof Error ? e.message : "Bastion test failed" });
     } finally {
@@ -194,7 +210,7 @@ export function SshTunnelSection({
   }
 
   const selected = configs.find((c) => c.id === value.configId);
-  const canTest = value.configId !== "" || value.host.trim().length > 0;
+  const canTest = value.jumpConfigId !== "" || value.configId !== "" || value.host.trim().length > 0;
 
   async function saveAsConfig() {
     const name = (savingName || "").trim();
@@ -282,6 +298,32 @@ export function SshTunnelSection({
             </div>
             {loadError ? <span className="text-[11px] font-normal normal-case text-danger">{loadError}</span> : null}
           </label>
+
+          {/* Second hop (kube only): the tunnel host above may itself be behind a jump host — e.g. a
+              control-plane node reachable only via a bastion. app -> jump -> node -> API. */}
+          {kind === "kube" ? (
+            <label className={`${labelClass} md:col-span-2`}>
+              Reached through jump host (optional)
+              <div className="relative">
+                <select
+                  value={value.jumpConfigId}
+                  onChange={(e) => patch({ jumpConfigId: e.target.value })}
+                  className={`${inputClass} appearance-none pr-10`}
+                >
+                  <option value="">Direct — no jump host</option>
+                  {configs.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} — {c.username ? `${c.username}@` : ""}{c.host}:{c.port}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted" />
+              </div>
+              <span className="text-[11px] font-normal normal-case text-muted">
+                Pick a bastion (a saved SSH config) if the host above is only reachable through one. The app then hops app → jump → host → API server.
+              </span>
+            </label>
+          ) : null}
 
           {selected ? (
             <p className="md:col-span-2 rounded-lg bg-surface px-3 py-2 text-xs font-normal normal-case text-muted ring-1 ring-edge">

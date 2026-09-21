@@ -258,6 +258,11 @@ class KubeCluster(Base):
     encrypted_ssh_private_key: Mapped[str] = mapped_column(Text, default="")
     ssh_config_id: Mapped[int | None] = mapped_column(ForeignKey("ssh_configs.id"), nullable=True, index=True)
     ssh_config: Mapped["SshConfig | None"] = relationship("SshConfig", foreign_keys=[ssh_config_id])
+    # Optional SECOND hop: a jump host (bastion) in FRONT of the tunnel host above, so the API server
+    # is reached app -> jump -> tunnel host -> API. References a reusable SshConfig (the bastion is
+    # almost always shared). NULL = the tunnel host is reached directly.
+    ssh_jump_config_id: Mapped[int | None] = mapped_column(ForeignKey("ssh_configs.id"), nullable=True, index=True)
+    ssh_jump_config: Mapped["SshConfig | None"] = relationship("SshConfig", foreign_keys=[ssh_jump_config_id])
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

@@ -3371,6 +3371,7 @@ def delete_ssh_config(config_id: str, _: dict = Depends(require_admin), db: Sess
         db_ssh.close(conn.public_id)
     db.execute(update(DbConnection).where(DbConnection.ssh_config_id == config.id).values(ssh_config_id=None))
     db.execute(update(KubeCluster).where(KubeCluster.ssh_config_id == config.id).values(ssh_config_id=None))
+    db.execute(update(KubeCluster).where(KubeCluster.ssh_jump_config_id == config.id).values(ssh_jump_config_id=None))
     db.delete(config)
     db.commit()
 
@@ -4076,6 +4077,8 @@ def _cluster_read(db: Session, cluster: KubeCluster) -> KubeClusterRead:
         has_ssh_credentials=bool(getattr(cluster, "encrypted_ssh_password", "") or getattr(cluster, "encrypted_ssh_private_key", "")),
         ssh_config_id=cluster.ssh_config.public_id if getattr(cluster, "ssh_config", None) else "",
         ssh_config_name=cluster.ssh_config.name if getattr(cluster, "ssh_config", None) else "",
+        ssh_jump_config_id=cluster.ssh_jump_config.public_id if getattr(cluster, "ssh_jump_config", None) else "",
+        ssh_jump_config_name=cluster.ssh_jump_config.name if getattr(cluster, "ssh_jump_config", None) else "",
         log_shipping_enabled=bool(getattr(cluster, "log_shipping_enabled", False)),
         log_namespaces=_cluster_namespaces(cluster),
         created_at=cluster.created_at,
@@ -4106,6 +4109,8 @@ def _cluster_conn(cluster: KubeCluster) -> dict:
             getattr(cluster, "ssh_host", ""), getattr(cluster, "ssh_port", 22), getattr(cluster, "ssh_username", ""),
             getattr(cluster, "encrypted_ssh_password", ""), getattr(cluster, "encrypted_ssh_private_key", ""),
         ),
+        # second-hop jump host (a saved SSH config) reached BEFORE the tunnel host, or None.
+        "tunnel_jump": resolve_ssh(getattr(cluster, "ssh_jump_config", None), "", None, None, None, None),
     }
 
 
@@ -4162,6 +4167,7 @@ def create_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_ad
         encrypted_ssh_password=encrypt_secret(payload.ssh_password) if payload.ssh_password else "",
         encrypted_ssh_private_key=encrypt_secret(payload.ssh_private_key) if payload.ssh_private_key else "",
         ssh_config_id=_resolve_ssh_config_fk(db, payload.ssh_config_id),
+        ssh_jump_config_id=_resolve_ssh_config_fk(db, payload.ssh_jump_config_id),
         folder_id=_resolve_group_to_folder_id(db, payload.group),
     )
     db.add(cluster)
@@ -4182,6 +4188,9 @@ def test_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_admi
     elif (payload.ssh_host or "").strip():
         conn["tunnel"] = (payload.ssh_host.strip(), payload.ssh_port or 22, payload.ssh_username,
                           payload.ssh_password, payload.ssh_private_key)
+    if (payload.ssh_jump_config_id or "").strip():
+        jcfg = _ssh_config_or_404(db, payload.ssh_jump_config_id.strip())
+        conn["tunnel_jump"] = resolve_ssh(jcfg, "", None, None, None, None)
     try:
         version = kube.test_connection(conn)
         where = payload.api_server_url.strip() or "cluster"
@@ -4238,6 +4247,8 @@ def update_kube_cluster(cluster_id: str, payload: KubeClusterUpdate, _: dict = D
         cluster.encrypted_ssh_private_key = ""
     if "ssh_config_id" in data:
         cluster.ssh_config_id = _resolve_ssh_config_fk(db, data["ssh_config_id"])
+    if "ssh_jump_config_id" in data:
+        cluster.ssh_jump_config_id = _resolve_ssh_config_fk(db, data["ssh_jump_config_id"])
     if "group" in data:
         cluster.folder_id = _resolve_group_to_folder_id(db, data["group"])
 

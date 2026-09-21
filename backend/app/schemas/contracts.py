@@ -980,6 +980,9 @@ class KubeClusterCreate(BaseModel):
     ssh_password: str = Field(default="", max_length=1024)
     ssh_private_key: str = Field(default="", max_length=32768)
     ssh_config_id: str | None = None
+    # Optional SECOND hop: a saved SSH config (public_id) used as a jump host IN FRONT of the tunnel
+    # host, so the API server is reached app -> jump -> tunnel host -> API. "" / None = no jump.
+    ssh_jump_config_id: str | None = None
     # folder name (the "group"); resolved to an existing Folder in the route, else left unassigned.
     group: str | None = None
 
@@ -1004,6 +1007,8 @@ class KubeClusterUpdate(BaseModel):
     ssh_private_key: str | None = None
     # referenced global SSH config public_id; "" clears the reference, None leaves it.
     ssh_config_id: str | None = None
+    # second-hop jump host (saved SSH config public_id); "" clears, None leaves.
+    ssh_jump_config_id: str | None = None
     group: str | None = None
 
 
@@ -1026,6 +1031,9 @@ class KubeClusterRead(BaseModel):
     has_ssh_credentials: bool = False
     ssh_config_id: str = ""
     ssh_config_name: str = ""
+    # second-hop jump host (a saved SSH config) in front of the tunnel host, when set.
+    ssh_jump_config_id: str = ""
+    ssh_jump_config_name: str = ""
     # feature/k8s-log-shipping: whether this cluster's pod logs are tailed into Loki, and the
     # namespaces shipped ([] = all). Present on read so the UI can render the toggle state.
     log_shipping_enabled: bool = False

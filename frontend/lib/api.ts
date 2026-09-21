@@ -1576,6 +1576,9 @@ export type KubeCluster = {
   has_ssh_credentials: boolean;
   ssh_config_id: string;
   ssh_config_name: string;
+  // optional second-hop jump host (a saved SSH config) in front of the tunnel host.
+  ssh_jump_config_id: string;
+  ssh_jump_config_name: string;
   // feature/k8s-log-shipping: whether this cluster's pod logs are tailed into Loki, and which
   // namespaces ([] = all).
   log_shipping_enabled: boolean;
@@ -1600,6 +1603,8 @@ export type KubeClusterInput = {
   ssh_password?: string;
   ssh_private_key?: string;
   ssh_config_id?: string;
+  // optional second-hop jump host (a saved SSH config public_id) in front of the tunnel host
+  ssh_jump_config_id?: string;
   group?: string | null;
 };
 

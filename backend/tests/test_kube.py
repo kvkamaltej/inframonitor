@@ -99,6 +99,50 @@ def test_cluster_ssh_tunnel_stored_and_used(client, monkeypatch):
     assert calls["args"] == ("bastion.local", 2222, "ops", "10.9.9.55", 6443)
 
 
+def test_cluster_two_hop_tunnel(client, monkeypatch):
+    # A control-plane node (.55) reachable only by SSHing into it THROUGH a bastion: the tunnel host
+    # is .55 (inline), and a saved SSH config is the jump host in front. A live read must build the
+    # two-hop forward (app -> jump -> .55 -> API port) via db_ssh._forwarder_via.
+    bastion = client.post("/api/ssh-configs", json={
+        "name": "the-bastion", "host": "bastion.dmz", "port": 22, "username": "hop", "password": "pw"})
+    assert bastion.status_code == 201, bastion.text
+    jump_id = bastion.json()["id"]
+
+    r = client.post("/api/kube/clusters", json={
+        "name": "cp-via-bastion",
+        "auth_method": "token",
+        "api_server_url": "https://10.9.9.55:6443",
+        "token": "bearer",
+        "verify_tls": False,
+        "ssh_host": "10.9.9.55",           # the control-plane node (the tunnel/endpoint host)
+        "ssh_username": "kube",
+        "ssh_password": "nodepw",
+        "ssh_jump_config_id": jump_id,     # reached THROUGH the bastion
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["ssh_host"] == "10.9.9.55"
+    assert body["ssh_jump_config_id"] == jump_id
+    assert body["ssh_jump_config_name"] == "the-bastion"
+
+    from app.services import db_ssh
+    calls = {}
+
+    def fake_via(jump, endpoint, dest_host, dest_port):
+        calls["jump"] = jump
+        calls["endpoint"] = endpoint
+        calls["dest"] = (dest_host, dest_port)
+        raise RuntimeError("proxy channel refused")
+
+    monkeypatch.setattr(db_ssh, "_forwarder_via", fake_via)
+    r = client.get(f"/api/kube/clusters/{body['id']}/namespaces")
+    assert r.status_code == 400
+    # jump host = the bastion's decrypted creds; endpoint = .55; dest = the API host:port
+    assert calls["jump"][0] == "bastion.dmz" and calls["jump"][2] == "hop"
+    assert calls["endpoint"][0] == "10.9.9.55" and calls["endpoint"][2] == "kube"
+    assert calls["dest"] == ("10.9.9.55", 6443)
+
+
 def test_create_cluster_token_mode(client):
     r = client.post("/api/kube/clusters", json={
         "name": "token-cluster",
