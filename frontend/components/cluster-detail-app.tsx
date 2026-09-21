@@ -9,6 +9,8 @@ import {
   Boxes,
   Calendar,
   Check,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Download,
   Cpu,
@@ -108,7 +110,6 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
   const [logsNamespace, setLogsNamespace] = useState("");
   const [logsPod, setLogsPod] = useState("");
   const [logsContainer, setLogsContainer] = useState("");
-  const [logsContainers, setLogsContainers] = useState<string[]>([]);
   const [logsTail, setLogsTail] = useState(200);
   const [logsPrevious, setLogsPrevious] = useState(false);
   // Cascading namespace -> pod -> container picker for the Logs tab: the pods available in the
@@ -217,24 +218,29 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
     }
   }
 
-  // Namespace changed in the Logs tab: reload its pods and clear the pod/container selection.
+  // Namespace changed in the Logs tab: reload its pods and clear the container/pod selection. The
+  // container dropdown is then populated from the namespace's pods (see logsContainerOptions).
   function changeLogsNamespace(ns: string) {
     setLogsNamespace(ns);
-    setLogsPod("");
-    setLogsContainers([]);
     setLogsContainer("");
+    setLogsPod("");
     void loadLogsPods(ns);
   }
 
-  // Pod chosen in the Logs tab: cascade its containers into the container dropdown, and pin the
-  // pod's real namespace (the logs route needs it even when browsing "All namespaces").
+  // Container (service) chosen: default to ALL pods and load the aggregated service logs right away.
+  function changeLogsContainer(c: string) {
+    setLogsContainer(c);
+    setLogsPod("");
+    if (c) void loadLogs(logsNamespace, "", c);
+  }
+
+  // Pod chosen: drill into that single pod's logs for the selected container.
   function changeLogsPod(name: string) {
     setLogsPod(name);
     const pod = logsPodOptions.find((p) => p.name === name);
+    const ns = pod ? pod.namespace : logsNamespace;
     if (pod) setLogsNamespace(pod.namespace);
-    const containers = pod?.containers ?? [];
-    setLogsContainers(containers);
-    setLogsContainer(containers[0] ?? "");
+    if (logsContainer) void loadLogs(ns, name, logsContainer);
   }
 
   async function loadServices(ns = namespace) {
@@ -262,14 +268,12 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
       setLogsNamespace(svc.namespace);
       setLogsPodOptions(pods);
       setLogsPodsLoaded(true);
-      const first = pods[0];
-      setLogsPod(first.name);
-      setLogsContainers(first.containers ?? []);
-      const container = first.containers?.[0] ?? "";
+      const container = pods[0].containers?.[0] ?? "";
       setLogsContainer(container);
+      setLogsPod("");   // service view: aggregate across all the service's pods for this container
       setPodLogs(null);
       setTab("logs");
-      void loadLogs(first.namespace, first.name, container);
+      void loadLogs(svc.namespace, "", container);
     } catch (error) {
       notify(errText(error, "Unable to load service pods"), "error");
     } finally {
@@ -313,19 +317,38 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
     }
   }
 
+  // Load logs for the current selection. A container is the unit (the "service"): with no specific
+  // pod chosen we AGGREGATE that container's logs across every pod running it in the namespace; pick
+  // a pod to drill into just that one.
   async function loadLogs(ns = logsNamespace, pod = logsPod, container = logsContainer) {
-    if (!ns || !pod) {
-      notify("Enter a namespace and a pod name first.", "error");
+    if (!container) {
+      notify("Pick a container (service) first.", "error");
       return;
     }
     setBusy("logs");
     try {
-      const next = await getKubePodLogs(token, clusterId, ns, pod, {
-        container: container || undefined,
-        tail: logsTail,
-        previous: logsPrevious
-      });
-      setPodLogs(next);
+      if (pod) {
+        const next = await getKubePodLogs(token, clusterId, ns, pod, { container, tail: logsTail, previous: logsPrevious });
+        setPodLogs(next);
+      } else {
+        // service view: every pod in the namespace that runs this container, concatenated per pod.
+        const pods = logsPodOptions.filter((p) => (!ns || p.namespace === ns) && (p.containers || []).includes(container));
+        if (!pods.length) {
+          setPodLogs(null);
+          notify("No running pods use this container in the namespace.", "error");
+          return;
+        }
+        const parts: string[] = [];
+        for (const p of pods) {
+          try {
+            const res = await getKubePodLogs(token, clusterId, p.namespace, p.name, { container, tail: logsTail, previous: logsPrevious });
+            parts.push(`===== ${p.namespace}/${p.name} =====\n${(res.log || "").trim() || "(no output)"}`);
+          } catch (e) {
+            parts.push(`===== ${p.namespace}/${p.name} =====\n[error: ${errText(e, "failed to load")}]`);
+          }
+        }
+        setPodLogs({ container, log: parts.join("\n\n"), tail: logsTail });
+      }
     } catch (error) {
       notify(errText(error, "Unable to load pod logs"), "error");
     } finally {
@@ -363,7 +386,7 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
   // Auto-refresh the pod logs on the chosen interval, but only once a pod is selected and no other
   // request is in flight (so a slow fetch never stacks up behind the timer).
   useAutoRefresh(logsAuto, () => {
-    if (logsNamespace && logsPod && !busy) void loadLogs();
+    if (logsContainer && !busy) void loadLogs();
   });
 
   // ---- initial + lazy loading ------------------------------------------------------------
@@ -424,9 +447,8 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
   function openPodLogs(pod: KubePod) {
     const container = pod.containers[0] ?? "";
     setLogsNamespace(pod.namespace);
-    setLogsPod(pod.name);
-    setLogsContainers(pod.containers ?? []);
     setLogsContainer(container);
+    setLogsPod(pod.name);
     setPodLogs(null);
     setTab("logs");
     // populate the Logs-tab pod dropdown with this pod's namespace, so the picker shows its siblings
@@ -534,6 +556,11 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
     }
   }
 
+  // Logs tab: distinct container names across the namespace's pods (the selectable "services"), and
+  // the pods that run the currently-selected container (for the optional drill-down).
+  const logsContainerOptions = Array.from(new Set(logsPodOptions.flatMap((p) => p.containers || []))).sort();
+  const logsPodsForContainer = logsPodOptions.filter((p) => !logsContainer || (p.containers || []).includes(logsContainer));
+
   if (initializing) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-page">
@@ -593,7 +620,7 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
             {tab === "overview" ? <OverviewTab overview={overview} /> : null}
 
             {tab === "overview" && isAdmin ? (
-              <Panel title="Log shipping" icon={<ScrollText size={18} />}>
+              <Panel title="Log shipping" icon={<ScrollText size={18} />} collapsible defaultCollapsed>
                 <label className="flex items-start gap-3">
                   <input
                     type="checkbox"
@@ -798,7 +825,9 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
 
             {tab === "logs" ? (
               <Panel title="Pod Logs" icon={<FileText size={18} />}>
-                <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                {/* Namespace -> Container (the service) -> Pod, on one line. Selecting a container
+                    shows the whole service's logs (all its pods); pick a pod to drill into one. */}
+                <div className="mb-4 grid gap-3 sm:grid-cols-3">
                   <label className="grid gap-1">
                     <span className="text-xs font-semibold uppercase tracking-wider text-muted">Namespace</span>
                     <select value={logsNamespace} onChange={(event) => changeLogsNamespace(event.target.value)} className="h-10 cursor-pointer rounded-xl border border-line bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
@@ -807,34 +836,35 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
                     </select>
                   </label>
                   <label className="grid gap-1">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-muted">Container (service)</span>
+                    <select value={logsContainer} onChange={(event) => changeLogsContainer(event.target.value)} disabled={busy === "logs-pods" || logsContainerOptions.length === 0} className="h-10 cursor-pointer rounded-xl border border-line bg-white px-3 text-sm disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
+                      <option value="">{busy === "logs-pods" ? "Loading…" : logsContainerOptions.length ? "Select a container…" : "No containers"}</option>
+                      {logsContainerOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </label>
+                  <label className="grid gap-1">
                     <span className="text-xs font-semibold uppercase tracking-wider text-muted">Pod</span>
-                    <select value={logsPod} onChange={(event) => changeLogsPod(event.target.value)} disabled={busy === "logs-pods"} className="h-10 cursor-pointer rounded-xl border border-line bg-white px-3 text-sm disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
-                      <option value="">{busy === "logs-pods" ? "Loading pods…" : logsPodOptions.length ? "Select a pod…" : "No pods"}</option>
-                      {logsPodOptions.map((p) => <option key={`${p.namespace}/${p.name}`} value={p.name}>{logsNamespace ? p.name : `${p.namespace} / ${p.name}`}</option>)}
+                    <select value={logsPod} onChange={(event) => changeLogsPod(event.target.value)} disabled={!logsContainer} className="h-10 cursor-pointer rounded-xl border border-line bg-white px-3 text-sm disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
+                      <option value="">All pods (service)</option>
+                      {logsPodsForContainer.map((p) => <option key={`${p.namespace}/${p.name}`} value={p.name}>{logsNamespace ? p.name : `${p.namespace} / ${p.name}`}</option>)}
                     </select>
-                  </label>
-                  <label className="grid gap-1">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-muted">Container</span>
-                    <select value={logsContainer} onChange={(event) => setLogsContainer(event.target.value)} disabled={logsContainers.length === 0} className="h-10 cursor-pointer rounded-xl border border-line bg-white px-3 text-sm disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100">
-                      {logsContainers.length ? logsContainers.map((c) => <option key={c} value={c}>{c}</option>) : <option value="">Pick a pod first</option>}
-                    </select>
-                  </label>
-                  <label className="grid gap-1">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-muted">Tail lines</span>
-                    <input type="number" min={1} value={logsTail} onChange={(event) => setLogsTail(Math.max(1, Number(event.target.value) || 1))} className="h-10 rounded-xl border border-line bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
                   </label>
                 </div>
                 <div className="mb-4 flex flex-wrap items-center gap-3">
+                  <button disabled={loading || !logsContainer} onClick={() => void loadLogs()} className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{busy === "logs" ? <Loader2 size={16} className="animate-spin" /> : <ScrollText size={16} />} Load logs</button>
+                  <label className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
+                    Tail
+                    <input type="number" min={1} value={logsTail} onChange={(event) => setLogsTail(Math.max(1, Number(event.target.value) || 1))} className="h-10 w-24 rounded-xl border border-line bg-white px-3 text-sm normal-case dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100" />
+                  </label>
                   <label className="inline-flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
                     <input type="checkbox" checked={logsPrevious} onChange={(event) => setLogsPrevious(event.target.checked)} className="h-4 w-4 rounded border-line text-accent focus:ring-accent" />
-                    Previous (crashed) container
+                    Previous (crashed)
                   </label>
-                  <button disabled={loading} onClick={() => void loadLogs()} className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">{busy === "logs" ? <Loader2 size={16} className="animate-spin" /> : <ScrollText size={16} />} Load logs</button>
                   <button type="button" disabled={!podLogs?.log?.trim()} onClick={() => void copyLogs()} title="Copy the log output to the clipboard" className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">{logsCopied ? <Check size={16} /> : <Copy size={16} />} {logsCopied ? "Copied" : "Copy"}</button>
-                  <button type="button" disabled={!podLogs?.log?.trim()} onClick={() => podLogs?.log && downloadTextFile(`${safeFilename(logsPod || "pod")}${podLogs.container ? "-" + safeFilename(podLogs.container) : ""}.log`, podLogs.log)} title="Download the log as a file" className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"><Download size={16} /> Download</button>
-                  <AutoRefreshSelect value={logsAuto} onChange={setLogsAuto} disabled={!logsPod} className="ml-1" />
+                  <button type="button" disabled={!podLogs?.log?.trim()} onClick={() => podLogs?.log && downloadTextFile(`${safeFilename(logsPod || logsContainer || "service")}.log`, podLogs.log)} title="Download the log as a file" className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-slate-100 px-4 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"><Download size={16} /> Download</button>
+                  <AutoRefreshSelect value={logsAuto} onChange={setLogsAuto} disabled={!logsContainer} className="ml-1" />
                 </div>
-                <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-100">{podLogs ? (podLogs.log?.trim() ? podLogs.log : `No log output for ${logsPod || "this pod"}.`) : "Choose a pod (from the Pods tab) or type a namespace + pod, then Load logs."}</pre>
+                <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-950 p-4 font-mono text-xs leading-relaxed text-slate-100">{podLogs ? (podLogs.log?.trim() ? podLogs.log : `No log output for ${logsPod || logsContainer || "this selection"}.`) : "Pick a namespace and a container to see the service's logs (all its pods); then pick a pod to drill into one."}</pre>
               </Panel>
             ) : null}
 
@@ -1049,14 +1079,23 @@ function Info({ title, value, hint, tone, icon }: { title: string; value: string
   );
 }
 
-function Panel({ title, icon, children, action }: { title: string; icon: React.ReactNode; children: React.ReactNode; action?: React.ReactNode }) {
+function Panel({ title, icon, children, action, collapsible, defaultCollapsed }: { title: string; icon: React.ReactNode; children: React.ReactNode; action?: React.ReactNode; collapsible?: boolean; defaultCollapsed?: boolean }) {
+  const [collapsed, setCollapsed] = useState(Boolean(defaultCollapsed));
+  const header = (
+    <div className="flex items-center gap-2 font-semibold text-slate-900 dark:text-slate-100">
+      {collapsible ? (collapsed ? <ChevronRight size={16} className="text-muted" /> : <ChevronDown size={16} className="text-muted" />) : null}
+      <span className="text-accent">{icon}</span><span>{title}</span>
+    </div>
+  );
   return (
     <div className="overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-800">
       <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3.5 dark:border-slate-800">
-        <div className="flex items-center gap-2 font-semibold text-slate-900 dark:text-slate-100"><span className="text-accent">{icon}</span><span>{title}</span></div>
+        {collapsible ? (
+          <button type="button" onClick={() => setCollapsed((v) => !v)} className="flex flex-1 items-center gap-2 text-left" aria-expanded={!collapsed}>{header}</button>
+        ) : header}
         {action ? <div className="flex items-center gap-2">{action}</div> : null}
       </div>
-      <div className="overflow-x-auto p-5">{children}</div>
+      {collapsible && collapsed ? null : <div className="overflow-x-auto p-5">{children}</div>}
     </div>
   );
 }

@@ -43,6 +43,8 @@ EXPECTED_SERVER_COLUMNS: list[tuple[str, str]] = [
     ("ssh_config_id", "NULL"),
     ("public_id", "''"),
     ("server_type", "'application'"),
+    # admin-controlled active/inactive flag (boolean -> dialect default handled by _server_column_ddl)
+    ("is_active", "1"),
     ("discovered_services_json", "'[]'"),
     ("storage_json", "'[]'"),
     ("database_logs_json", "'[]'"),
@@ -107,8 +109,9 @@ def _server_column_ddl(name: str, default: str) -> tuple[str, str]:
     column = Server.__table__.columns.get(name)
     ddl_type = _column_ddl_type(name)
     literal = default
-    if column is not None and column.type.python_type is bool and default in ("0", "false", "False"):
-        literal = "false" if engine.dialect.name == "postgresql" else "0"
+    if column is not None and column.type.python_type is bool:
+        truthy = default not in ("0", "false", "False", "")
+        literal = ("true" if truthy else "false") if engine.dialect.name == "postgresql" else ("1" if truthy else "0")
     return ddl_type, literal
 
 
@@ -154,8 +157,9 @@ def _db_connection_ddl(name: str, default: str) -> tuple[str, str]:
         return "VARCHAR(32)", default
     ddl_type = column.type.compile(dialect=engine.dialect)
     literal = default
-    if column.type.python_type is bool and default in ("0", "false", "False"):
-        literal = "false" if engine.dialect.name == "postgresql" else "0"
+    if column.type.python_type is bool:
+        truthy = default not in ("0", "false", "False", "")
+        literal = ("true" if truthy else "false") if engine.dialect.name == "postgresql" else ("1" if truthy else "0")
     return ddl_type, literal
 
 
@@ -231,6 +235,8 @@ EXPECTED_KUBE_CLUSTER_COLUMNS: list[tuple[str, str]] = [
     ("ssh_jump_config_id", "NULL"),
     # ordered SSH access path (JSON list of SshConfig public_ids); the current N-hop chain model
     ("ssh_chain_json", "'[]'"),
+    # admin-controlled active/inactive flag (boolean -> dialect default handled by _kube_cluster_ddl)
+    ("is_active", "1"),
 ]
 
 
@@ -240,8 +246,9 @@ def _kube_cluster_ddl(name: str, default: str) -> tuple[str, str]:
         return "TEXT", default
     ddl_type = column.type.compile(dialect=engine.dialect)
     literal = default
-    if column.type.python_type is bool and default in ("0", "false", "False"):
-        literal = "false" if engine.dialect.name == "postgresql" else "0"
+    if column.type.python_type is bool:
+        truthy = default not in ("0", "false", "False", "")
+        literal = ("true" if truthy else "false") if engine.dialect.name == "postgresql" else ("1" if truthy else "0")
     return ddl_type, literal
 
 

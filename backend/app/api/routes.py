@@ -1652,6 +1652,8 @@ def update_server(server_id: str, payload: ServerUpdate, _: dict = Depends(requi
             setattr(server, field, data[field].strip())
     if "ssh_port" in data and data["ssh_port"] is not None:
         server.ssh_port = int(data["ssh_port"])
+    if "is_active" in data and data["is_active"] is not None:
+        server.is_active = bool(data["is_active"])
     if "jump_port" in data and data["jump_port"] is not None:
         server.jump_port = int(data["jump_port"]) or 22
     if "tags" in data and data["tags"] is not None:
@@ -4074,6 +4076,7 @@ def _cluster_read(db: Session, cluster: KubeCluster) -> KubeClusterRead:
         auth_method=cluster.auth_method,
         verify_tls=bool(cluster.verify_tls),
         default_namespace=cluster.default_namespace,
+        is_active=bool(getattr(cluster, "is_active", True)),
         group=_cluster_group_name(db, cluster),
         has_credentials=bool(cluster.encrypted_kubeconfig or cluster.encrypted_token),
         ssh_host=getattr(cluster, "ssh_host", "") or "",
@@ -4257,6 +4260,8 @@ def update_kube_cluster(cluster_id: str, payload: KubeClusterUpdate, _: dict = D
         cluster.default_namespace = data["default_namespace"].strip()
     if "verify_tls" in data and data["verify_tls"] is not None:
         cluster.verify_tls = bool(data["verify_tls"])
+    if "is_active" in data and data["is_active"] is not None:
+        cluster.is_active = bool(data["is_active"])
     if "ca_cert" in data and data["ca_cert"] is not None:
         cluster.ca_cert = data["ca_cert"]
     # secret fields: only overwrite when a non-empty value is supplied, so an edit that leaves the

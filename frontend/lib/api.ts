@@ -78,6 +78,8 @@ export type Server = {
   username: string;
   environment: string;
   server_type: string;
+  // admin-controlled active/inactive flag; inactive servers are kept but dimmed/badged.
+  is_active: boolean;
   operating_system: string;
   kernel: string;
   // hardware facts from discovery; cpu is the core count as reported by nproc
@@ -732,6 +734,8 @@ export type ServerUpdate = Partial<{
   business_owner: string;
   support_contact: string;
   os_kind: string;
+  // admin-only active/inactive flag
+  is_active: boolean;
   jump_host: string;
   jump_port: number;
   jump_username: string;
@@ -1565,6 +1569,8 @@ export type KubeCluster = {
   auth_method: "kubeconfig" | "token";
   verify_tls: boolean;
   default_namespace: string;
+  // admin-controlled active/inactive flag
+  is_active: boolean;
   group: string | null;
   // credentials are write-only: the API never echoes the kubeconfig/token back, so the read
   // shape reports whether any are stored rather than the values themselves
@@ -1599,6 +1605,8 @@ export type KubeClusterInput = {
   ca_cert?: string;
   verify_tls?: boolean;
   default_namespace?: string;
+  // admin-only active/inactive flag
+  is_active?: boolean;
   // optional SSH tunnel (jump host) for the API server; ssh credentials write-only (blank keeps
   // the stored one on edit).
   ssh_host?: string;

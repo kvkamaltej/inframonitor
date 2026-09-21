@@ -1939,6 +1939,7 @@ function EditServerDialog({ server, token, onClose, onSave }: { server: Server; 
   const [businessOwner, setBusinessOwner] = useState(server.business_owner ?? "");
   const [supportContact, setSupportContact] = useState(server.support_contact ?? "");
   const [osKind, setOsKind] = useState(server.os_kind || "linux");
+  const [isActive, setIsActive] = useState(server.is_active !== false);
   // Optional SSH jump host (bastion): a reusable global SSH config or inline details.
   const [ssh, setSsh] = useState<SshTunnelValue>(sshTunnelFromServer(server));
   const [saving, setSaving] = useState(false);
@@ -1969,6 +1970,7 @@ function EditServerDialog({ server, token, onClose, onSave }: { server: Server; 
         business_owner: businessOwner.trim(),
         support_contact: supportContact.trim(),
         os_kind: osKind,
+        is_active: isActive,
         // jump host: referenced global config or inline details, or cleared for a direct connection.
         // Blank jump_password/jump_private_key keep the stored ones (backend overwrites only on a
         // non-empty value).
@@ -2028,6 +2030,13 @@ function EditServerDialog({ server, token, onClose, onSave }: { server: Server; 
               <option value="windows">Windows (PowerShell probes + Remote Desktop)</option>
             </select>
           </div>
+          <label className="sm:col-span-2 flex items-center gap-2.5">
+            <input type="checkbox" checked={isActive} onChange={(event) => setIsActive(event.target.checked)} className="h-4 w-4 shrink-0 rounded border-line text-accent focus:ring-accent" />
+            <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+              Active
+              <span className="ml-1.5 font-normal text-slate-400">— uncheck to mark this server inactive (kept in inventory, shown dimmed)</span>
+            </span>
+          </label>
           <div className="sm:col-span-2">
             <label className={labelClass}>Tags <span className="font-normal normal-case text-slate-400">(comma separated)</span></label>
             <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="web, prod" className={field} />

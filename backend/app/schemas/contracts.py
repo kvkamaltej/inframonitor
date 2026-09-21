@@ -82,6 +82,8 @@ class ServerUpdate(BaseModel):
     business_owner: str | None = None
     support_contact: str | None = None
     os_kind: str | None = None
+    # admin-only active/inactive flag
+    is_active: bool | None = None
     jump_host: str | None = None
     jump_port: int | None = None
     jump_username: str | None = None
@@ -102,6 +104,8 @@ class ServerRead(BaseModel):
     environment: str
     server_type: str
     tags: list[str]
+    # admin-controlled active/inactive flag; inactive servers are kept but dimmed/badged in the UI.
+    is_active: bool = True
     operating_system: str
     kernel: str
     cpu: str
@@ -1002,6 +1006,8 @@ class KubeClusterUpdate(BaseModel):
     ca_cert: str | None = None
     verify_tls: bool | None = None
     default_namespace: str | None = None
+    # admin-only active/inactive flag
+    is_active: bool | None = None
     ssh_host: str | None = None
     ssh_port: int | None = Field(default=None, ge=1, le=65535)
     ssh_username: str | None = None
@@ -1026,6 +1032,8 @@ class KubeClusterRead(BaseModel):
     auth_method: str
     verify_tls: bool = True
     default_namespace: str = ""
+    # admin-controlled active/inactive flag.
+    is_active: bool = True
     group: str | None = None
     has_credentials: bool = False
     # SSH tunnel config, read-only. ssh_host "" = direct. has_ssh_credentials says whether a tunnel

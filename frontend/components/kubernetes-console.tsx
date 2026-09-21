@@ -65,6 +65,7 @@ export function KubernetesConsole({ token }: { token: string }) {
   const [verifyTls, setVerifyTls] = useState(true);
   const [defaultNamespace, setDefaultNamespace] = useState("");
   const [group, setGroup] = useState("");
+  const [isActive, setIsActive] = useState(true);
   // SSH access path to the API server — an ordered chain of saved SSH configs (jump hosts). [] =
   // direct connection.
   const [sshChain, setSshChain] = useState<string[]>([]);
@@ -107,6 +108,7 @@ export function KubernetesConsole({ token }: { token: string }) {
     setDefaultNamespace("");
     setGroup("");
     setSshChain([]);
+    setIsActive(true);
     setTestNote(null);
     setFormError("");
   }
@@ -132,6 +134,7 @@ export function KubernetesConsole({ token }: { token: string }) {
     setDefaultNamespace(cluster.default_namespace ?? "");
     setGroup(cluster.group ?? "");
     setSshChain(cluster.ssh_chain ?? []);
+    setIsActive(cluster.is_active !== false);
     setTestNote(null);
     setFormError("");
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
@@ -145,6 +148,7 @@ export function KubernetesConsole({ token }: { token: string }) {
       auth_method: authMethod,
       default_namespace: defaultNamespace.trim() || undefined,
       group: group.trim() || null,
+      is_active: isActive,
       // ordered SSH access path (drop any empty hop rows); [] = direct connection.
       ssh_chain: sshChain.filter(Boolean)
     };
@@ -265,11 +269,14 @@ export function KubernetesConsole({ token }: { token: string }) {
                       router.push(`/cluster?id=${encodeURIComponent(cluster.id)}`);
                     }
                   }}
-                  className="group flex cursor-pointer flex-col gap-3 rounded-2xl bg-surface p-5 ring-1 ring-edge transition-colors hover:ring-2 hover:ring-accent"
+                  className={`group flex cursor-pointer flex-col gap-3 rounded-2xl bg-surface p-5 ring-1 ring-edge transition-colors hover:ring-2 hover:ring-accent ${cluster.is_active === false ? "opacity-60" : ""}`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold text-fg">{cluster.name}</div>
+                      <div className="flex items-center gap-2">
+                        <div className="truncate text-sm font-semibold text-fg">{cluster.name}</div>
+                        {cluster.is_active === false ? <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold uppercase text-slate-600 dark:bg-slate-700 dark:text-slate-300">Inactive</span> : null}
+                      </div>
                       <div className="mt-0.5 truncate text-xs font-medium text-muted" title={cluster.api_server_url}>
                         {cluster.api_server_url || "—"}
                       </div>
@@ -432,6 +439,11 @@ export function KubernetesConsole({ token }: { token: string }) {
               <input value={group} onChange={(e) => setGroup(e.target.value)} placeholder="EMS" className={inputClass} />
             </label>
           </div>
+
+          <label className="flex items-center gap-2.5">
+            <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} className="h-4 w-4 shrink-0 rounded border-edge text-accent focus:ring-accent" />
+            <span className="text-sm font-medium text-fg">Active <span className="font-normal text-muted">— uncheck to mark this cluster inactive (kept, shown dimmed)</span></span>
+          </label>
 
           {/* SSH access path to the API server: an ordered chain of saved jump hosts (bastions),
               for a control-plane node reachable only through one or more hops. */}

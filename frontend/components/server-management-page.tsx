@@ -870,9 +870,12 @@ function ServerManagementContent({ token, role }: { token: string; role: string 
   const renderRow = (server: Server) => {
     const hasLogo = matchDistroLogo(osMatchText(server)) !== null;
     return (
-    <tr key={server.id} className="transition-colors hover:bg-page">
+    <tr key={server.id} className={`transition-colors hover:bg-page ${server.is_active === false ? "opacity-55" : ""}`}>
       <td className="px-3 py-3 align-top">
-        <Link href={`/server/?id=${encodeURIComponent(server.id)}`} className="block truncate font-semibold text-accent" title={server.hostname}>{server.hostname}</Link>
+        <span className="flex items-center gap-1.5">
+          <Link href={`/server/?id=${encodeURIComponent(server.id)}`} className="truncate font-semibold text-accent" title={server.hostname}>{server.hostname}</Link>
+          {server.is_active === false ? <span className="shrink-0 rounded-full bg-slate-200 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-slate-600 dark:bg-slate-700 dark:text-slate-300" title="Marked inactive by an admin">Inactive</span> : null}
+        </span>
         {server.tags.length ? <div className="mt-0.5 truncate text-xs font-medium text-muted" title={server.tags.join(", ")}>{server.tags.join(", ")}</div> : null}
       </td>
       <td className="whitespace-nowrap px-3 py-3 align-top font-medium text-fg">{server.ip_address}</td>

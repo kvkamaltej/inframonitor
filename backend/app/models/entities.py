@@ -91,6 +91,9 @@ class Server(Base):
     # set it wins over jump_host; NULL means "use the inline jump fields (or a direct connection)".
     ssh_config_id: Mapped[int | None] = mapped_column(ForeignKey("ssh_configs.id"), nullable=True, index=True)
     ssh_config: Mapped["SshConfig | None"] = relationship("SshConfig", foreign_keys=[ssh_config_id])
+    # Admin-controlled active/inactive flag. An inactive server is kept in inventory (not deleted)
+    # but marked so the UI can dim/badge it; only an admin flips it via PATCH /servers.
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     environment: Mapped[str] = mapped_column(String(64), index=True)
     server_type: Mapped[str] = mapped_column(String(64), default="application", index=True)
     tags: Mapped[str] = mapped_column(String(512), default="")
@@ -268,6 +271,8 @@ class KubeCluster(Base):
     # from the LAST hop. "[]" = direct connection. This is the current model (dropdown-only, N hops);
     # the ssh_host/ssh_config_id/ssh_jump_config_id columns above are legacy and no longer read.
     ssh_chain_json: Mapped[str] = mapped_column(Text, default="[]")
+    # Admin-controlled active/inactive flag (kept, not deleted, when inactive).
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

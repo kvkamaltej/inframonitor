@@ -56,6 +56,7 @@ def to_read(server: Server) -> ServerRead:
         storage=_json_list(server.storage_json),
         database_logs=_json_list(server.database_logs_json),
         has_credentials=bool(server.encrypted_password or server.encrypted_private_key),
+        is_active=bool(getattr(server, "is_active", True)),
         jump_host=server.jump_host or "",
         jump_port=server.jump_port or 22,
         jump_username=server.jump_username or "",
