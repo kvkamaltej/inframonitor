@@ -62,6 +62,43 @@ def test_create_cluster_kubeconfig_mode(client):
     assert "kubeconfig" not in body and "token" not in body
 
 
+def test_cluster_ssh_tunnel_stored_and_used(client, monkeypatch):
+    # A cluster reachable only through a jump host: the SSH tunnel is stored (creds never echoed),
+    # and a live read opens the bastion forward via db_ssh._forwarder before talking to the API server.
+    r = client.post("/api/kube/clusters", json={
+        "name": "behind-bastion",
+        "auth_method": "token",
+        "api_server_url": "https://10.9.9.55:6443",
+        "token": "bearer",
+        "verify_tls": False,
+        "ssh_host": "bastion.local",
+        "ssh_port": 2222,
+        "ssh_username": "ops",
+        "ssh_password": "s3cret",
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["ssh_host"] == "bastion.local"
+    assert body["ssh_port"] == 2222
+    assert body["has_ssh_credentials"] is True
+    assert "ssh_password" not in body
+    cid = body["id"]
+
+    # a live read must open the tunnel to the API server host:port through the bastion
+    from app.services import db_ssh, kube
+    calls = {}
+
+    def fake_forwarder(ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key, dest_host, dest_port):
+        calls["args"] = (ssh_host, ssh_port, ssh_user, dest_host, dest_port)
+        raise RuntimeError("bastion refused")  # stop before a real k8s call
+
+    monkeypatch.setattr(db_ssh, "_forwarder", fake_forwarder)
+    r = client.get(f"/api/kube/clusters/{cid}/namespaces")
+    assert r.status_code == 400  # KubeError -> clean 400, not 500
+    assert "bastion" in r.json()["detail"].lower()
+    assert calls["args"] == ("bastion.local", 2222, "ops", "10.9.9.55", 6443)
+
+
 def test_create_cluster_token_mode(client):
     r = client.post("/api/kube/clusters", json={
         "name": "token-cluster",

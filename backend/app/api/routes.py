@@ -3370,6 +3370,7 @@ def delete_ssh_config(config_id: str, _: dict = Depends(require_admin), db: Sess
     for conn in affected:
         db_ssh.close(conn.public_id)
     db.execute(update(DbConnection).where(DbConnection.ssh_config_id == config.id).values(ssh_config_id=None))
+    db.execute(update(KubeCluster).where(KubeCluster.ssh_config_id == config.id).values(ssh_config_id=None))
     db.delete(config)
     db.commit()
 
@@ -4069,6 +4070,12 @@ def _cluster_read(db: Session, cluster: KubeCluster) -> KubeClusterRead:
         default_namespace=cluster.default_namespace,
         group=_cluster_group_name(db, cluster),
         has_credentials=bool(cluster.encrypted_kubeconfig or cluster.encrypted_token),
+        ssh_host=getattr(cluster, "ssh_host", "") or "",
+        ssh_port=getattr(cluster, "ssh_port", 22) or 22,
+        ssh_username=getattr(cluster, "ssh_username", "") or "",
+        has_ssh_credentials=bool(getattr(cluster, "encrypted_ssh_password", "") or getattr(cluster, "encrypted_ssh_private_key", "")),
+        ssh_config_id=cluster.ssh_config.public_id if getattr(cluster, "ssh_config", None) else "",
+        ssh_config_name=cluster.ssh_config.name if getattr(cluster, "ssh_config", None) else "",
         log_shipping_enabled=bool(getattr(cluster, "log_shipping_enabled", False)),
         log_namespaces=_cluster_namespaces(cluster),
         created_at=cluster.created_at,
@@ -4084,7 +4091,9 @@ def _cluster_namespaces(cluster: KubeCluster) -> list[str]:
 
 
 def _cluster_conn(cluster: KubeCluster) -> dict:
-    # Decrypt the stored secrets just-in-time for a single service call.
+    # Decrypt the stored secrets just-in-time for a single service call, and resolve the optional
+    # SSH tunnel (referenced global config OR inline) to a plaintext (host,port,user,pw,key) tuple so
+    # kube.py can open the bastion forward without touching the ORM/crypto.
     return {
         "auth_method": cluster.auth_method,
         "api_server_url": cluster.api_server_url,
@@ -4092,6 +4101,11 @@ def _cluster_conn(cluster: KubeCluster) -> dict:
         "token": decrypt_secret(cluster.encrypted_token),
         "ca_cert": cluster.ca_cert,
         "verify_tls": bool(cluster.verify_tls),
+        "tunnel": resolve_ssh(
+            getattr(cluster, "ssh_config", None),
+            getattr(cluster, "ssh_host", ""), getattr(cluster, "ssh_port", 22), getattr(cluster, "ssh_username", ""),
+            getattr(cluster, "encrypted_ssh_password", ""), getattr(cluster, "encrypted_ssh_private_key", ""),
+        ),
     }
 
 
@@ -4142,6 +4156,12 @@ def create_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_ad
         ca_cert=payload.ca_cert if method == "token" else "",
         verify_tls=payload.verify_tls,
         default_namespace=payload.default_namespace.strip(),
+        ssh_host=(payload.ssh_host or "").strip(),
+        ssh_port=payload.ssh_port or 22,
+        ssh_username=(payload.ssh_username or "").strip(),
+        encrypted_ssh_password=encrypt_secret(payload.ssh_password) if payload.ssh_password else "",
+        encrypted_ssh_private_key=encrypt_secret(payload.ssh_private_key) if payload.ssh_private_key else "",
+        ssh_config_id=_resolve_ssh_config_fk(db, payload.ssh_config_id),
         folder_id=_resolve_group_to_folder_id(db, payload.group),
     )
     db.add(cluster)
@@ -4151,10 +4171,17 @@ def create_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_ad
 
 
 @router.post("/kube/clusters/test", response_model=KubeTestResult)
-def test_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_admin)) -> KubeTestResult:
+def test_kube_cluster(payload: KubeClusterCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> KubeTestResult:
     # Test the credentials as typed, without persisting anything. An unreachable cluster or bad
     # credentials is an expected outcome, reported as ok=false with HTTP 200 (like the DB console).
     conn = _conn_from_create(payload)
+    # Resolve the optional tunnel: a referenced saved config (stored creds) or the inline ssh_* fields.
+    if (payload.ssh_config_id or "").strip():
+        cfg = _ssh_config_or_404(db, payload.ssh_config_id.strip())
+        conn["tunnel"] = resolve_ssh(cfg, "", None, None, None, None)
+    elif (payload.ssh_host or "").strip():
+        conn["tunnel"] = (payload.ssh_host.strip(), payload.ssh_port or 22, payload.ssh_username,
+                          payload.ssh_password, payload.ssh_private_key)
     try:
         version = kube.test_connection(conn)
         where = payload.api_server_url.strip() or "cluster"
@@ -4194,6 +4221,23 @@ def update_kube_cluster(cluster_id: str, payload: KubeClusterUpdate, _: dict = D
         cluster.encrypted_kubeconfig = encrypt_secret(data["kubeconfig"])
     if data.get("token"):
         cluster.encrypted_token = encrypt_secret(data["token"])
+    # SSH tunnel fields (mirrors the DB connection edit): inline host/port/user, blank-keeps-stored
+    # credentials, clearing the host drops the stored creds, and a referenced config can be set/cleared.
+    if "ssh_host" in data and data["ssh_host"] is not None:
+        cluster.ssh_host = data["ssh_host"].strip()
+    if "ssh_port" in data and data["ssh_port"] is not None:
+        cluster.ssh_port = int(data["ssh_port"]) or 22
+    if "ssh_username" in data and data["ssh_username"] is not None:
+        cluster.ssh_username = data["ssh_username"].strip()
+    if data.get("ssh_password"):
+        cluster.encrypted_ssh_password = encrypt_secret(data["ssh_password"])
+    if data.get("ssh_private_key"):
+        cluster.encrypted_ssh_private_key = encrypt_secret(data["ssh_private_key"])
+    if "ssh_host" in data and not (data["ssh_host"] or "").strip():
+        cluster.encrypted_ssh_password = ""
+        cluster.encrypted_ssh_private_key = ""
+    if "ssh_config_id" in data:
+        cluster.ssh_config_id = _resolve_ssh_config_fk(db, data["ssh_config_id"])
     if "group" in data:
         cluster.folder_id = _resolve_group_to_folder_id(db, data["group"])
 

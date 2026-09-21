@@ -219,6 +219,14 @@ def _relax_folder_name_unique() -> None:
 EXPECTED_KUBE_CLUSTER_COLUMNS: list[tuple[str, str]] = [
     ("log_shipping_enabled", "0"),
     ("log_namespaces_json", "'[]'"),
+    # SSH tunnel (jump host) for the API server + its own encrypted credentials, mirroring the
+    # db_connections columns. All default empty, so an existing cluster keeps its direct connection.
+    ("ssh_host", "''"),
+    ("ssh_port", "22"),
+    ("ssh_username", "''"),
+    ("encrypted_ssh_password", "''"),
+    ("encrypted_ssh_private_key", "''"),
+    ("ssh_config_id", "NULL"),
 ]
 
 

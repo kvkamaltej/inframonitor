@@ -972,6 +972,14 @@ class KubeClusterCreate(BaseModel):
     ca_cert: str = ""
     verify_tls: bool = True
     default_namespace: str = Field(default="", max_length=255)
+    # Optional SSH tunnel (jump host) for reaching the API server: a referenced global SSH config
+    # (ssh_config_id) OR inline details. All blank = direct connection.
+    ssh_host: str = Field(default="", max_length=255)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_username: str = Field(default="", max_length=128)
+    ssh_password: str = Field(default="", max_length=1024)
+    ssh_private_key: str = Field(default="", max_length=32768)
+    ssh_config_id: str | None = None
     # folder name (the "group"); resolved to an existing Folder in the route, else left unassigned.
     group: str | None = None
 
@@ -988,6 +996,14 @@ class KubeClusterUpdate(BaseModel):
     ca_cert: str | None = None
     verify_tls: bool | None = None
     default_namespace: str | None = None
+    ssh_host: str | None = None
+    ssh_port: int | None = Field(default=None, ge=1, le=65535)
+    ssh_username: str | None = None
+    # blank keeps the stored ssh credential (mirrors token/kubeconfig)
+    ssh_password: str | None = None
+    ssh_private_key: str | None = None
+    # referenced global SSH config public_id; "" clears the reference, None leaves it.
+    ssh_config_id: str | None = None
     group: str | None = None
 
 
@@ -1002,6 +1018,14 @@ class KubeClusterRead(BaseModel):
     default_namespace: str = ""
     group: str | None = None
     has_credentials: bool = False
+    # SSH tunnel config, read-only. ssh_host "" = direct. has_ssh_credentials says whether a tunnel
+    # credential is stored; ssh_config_id/name name a referenced global SSH config.
+    ssh_host: str = ""
+    ssh_port: int = 22
+    ssh_username: str = ""
+    has_ssh_credentials: bool = False
+    ssh_config_id: str = ""
+    ssh_config_name: str = ""
     # feature/k8s-log-shipping: whether this cluster's pod logs are tailed into Loki, and the
     # namespaces shipped ([] = all). Present on read so the UI can render the toggle state.
     log_shipping_enabled: bool = False

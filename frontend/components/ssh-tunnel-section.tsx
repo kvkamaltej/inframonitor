@@ -66,6 +66,22 @@ export function sshTunnelFromDbConnection(conn: DbConnection): SshTunnelValue {
   };
 }
 
+// Same shape, from a Kubernetes cluster's ssh_* tunnel fields (reaches the API server via a bastion).
+export function sshTunnelFromKubeCluster(cluster: {
+  ssh_config_id?: string; ssh_host?: string; ssh_port?: number; ssh_username?: string; has_ssh_credentials?: boolean;
+}): SshTunnelValue {
+  return {
+    enabled: Boolean(cluster.ssh_config_id) || Boolean(cluster.ssh_host),
+    configId: cluster.ssh_config_id || "",
+    host: cluster.ssh_host || "",
+    port: cluster.ssh_port || 22,
+    username: cluster.ssh_username || "",
+    password: "",
+    privateKey: "",
+    hadStored: Boolean(cluster.has_ssh_credentials)
+  };
+}
+
 // Payload for a server's jump-host fields. Disabled => everything cleared (and ssh_config_id ""
 // unlinks any reference). A referenced config wins and blanks the inline fields; otherwise the
 // inline values are sent. Blank jump_password/jump_private_key on an edit keep the stored ones.
@@ -117,7 +133,7 @@ export function SshTunnelSection({
   token: string;
   value: SshTunnelValue;
   onChange: (next: SshTunnelValue) => void;
-  kind: "server" | "db";
+  kind: "server" | "db" | "kube";
 }) {
   const [configs, setConfigs] = useState<SshConfig[]>([]);
   const [loadError, setLoadError] = useState("");
@@ -229,7 +245,7 @@ export function SshTunnelSection({
             </span>
           ) : (
             <span className="text-[11px] font-normal normal-case text-muted">
-              optional — reach {kind === "server" ? "this server" : "the database"} through an SSH bastion
+              optional — reach {kind === "server" ? "this server" : kind === "kube" ? "the API server" : "the database"} through an SSH bastion
             </span>
           )}
         </label>

@@ -1569,6 +1569,13 @@ export type KubeCluster = {
   // credentials are write-only: the API never echoes the kubeconfig/token back, so the read
   // shape reports whether any are stored rather than the values themselves
   has_credentials: boolean;
+  // optional SSH tunnel (jump host) used to reach the API server. ssh_host "" = direct.
+  ssh_host: string;
+  ssh_port: number;
+  ssh_username: string;
+  has_ssh_credentials: boolean;
+  ssh_config_id: string;
+  ssh_config_name: string;
   // feature/k8s-log-shipping: whether this cluster's pod logs are tailed into Loki, and which
   // namespaces ([] = all).
   log_shipping_enabled: boolean;
@@ -1585,6 +1592,14 @@ export type KubeClusterInput = {
   ca_cert?: string;
   verify_tls?: boolean;
   default_namespace?: string;
+  // optional SSH tunnel (jump host) for the API server; ssh credentials write-only (blank keeps
+  // the stored one on edit).
+  ssh_host?: string;
+  ssh_port?: number;
+  ssh_username?: string;
+  ssh_password?: string;
+  ssh_private_key?: string;
+  ssh_config_id?: string;
   group?: string | null;
 };
 

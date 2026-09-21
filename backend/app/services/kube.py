@@ -96,6 +96,7 @@ def _api_client(conn: dict) -> Iterator[Any]:
 
     ca_path: str | None = None
     api_client = None
+    forwarder = None
     try:
         cfg = client.Configuration()
         auth_method = (conn.get("auth_method") or "kubeconfig").strip().lower()
@@ -138,12 +139,40 @@ def _api_client(conn: dict) -> Iterator[Any]:
 
                     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+        # Optional SSH tunnel (jump host / bastion): when the API server is only reachable through a
+        # bastion, dial it over SSH. conn["tunnel"] is a resolved (host, port, user, password,
+        # private_key) tuple (the route decrypts it), or None for a direct connection. We open a local
+        # port forward to the API server's host:port and repoint the client at 127.0.0.1:<local port>.
+        tunnel = conn.get("tunnel")
+        if tunnel:
+            from urllib.parse import urlsplit, urlunsplit
+            parts = urlsplit(cfg.host or "")
+            api_host = parts.hostname or ""
+            api_port = parts.port or (443 if parts.scheme == "https" else 80)
+            if not api_host:
+                raise KubeError("Cannot open an SSH tunnel: the API server host could not be determined.")
+            from app.services import db_ssh
+            ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key = tunnel
+            try:
+                forwarder = db_ssh._forwarder(ssh_host, ssh_port, ssh_user, ssh_pw, ssh_key, api_host, api_port)
+            except Exception as exc:  # auth, unreachable bastion, remote host closed, ...
+                raise KubeError(f"SSH tunnel via {ssh_host}: {_clean(exc)}") from exc
+            local_port = forwarder.local_bind_port
+            cfg.host = urlunsplit((parts.scheme or "https", f"127.0.0.1:{local_port}", parts.path, parts.query, parts.fragment))
+            # We now connect to localhost, but the API server's certificate is for its real hostname.
+            # When verification is on, check the cert against that real host, not 127.0.0.1.
+            if getattr(cfg, "verify_ssl", True):
+                cfg.assert_hostname = api_host
+
         api_client = client.ApiClient(cfg)
         yield api_client
     finally:
         if api_client is not None:
             with contextlib.suppress(Exception):
                 api_client.close()
+        if forwarder is not None:
+            with contextlib.suppress(Exception):
+                forwarder.stop()
         if ca_path:
             with contextlib.suppress(Exception):
                 os.remove(ca_path)

@@ -248,6 +248,16 @@ class KubeCluster(Base):
     # columns; ALTERed into an existing table by _migrate_kube_cluster_columns in app.main.
     log_shipping_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     log_namespaces_json: Mapped[str] = mapped_column(Text, default="[]")
+    # Optional SSH tunnel (jump host / bastion): when the API server is only reachable through a
+    # bastion, the client dials it over SSH. Either a referenced reusable SshConfig OR inline
+    # details, mirroring DbConnection. All-empty = a direct connection. Credentials encrypted at rest.
+    ssh_host: Mapped[str] = mapped_column(String(255), default="")
+    ssh_port: Mapped[int] = mapped_column(Integer, default=22)
+    ssh_username: Mapped[str] = mapped_column(String(128), default="")
+    encrypted_ssh_password: Mapped[str] = mapped_column(Text, default="")
+    encrypted_ssh_private_key: Mapped[str] = mapped_column(Text, default="")
+    ssh_config_id: Mapped[int | None] = mapped_column(ForeignKey("ssh_configs.id"), nullable=True, index=True)
+    ssh_config: Mapped["SshConfig | None"] = relationship("SshConfig", foreign_keys=[ssh_config_id])
     folder_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
