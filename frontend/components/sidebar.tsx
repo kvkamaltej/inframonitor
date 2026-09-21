@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, Boxes, ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Play, Server, Settings, Shield, ShieldAlert, SlidersHorizontal, Sun, Table2 as TableIcon, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
+import { Activity, Boxes, ChevronDown, ChevronRight, Database, DatabaseZap, Folder as FolderIcon, KeyRound, Layers, Loader2, Menu, MonitorCog, Moon, Palette, Play, Server, Settings, Shield, ShieldAlert, SlidersHorizontal, Sun, Table2 as TableIcon, TerminalSquare, UserCircle, Users, Vault, X } from "lucide-react";
 import { MouseEvent, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { getAppDatabase, getDbConnections, getDbTables, getFolders, getServers, AppDbConfig, DbConnection, DbTable, Folder as FolderType, Server as ServerRow } from "@/lib/api";
@@ -324,6 +324,7 @@ export function Sidebar({ role, guest = false, menus }: { role?: string; guest?:
                   {allowed.has("appdatabase") && <NavItem href="/app-database" icon={DatabaseZap} label="App Database" />}
                   {allowed.has("administration") && <NavItem href="/master/server-types" icon={Settings} label="Server Types" />}
                   {allowed.has("administration") && <NavItem href="/master/environments" icon={Settings} label="Environments" />}
+                  {allowed.has("administration") && <NavItem href="/master/ssh-configs" icon={KeyRound} label="SSH Configs" />}
                 </div>
               )}
             </div>
