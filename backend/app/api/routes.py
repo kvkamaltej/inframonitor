@@ -37,7 +37,7 @@ from app.services import alert_rules
 from app.services import db_backend
 from app.services import db_backup
 from app.services import oidc
-from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, DbQueryHistory, Folder, Gateway, GatewayEvent, GatewayRollup, KubeCluster, Server, ServerStatus, ShellFavorite, User, UserPolicyAssignment, UserServerAccess
+from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, DbQueryHistory, Folder, Gateway, GatewayEvent, GatewayRollup, KubeCluster, Server, ServerStatus, ShellFavorite, SshConfig, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
     GatewayCreate,
     GatewayEndpointRead,
@@ -137,6 +137,9 @@ from app.schemas.contracts import (
     ShellFavoriteCreate,
     ShellFavoriteRead,
     ShellFavoriteUpdate,
+    SshConfigCreate,
+    SshConfigRead,
+    SshConfigUpdate,
     Summary,
     TokenResponse,
     TomcatActionRequest,
@@ -977,6 +980,21 @@ def _folder_or_404(db: Session, public_id: str) -> Folder:
     return folder
 
 
+def _ssh_config_or_404(db: Session, public_id: str) -> SshConfig:
+    config = db.scalar(select(SshConfig).where(SshConfig.public_id == public_id))
+    if not config:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SSH config not found")
+    return config
+
+
+def _resolve_ssh_config_fk(db: Session, public_id: str | None) -> int | None:
+    """Map an ssh_config_id from the wire (a public_id, or "" to clear, or None to mean unset) to the
+    SshConfig FK. "" / None -> None; a non-empty value must name an existing config or 404."""
+    if not (public_id or "").strip():
+        return None
+    return _ssh_config_or_404(db, public_id.strip()).id
+
+
 def _folder_counts(db: Session) -> dict[int, int]:
     # one grouped query for every folder's membership, rather than reading folder.servers per
     # folder and calling len() -- that would lazy-load every member row just to count it
@@ -1302,6 +1320,11 @@ def create_server(payload: ServerCreate, _: dict = Depends(require_admin), db: S
         if payload.jump_private_key:
             server.encrypted_jump_private_key = encrypt_secret(payload.jump_private_key)
         db.commit()
+    # Optional reference to a reusable global SSH config for the jump host (a public_id, resolved to
+    # the FK). Set even when blank so nothing to encrypt above still records the selection.
+    if server and payload.ssh_config_id is not None:
+        server.ssh_config_id = _resolve_ssh_config_fk(db, payload.ssh_config_id)
+        db.commit()
     if payload.password or payload.private_key:
         if server:
             try:
@@ -1624,9 +1647,15 @@ def update_server(server_id: str, payload: ServerUpdate, _: dict = Depends(requi
         server.encrypted_jump_password = encrypt_secret(data["jump_password"])
     if data.get("jump_private_key"):
         server.encrypted_jump_private_key = encrypt_secret(data["jump_private_key"])
+    # Referenced global SSH config: sent explicitly (incl. "" to clear the reference) only when the
+    # user changed it, so an edit that omits the field leaves the selection untouched.
+    if "ssh_config_id" in data:
+        server.ssh_config_id = _resolve_ssh_config_fk(db, data["ssh_config_id"])
 
     db.commit()
     db.refresh(server)
+    # a changed jump host / config invalidates any live tunnel this server keyed (ssh_ops opens
+    # per-call, so nothing to tear down there; DB tunnels are keyed by connection, not server).
     return to_read(server)
 
 
@@ -3158,6 +3187,106 @@ def _db_connection_group_name(db: Session, conn: DbConnection) -> str | None:
     return folder.name if folder else None
 
 
+# --- global SSH configs (reusable jump host / tunnel profiles) ------------------------------
+#
+# A named bastion profile a server's jump host or a DB connection's SSH tunnel can reference by id
+# instead of typing the details inline. Reads are open to any signed-in caller (the add/edit forms
+# populate a dropdown from them, no secrets exposed); writes are admin-only.
+
+
+def _ssh_config_read(config: SshConfig) -> SshConfigRead:
+    return SshConfigRead(
+        id=config.public_id,
+        name=config.name,
+        host=config.host,
+        port=config.port or 22,
+        username=config.username or "",
+        has_password=bool(config.encrypted_password),
+        has_private_key=bool(config.encrypted_private_key),
+        created_at=config.created_at,
+    )
+
+
+@router.get("/ssh-configs", response_model=list[SshConfigRead])
+def list_ssh_configs(_: dict = Depends(require_user), db: Session = Depends(get_db)) -> list[SshConfigRead]:
+    configs = db.scalars(select(SshConfig).order_by(func.lower(SshConfig.name))).all()
+    return [_ssh_config_read(c) for c in configs]
+
+
+@router.post("/ssh-configs", response_model=SshConfigRead, status_code=status.HTTP_201_CREATED)
+def create_ssh_config(payload: SshConfigCreate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> SshConfigRead:
+    name = payload.name.strip()
+    host = payload.host.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Name cannot be empty")
+    if not host:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Host cannot be empty")
+    if db.scalar(select(SshConfig).where(func.lower(SshConfig.name) == name.lower())):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An SSH config with this name already exists")
+    config = SshConfig(
+        public_id=str(uuid.uuid4()),
+        name=name,
+        host=host,
+        port=payload.port or 22,
+        username=(payload.username or "").strip(),
+        encrypted_password=encrypt_secret(payload.password) if payload.password else "",
+        encrypted_private_key=encrypt_secret(payload.private_key) if payload.private_key else "",
+    )
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+    return _ssh_config_read(config)
+
+
+@router.patch("/ssh-configs/{config_id}", response_model=SshConfigRead)
+def update_ssh_config(config_id: str, payload: SshConfigUpdate, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> SshConfigRead:
+    config = _ssh_config_or_404(db, config_id)
+    data = payload.model_dump(exclude_unset=True)
+    if "name" in data and data["name"] is not None:
+        name = data["name"].strip()
+        if not name:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Name cannot be empty")
+        clash = db.scalar(select(SshConfig).where(func.lower(SshConfig.name) == name.lower(), SshConfig.id != config.id))
+        if clash:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An SSH config with this name already exists")
+        config.name = name
+    if "host" in data and data["host"] is not None:
+        host = data["host"].strip()
+        if not host:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Host cannot be empty")
+        config.host = host
+    if "port" in data and data["port"] is not None:
+        config.port = int(data["port"]) or 22
+    if "username" in data and data["username"] is not None:
+        config.username = data["username"].strip()
+    # secrets: only overwrite when a non-empty value is supplied (blank keeps the stored credential).
+    if data.get("password"):
+        config.encrypted_password = encrypt_secret(data["password"])
+    if data.get("private_key"):
+        config.encrypted_private_key = encrypt_secret(data["private_key"])
+    db.commit()
+    db.refresh(config)
+    # An edited bastion may point somewhere new: drop any DB tunnels opened through connections that
+    # reference this config so the next op rebuilds against the new target/credentials.
+    for conn in db.scalars(select(DbConnection).where(DbConnection.ssh_config_id == config.id)).all():
+        db_ssh.close(conn.public_id)
+    return _ssh_config_read(config)
+
+
+@router.delete("/ssh-configs/{config_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_ssh_config(config_id: str, _: dict = Depends(require_admin), db: Session = Depends(get_db)) -> None:
+    config = _ssh_config_or_404(db, config_id)
+    # Null out every reference first so the delete never trips a foreign-key constraint, and tear down
+    # any live DB tunnel that was riding on this config.
+    db.execute(update(Server).where(Server.ssh_config_id == config.id).values(ssh_config_id=None))
+    affected = db.scalars(select(DbConnection).where(DbConnection.ssh_config_id == config.id)).all()
+    for conn in affected:
+        db_ssh.close(conn.public_id)
+    db.execute(update(DbConnection).where(DbConnection.ssh_config_id == config.id).values(ssh_config_id=None))
+    db.delete(config)
+    db.commit()
+
+
 def _db_connection_read(db: Session, conn: DbConnection) -> DbConnectionRead:
     return DbConnectionRead(
         id=conn.public_id,
@@ -3173,6 +3302,8 @@ def _db_connection_read(db: Session, conn: DbConnection) -> DbConnectionRead:
         ssh_port=conn.ssh_port or 22,
         ssh_username=conn.ssh_username or "",
         has_ssh_credentials=bool(conn.encrypted_ssh_password or conn.encrypted_ssh_private_key),
+        ssh_config_id=conn.ssh_config.public_id if conn.ssh_config else "",
+        ssh_config_name=conn.ssh_config.name if conn.ssh_config else "",
         group=_db_connection_group_name(db, conn),
         has_password=bool(conn.encrypted_password),
         created_at=conn.created_at,
@@ -3215,6 +3346,7 @@ def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_
         ssh_username=(payload.ssh_username or "").strip(),
         encrypted_ssh_password=encrypt_secret(payload.ssh_password) if payload.ssh_password else "",
         encrypted_ssh_private_key=encrypt_secret(payload.ssh_private_key) if payload.ssh_private_key else "",
+        ssh_config_id=_resolve_ssh_config_fk(db, payload.ssh_config_id),
         folder_id=_resolve_group_to_folder_id(db, payload.group),
     )
     db.add(conn)
@@ -3224,16 +3356,21 @@ def create_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_
 
 
 @router.post("/db/connections/test", response_model=DbConnectionResult)
-def test_unsaved_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user)) -> DbConnectionResult:
+def test_unsaved_db_connection(payload: DbConnectionCreate, _: dict = Depends(require_user), db: Session = Depends(get_db)) -> DbConnectionResult:
     # Test the parameters as typed, without persisting anything. A bad host/credentials is an
     # expected outcome, reported as ok=false with HTTP 200 (like the ad-hoc db_test_connection).
     engine = _conn_engine_or_400(payload.engine)
     port = payload.port or _conn_default_port(engine)
-    # One-shot SSH tunnel when a bastion is typed, so "Test" works before the connection is saved.
+    # A referenced global SSH config supplies the tunnel (its stored, encrypted credentials) instead
+    # of the inline ssh_* fields, so "Test" works with a selected config too.
+    ssh_cfg = _ssh_config_or_404(db, payload.ssh_config_id.strip()) if (payload.ssh_config_id or "").strip() else None
+    # One-shot SSH tunnel when a bastion is typed/selected, so "Test" works before the connection is
+    # saved.
     try:
         host, tport, forwarder = db_ssh.temp_target(
             payload.ssh_host, payload.ssh_port, payload.ssh_username,
             payload.ssh_password, payload.ssh_private_key, payload.host, port,
+            config=ssh_cfg,
         )
     except DbConsoleError as exc:
         return DbConnectionResult(ok=False, message=str(exc))
@@ -3298,6 +3435,8 @@ def update_db_connection(connection_id: str, payload: DbConnectionUpdate, _: dic
         conn.encrypted_ssh_password = encrypt_secret(data["ssh_password"])
     if data.get("ssh_private_key"):
         conn.encrypted_ssh_private_key = encrypt_secret(data["ssh_private_key"])
+    if "ssh_config_id" in data:
+        conn.ssh_config_id = _resolve_ssh_config_fk(db, data["ssh_config_id"])
     if "group" in data:
         conn.folder_id = _resolve_group_to_folder_id(db, data["group"])
 

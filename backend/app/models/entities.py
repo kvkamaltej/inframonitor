@@ -87,6 +87,10 @@ class Server(Base):
     jump_host: Mapped[str] = mapped_column(String(255), default="")
     jump_port: Mapped[int] = mapped_column(Integer, default=22)
     jump_username: Mapped[str] = mapped_column(String(128), default="")
+    # OR reference a reusable SshConfig for the jump host instead of the inline fields above. When
+    # set it wins over jump_host; NULL means "use the inline jump fields (or a direct connection)".
+    ssh_config_id: Mapped[int | None] = mapped_column(ForeignKey("ssh_configs.id"), nullable=True, index=True)
+    ssh_config: Mapped["SshConfig | None"] = relationship("SshConfig", foreign_keys=[ssh_config_id])
     environment: Mapped[str] = mapped_column(String(64), index=True)
     server_type: Mapped[str] = mapped_column(String(64), default="application", index=True)
     tags: Mapped[str] = mapped_column(String(512), default="")
@@ -274,6 +278,10 @@ class DbConnection(Base):
     ssh_username: Mapped[str] = mapped_column(String(255), default="")
     encrypted_ssh_password: Mapped[str] = mapped_column(Text, default="")
     encrypted_ssh_private_key: Mapped[str] = mapped_column(Text, default="")
+    # OR reference a reusable SshConfig for the tunnel instead of the inline ssh_* fields above. When
+    # set it wins; NULL means "use the inline ssh fields (or a direct connection)".
+    ssh_config_id: Mapped[int | None] = mapped_column(ForeignKey("ssh_configs.id"), nullable=True, index=True)
+    ssh_config: Mapped["SshConfig | None"] = relationship("SshConfig", foreign_keys=[ssh_config_id])
     # free-form environment tag ("dev" | "qa" | "uat" | "prod" | ""), so the UI can badge and
     # group saved connections the way servers are tagged. "" means unspecified.
     environment: Mapped[str] = mapped_column(String(32), default="")
@@ -326,6 +334,27 @@ class ShellFavorite(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped[User] = relationship(back_populates="shell_favorites")
+
+
+class SshConfig(Base):
+    """A reusable, named SSH connection profile (a "global SSH config").
+
+    A server's jump host or a database connection's SSH tunnel can either type its bastion details
+    inline OR reference one of these by id -- so a bastion configured once (host/port/user + its own
+    credentials, encrypted with the same Fernet path) can be selected from a dropdown everywhere.
+    """
+
+    __tablename__ = "ssh_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    public_id: Mapped[str] = mapped_column(String(36), unique=True, index=True, default="")
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    host: Mapped[str] = mapped_column(String(255), default="")
+    port: Mapped[int] = mapped_column(Integer, default=22)
+    username: Mapped[str] = mapped_column(String(128), default="")
+    encrypted_password: Mapped[str] = mapped_column(Text, default="")
+    encrypted_private_key: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Gateway(Base):

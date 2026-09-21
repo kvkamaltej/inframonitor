@@ -110,6 +110,10 @@ export type Server = {
   jump_port: number;
   jump_username: string;
   has_jump_credentials: boolean;
+  // referenced global SSH config (a reusable jump host profile), when selected. "" when the jump
+  // host is inline or absent. ssh_config_name is its display label.
+  ssh_config_id: string;
+  ssh_config_name: string;
   last_discovery: string | null;
   // vitals as of vitals_checked_at. cpu_percent is -1 when never sampled, which is not 0%.
   uptime_seconds: number;
@@ -731,6 +735,8 @@ export type ServerUpdate = Partial<{
   // blank string keeps the stored jump credential
   jump_password: string;
   jump_private_key: string;
+  // referenced global SSH config public_id; "" clears the reference, omit to leave it untouched.
+  ssh_config_id: string;
 }>;
 
 export async function updateServer(token: string, serverId: string, payload: ServerUpdate): Promise<Server> {
@@ -1085,6 +1091,10 @@ export type DbConnection = {
   ssh_port: number;
   ssh_username: string;
   has_ssh_credentials: boolean;
+  // referenced global SSH config (a reusable tunnel profile), when selected. "" when the tunnel is
+  // inline or absent. ssh_config_name is its display label.
+  ssh_config_id: string;
+  ssh_config_name: string;
   created_at: string;
 };
 
@@ -1108,6 +1118,8 @@ export type DbConnectionInput = {
   ssh_username?: string;
   ssh_password?: string;
   ssh_private_key?: string;
+  // referenced global SSH config public_id; "" clears the reference, omit to leave it untouched.
+  ssh_config_id?: string;
 };
 
 export type DbTable = {
@@ -1190,6 +1202,54 @@ export async function testDbConnection(token: string, input: DbConnectionInput):
 // Probes a stored connection by id, using its saved credentials.
 export async function testDbConnectionById(token: string, id: string): Promise<DbConnectionResult> {
   return request<DbConnectionResult>(`/db/connections/${encodeURIComponent(id)}/test`, token, { method: "POST" });
+}
+
+// --- global SSH configs (reusable jump host / tunnel profiles) ------------------------------
+// A named bastion a server's jump host or a DB connection's tunnel can reference by id instead of
+// typing the details inline. Secrets are write-only: has_password / has_private_key say whether one
+// is stored; the value is never returned. Reads are open to any signed-in user; writes are admin.
+
+export type SshConfig = {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  has_password: boolean;
+  has_private_key: boolean;
+  created_at: string;
+};
+
+export type SshConfigInput = {
+  name: string;
+  host: string;
+  port: number;
+  username?: string;
+  // write-only: non-empty sets/replaces; blank on edit keeps the stored credential.
+  password?: string;
+  private_key?: string;
+};
+
+export async function getSshConfigs(token: string): Promise<SshConfig[]> {
+  return request<SshConfig[]>("/ssh-configs", token);
+}
+
+export async function createSshConfig(token: string, input: SshConfigInput): Promise<SshConfig> {
+  return request<SshConfig>("/ssh-configs", token, { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function updateSshConfig(token: string, id: string, input: Partial<SshConfigInput>): Promise<SshConfig> {
+  return request<SshConfig>(`/ssh-configs/${encodeURIComponent(id)}`, token, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export async function deleteSshConfig(token: string, id: string): Promise<void> {
+  // 204 No Content, so avoid request<T> (its response.json() throws on an empty body).
+  const response = await fetch(`${API_URL}/ssh-configs/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store"
+  });
+  if (!response.ok) throw new ApiError(response.status, await response.text());
 }
 
 export async function getDbTables(token: string, id: string): Promise<DbTable[]> {

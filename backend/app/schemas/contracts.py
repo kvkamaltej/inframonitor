@@ -58,6 +58,10 @@ class ServerCreate(BaseModel):
     jump_username: str = ""
     jump_password: str = ""
     jump_private_key: str = ""
+    # Optional reference to a reusable global SSH config (public_id), selected from a dropdown. When
+    # set it supplies the jump host and its credentials, and the inline jump_* fields are ignored.
+    # "" / None = no referenced config (use the inline jump_* fields, if any).
+    ssh_config_id: str | None = None
     # optional group (folder public_id) to create the server directly into; "" / None means the
     # "Unassigned" bucket. Hostname uniqueness is scoped to this group.
     folder_id: str | None = None
@@ -84,6 +88,8 @@ class ServerUpdate(BaseModel):
     # blank string keeps the stored jump credential (mirrors password/private_key on the server).
     jump_password: str | None = None
     jump_private_key: str | None = None
+    # referenced global SSH config public_id; "" explicitly clears the reference, None leaves it.
+    ssh_config_id: str | None = None
 
 
 class ServerRead(BaseModel):
@@ -122,6 +128,10 @@ class ServerRead(BaseModel):
     jump_port: int = 22
     jump_username: str = ""
     has_jump_credentials: bool = False
+    # referenced global SSH config, when one is selected: its public_id and display name (name so the
+    # UI can show the selection without a second lookup). "" when the jump host is inline or absent.
+    ssh_config_id: str = ""
+    ssh_config_name: str = ""
     business_owner: str
     support_contact: str
     # per-server monitoring ingestion state (read-only here; mutated through the dedicated
@@ -672,6 +682,9 @@ class DbConnectionCreate(BaseModel):
     ssh_username: str = Field(default="", max_length=255)
     ssh_password: str = Field(default="", max_length=1024)
     ssh_private_key: str = Field(default="", max_length=32768)
+    # Optional reference to a reusable global SSH config (public_id), selected from a dropdown. When
+    # set it supplies the tunnel host and its credentials, and the inline ssh_* fields are ignored.
+    ssh_config_id: str | None = None
     # folder name (the "group"); resolved to an existing Folder in the route, else left unassigned.
     group: str | None = None
 
@@ -694,6 +707,8 @@ class DbConnectionUpdate(BaseModel):
     # blank keeps the stored ssh credential (mirrors password)
     ssh_password: str | None = None
     ssh_private_key: str | None = None
+    # referenced global SSH config public_id; "" explicitly clears the reference, None leaves it.
+    ssh_config_id: str | None = None
     group: str | None = None
 
 
@@ -715,6 +730,10 @@ class DbConnectionRead(BaseModel):
     ssh_port: int = 22
     ssh_username: str = ""
     has_ssh_credentials: bool = False
+    # referenced global SSH config, when one is selected: its public_id and display name. "" when the
+    # tunnel is inline or absent.
+    ssh_config_id: str = ""
+    ssh_config_name: str = ""
     group: str | None = None
     has_password: bool = False
     created_at: datetime
@@ -1214,3 +1233,45 @@ class GatewayOverviewRead(BaseModel):
 class GatewayCreate(BaseModel):
     name: str
     environment: str = ""
+
+
+# --- global SSH configs (reusable jump host / tunnel profiles) -------------------------------
+#
+# A named, reusable SSH bastion profile. A managed server's jump host and a database connection's
+# SSH tunnel can each REFERENCE one of these (by public_id) instead of typing the bastion details
+# inline, so the same jump host is defined once and picked from a dropdown. Credentials are
+# write-only: supplied on create/update, encrypted at rest, and never echoed (has_* flags say
+# whether one is stored). Every id on the wire is the config's public_id.
+
+
+class SshConfigCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(default="", max_length=128)
+    password: str = Field(default="", max_length=1024)
+    private_key: str = Field(default="", max_length=32768)
+
+
+class SshConfigUpdate(BaseModel):
+    # PATCH: only sent fields change. Secret fields are applied only when non-empty, so a blank keeps
+    # the stored credential rather than wiping it.
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    host: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None
+    private_key: str | None = None
+
+
+class SshConfigRead(BaseModel):
+    # id is the config's public_id (a uuid string), never the autoincrement key. Secrets are never
+    # present; has_password / has_private_key tell the UI whether a credential is stored.
+    id: str
+    name: str
+    host: str
+    port: int = 22
+    username: str = ""
+    has_password: bool = False
+    has_private_key: bool = False
+    created_at: datetime

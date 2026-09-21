@@ -39,6 +39,8 @@ EXPECTED_SERVER_COLUMNS: list[tuple[str, str]] = [
     ("jump_username", "''"),
     ("encrypted_jump_password", "''"),
     ("encrypted_jump_private_key", "''"),
+    # FK to a reusable ssh_configs row (the "global SSH config"); NULL = use inline jump fields.
+    ("ssh_config_id", "NULL"),
     ("public_id", "''"),
     ("server_type", "'application'"),
     ("discovered_services_json", "'[]'"),
@@ -138,6 +140,8 @@ EXPECTED_DB_CONNECTION_COLUMNS: list[tuple[str, str]] = [
     ("ssh_username", "''"),
     ("encrypted_ssh_password", "''"),
     ("encrypted_ssh_private_key", "''"),
+    # FK to a reusable ssh_configs row (the "global SSH config"); NULL = use inline ssh fields.
+    ("ssh_config_id", "NULL"),
 ]
 
 

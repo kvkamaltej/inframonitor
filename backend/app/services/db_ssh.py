@@ -21,8 +21,8 @@ from io import StringIO
 
 import paramiko
 
-from app.core.crypto import decrypt_secret
 from app.services.db_console import DbConsoleError
+from app.services.ssh_common import resolve_ssh, ssh_signature
 
 # Failure to bring up the tunnel is reported as a DbConsoleError subclass, so every SQL/metadata
 # route's existing `except DbConsoleError` surfaces it as a clean 400 rather than a 500. The redis
@@ -76,14 +76,25 @@ def _forwarder(ssh_host, ssh_port, ssh_username, ssh_password, ssh_key_text, db_
 def target(conn) -> tuple[str, int]:
     """The (host, port) to actually connect to for this saved connection: direct, or the local end
     of a live SSH tunnel. Raises DbTunnelError if a configured tunnel cannot be established."""
-    if not (getattr(conn, "ssh_host", "") or "").strip():
+    # The tunnel is EITHER a referenced reusable SshConfig OR the connection's inline ssh_* fields.
+    tunnel = resolve_ssh(
+        getattr(conn, "ssh_config", None),
+        conn.ssh_host, conn.ssh_port, conn.ssh_username,
+        conn.encrypted_ssh_password, conn.encrypted_ssh_private_key,
+    )
+    if tunnel is None:
         return conn.host, conn.port
+    ssh_host, ssh_port, ssh_username, ssh_password, ssh_key_text = tunnel
 
     key = conn.public_id
-    # A signature of the tunnel-relevant fields; if any changed since the cached tunnel was opened,
-    # the old forwarder points at the wrong place and must be replaced.
-    sig = (conn.ssh_host, conn.ssh_port, conn.ssh_username, conn.encrypted_ssh_password,
-           conn.encrypted_ssh_private_key, conn.host, conn.port)
+    # A signature of the tunnel-relevant fields; if any changed since the cached tunnel was opened
+    # (on the connection OR the referenced config), the old forwarder points at the wrong place and
+    # must be replaced. Computed without decrypting.
+    sig = ssh_signature(
+        getattr(conn, "ssh_config", None), getattr(conn, "ssh_config_id", None),
+        conn.ssh_host, conn.ssh_port, conn.ssh_username,
+        conn.encrypted_ssh_password, conn.encrypted_ssh_private_key, conn.host, conn.port,
+    )
     with _lock:
         cached = _tunnels.get(key)
         if cached is not None and cached["sig"] == sig and cached["fwd"].is_active:
@@ -92,9 +103,7 @@ def target(conn) -> tuple[str, int]:
             _stop(cached["fwd"])
             _tunnels.pop(key, None)
         fwd = _forwarder(
-            conn.ssh_host.strip(), conn.ssh_port, conn.ssh_username,
-            decrypt_secret(conn.encrypted_ssh_password) if conn.encrypted_ssh_password else "",
-            decrypt_secret(conn.encrypted_ssh_private_key) if conn.encrypted_ssh_private_key else "",
+            ssh_host, ssh_port, ssh_username, ssh_password, ssh_key_text,
             conn.host, conn.port,
         )
         _tunnels[key] = {"fwd": fwd, "sig": sig}
@@ -109,14 +118,27 @@ def close(public_id: str) -> None:
         _stop(cached["fwd"])
 
 
-def temp_target(ssh_host, ssh_port, ssh_username, ssh_password, ssh_private_key, db_host, db_port):
+def temp_target(ssh_host, ssh_port, ssh_username, ssh_password, ssh_private_key, db_host, db_port,
+                config=None):
     """A one-shot forwarder for an UNSAVED connection test. Returns (host, port, forwarder); the
-    caller must call `stop(forwarder)` when done. When ssh_host is blank, returns the direct target
-    and a None forwarder."""
-    if not (ssh_host or "").strip():
-        return db_host, db_port, None
-    fwd = _forwarder(ssh_host.strip(), ssh_port, ssh_username, ssh_password or "",
-                     ssh_private_key or "", db_host, db_port)
+    caller must call `stop(forwarder)` when done. The tunnel is either a referenced SshConfig or the
+    inline ssh_* fields; when neither is set, returns the direct target and a None forwarder."""
+    tunnel = resolve_ssh(config, ssh_host, ssh_port, ssh_username, None, None)
+    if tunnel is None:
+        # No config and no inline host: nothing to tunnel through.
+        if not (ssh_host or "").strip():
+            return db_host, db_port, None
+        ssh_host_r, ssh_port_r, ssh_username_r = ssh_host.strip(), ssh_port, ssh_username
+        ssh_password_r, ssh_key_r = ssh_password or "", ssh_private_key or ""
+    elif config is not None and (config.host or "").strip():
+        ssh_host_r, ssh_port_r, ssh_username_r, ssh_password_r, ssh_key_r = tunnel
+    else:
+        # inline host present: resolve_ssh returned it but with unusable (None) creds, so use the
+        # plaintext creds the caller passed for the test.
+        ssh_host_r, ssh_port_r, ssh_username_r = tunnel[0], tunnel[1], tunnel[2]
+        ssh_password_r, ssh_key_r = ssh_password or "", ssh_private_key or ""
+    fwd = _forwarder(ssh_host_r, ssh_port_r, ssh_username_r, ssh_password_r, ssh_key_r,
+                     db_host, db_port)
     return "127.0.0.1", fwd.local_bind_port, fwd
 
 

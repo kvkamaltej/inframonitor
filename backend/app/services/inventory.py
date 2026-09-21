@@ -60,6 +60,9 @@ def to_read(server: Server) -> ServerRead:
         jump_port=server.jump_port or 22,
         jump_username=server.jump_username or "",
         has_jump_credentials=bool(server.encrypted_jump_password or server.encrypted_jump_private_key),
+        # referenced global SSH config, when one is selected (relationship lazy-loads the row).
+        ssh_config_id=server.ssh_config.public_id if server.ssh_config else "",
+        ssh_config_name=server.ssh_config.name if server.ssh_config else "",
         business_owner=server.business_owner,
         support_contact=server.support_contact,
         metrics_enabled=bool(server.metrics_enabled),

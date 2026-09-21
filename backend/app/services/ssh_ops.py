@@ -62,20 +62,25 @@ def _client(server: Server, credentials: CredentialPayload) -> paramiko.SSHClien
     }
     _apply_auth(kwargs, credentials.private_key, credentials.password)
 
-    # Optional jump host (bastion): open the connection to the target THROUGH it. The jump keeps
-    # its own credentials, falling back to the server's when blank (one key often reaches both).
+    # Optional jump host (bastion): open the connection to the target THROUGH it. The bastion is
+    # EITHER a referenced reusable SshConfig OR the server's inline jump fields. Its own credentials
+    # fall back to the server's when blank (one key often reaches both).
+    jump = resolve_ssh(
+        getattr(server, "ssh_config", None),
+        server.jump_host, server.jump_port, server.jump_username,
+        server.encrypted_jump_password, server.encrypted_jump_private_key,
+    )
     jump_client: paramiko.SSHClient | None = None
-    if (getattr(server, "jump_host", "") or "").strip():
-        jump_password = decrypt_secret(server.encrypted_jump_password) if server.encrypted_jump_password else ""
-        jump_key = decrypt_secret(server.encrypted_jump_private_key) if server.encrypted_jump_private_key else ""
+    if jump is not None:
+        jump_host, jump_port, jump_user, jump_password, jump_key = jump
         if not jump_password and not jump_key:
             jump_password, jump_key = credentials.password, credentials.private_key
         jump_client = paramiko.SSHClient()
         jump_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         jkwargs: dict = {
-            "hostname": server.jump_host.strip(),
-            "port": server.jump_port or 22,
-            "username": (server.jump_username or "").strip() or server.username,
+            "hostname": jump_host,
+            "port": jump_port,
+            "username": jump_user or server.username,
             **_SSH_TIMEOUTS,
         }
         _apply_auth(jkwargs, jump_key, jump_password)
