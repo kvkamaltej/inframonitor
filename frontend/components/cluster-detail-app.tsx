@@ -46,6 +46,7 @@ import {
   getKubeServicePods,
   getKubeServices,
   getMe,
+  updateKubeCluster,
   KubeCluster,
   KubeDeployment,
   KubeEvent,
@@ -395,11 +396,14 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
     setToken(saved);
     (async () => {
       try {
-        const [c, o] = await Promise.all([getKubeCluster(saved, clusterId), getKubeOverview(saved, clusterId)]);
+        const c = await getKubeCluster(saved, clusterId);
         setCluster(c);
         setLogShipEnabled(c.log_shipping_enabled);
         setLogNamespaces((c.log_namespaces ?? []).join(", "));
-        setOverview(o);
+        // An inactive cluster is not probed: skip the live overview and all the per-tab reads below.
+        if (c.is_active !== false) {
+          setOverview(await getKubeOverview(saved, clusterId));
+        }
       } catch (error) {
         setLoadError(errText(error, "Unable to load cluster"));
       } finally {
@@ -414,6 +418,7 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
   // Lazily fetch a tab's data the first time it is opened.
   useEffect(() => {
     if (initializing) return;
+    if (cluster && cluster.is_active === false) return;  // inactive: no live probes
     if (tab === "nodes" && !nodesLoaded) void loadNodes();
     if (tab === "pods" && !podsLoaded) { void ensureNamespaces(); void loadPods(); }
     if (tab === "workloads" && !deploymentsLoaded) { void ensureNamespaces(); void loadDeployments(); }
@@ -425,6 +430,7 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
   }, [tab, initializing]);
 
   function refreshActive() {
+    if (cluster && cluster.is_active === false) return;  // inactive: never probe
     if (tab === "overview") return void loadOverview();
     if (tab === "nodes") return void loadNodes();
     if (tab === "pods") return void loadPods();
@@ -535,6 +541,24 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
     }
   }
 
+  // Admin re-activates the cluster from its detail page: flip the flag, then load its live data.
+  async function reactivateCluster() {
+    setBusy("reactivate");
+    try {
+      const updated = await updateKubeCluster(token, clusterId, { is_active: true });
+      setCluster(updated);
+      try {
+        setOverview(await getKubeOverview(token, clusterId));
+      } catch (e) {
+        notify(errText(e, "Reactivated, but live data failed to load"), "error");
+      }
+    } catch (error) {
+      notify(errText(error, "Unable to reactivate the cluster"), "error");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function saveLogShipping() {
     // Empty = all namespaces: split on commas and drop blanks so "a, ,b" becomes ["a","b"].
     const namespaces = logNamespaces.split(",").map((ns) => ns.trim()).filter(Boolean);
@@ -611,6 +635,27 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
               </div>
             ) : null}
 
+            {cluster && cluster.is_active === false ? (
+              <div className="rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 dark:border-amber-500/40 dark:bg-amber-950/40">
+                <div className="flex items-center gap-2 font-semibold text-amber-800 dark:text-amber-200"><Ban size={18} /> This cluster is inactive</div>
+                <p className="mt-1 text-sm text-amber-700 dark:text-amber-300">
+                  An admin marked <span className="font-semibold">{cluster.name}</span> inactive, so its live data (nodes, pods, logs, services, health) is not loaded and the cluster is not probed. Reactivate it from the Kubernetes list (edit the cluster → tick <span className="font-semibold">Active</span>) to view it again.
+                </p>
+                {isAdmin ? (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      disabled={loading}
+                      onClick={() => void reactivateCluster()}
+                      className="inline-flex h-9 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50"
+                    >
+                      {busy === "reactivate" ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />} Mark active
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+            <>
             <div className="flex flex-wrap items-center gap-2">
               {TABS.map(([key, label]) => (
                 <button key={key} onClick={() => setTab(key)} className={`h-9 rounded-full border px-4 text-sm font-medium transition-colors ${tab === key ? "border-accent bg-accent text-white" : "border-line text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"}`}>{label}</button>
@@ -879,6 +924,8 @@ export function ClusterDetailApp({ clusterId }: { clusterId: string }) {
                 <EventsTable events={events} emptyLabel={`No events in ${namespace || "any namespace"}.`} />
               </Panel>
             ) : null}
+            </>
+            )}
           </section>
         </section>
       </div>

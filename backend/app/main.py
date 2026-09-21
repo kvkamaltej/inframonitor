@@ -618,8 +618,12 @@ async def _k8s_log_shipping_loop(interval: int) -> None:
 
             def _run() -> None:
                 with SessionLocal() as db:
+                    # skip clusters an admin marked inactive: they are not probed at all
                     clusters = db.scalars(
-                        select(KubeCluster).where(KubeCluster.log_shipping_enabled.is_(True))
+                        select(KubeCluster).where(
+                            KubeCluster.log_shipping_enabled.is_(True),
+                            KubeCluster.is_active.is_(True),
+                        )
                     ).all()
                     for cluster in clusters:
                         try:
