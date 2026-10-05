@@ -2214,6 +2214,7 @@ export type KongRoute = {
   rate_limit: string;   // "300/min, 5000/hr"
   limit_by: string;
   policy: string;
+  active_counters: number;  // live rate-limit counter keys in Redis right now (0 = not throttling)
 };
 
 // A landing tile: a registered gateway plus its activity in the window.
@@ -2326,9 +2327,17 @@ export async function testGatewayAdmin(token: string, gatewayId: number): Promis
   return request(`/gateway/gateways/${gatewayId}/admin-test`, token, { method: "POST" });
 }
 
-// The gateway's configured routes + their rate-limit plugins, from Kong's Admin API.
+// The gateway's configured routes + their rate-limit plugins. Served from the seeded route cache
+// when present (credential-free), otherwise from Kong's Admin API; each row is enriched with how many
+// live rate-limit counter keys it has in Redis right now.
 export async function getGatewayRoutes(token: string, gatewayId: number): Promise<KongRoute[]> {
   return request<KongRoute[]>(`/gateway/gateways/${gatewayId}/routes`, token);
+}
+
+// Seed (or clear, with []) a gateway's route snapshot out-of-band so the routes screen works without
+// the operator holding Kong Admin API credentials. Admin-only.
+export async function setGatewayRoutesCache(token: string, gatewayId: number, routes: KongRoute[]): Promise<GatewaySummary> {
+  return request<GatewaySummary>(`/gateway/gateways/${gatewayId}/routes/cache`, token, { method: "PUT", body: JSON.stringify({ routes }) });
 }
 
 // Reset (clear) the live rate-limit counters for the selected routes.

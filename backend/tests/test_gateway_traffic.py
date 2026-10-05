@@ -414,3 +414,65 @@ def test_route_reset_requires_selection(client):
     gid = _gw_id(client, "empty")
     r = client.post(f"/api/gateway/gateways/{gid}/routes/reset", json={"route_ids": []})
     assert r.status_code == 400
+
+
+def test_routes_served_from_seeded_cache_without_any_admin_creds(client):
+    """The credential-free path: seed a route snapshot out-of-band, then the routes screen lists them
+    with NO Admin API URL and NO credentials configured."""
+    gid = _gw_id(client, "cache")
+    seed = client.put(f"/api/gateway/gateways/{gid}/routes/cache", json={"routes": [
+        {"id": "04a0", "name": "getCaptcha", "paths": ["/captcha/getCaptcha"],
+         "has_rate_limit": True, "rate_limit": "300/min", "limit_by": "ip", "policy": "redis"},
+        {"id": "b2c3", "name": "login", "paths": ["/auth/login"]},
+    ]})
+    assert seed.status_code == 200, seed.text
+    assert seed.json()["can_manage_routes"] is True
+    # no admin_url, no credentials — still lists from the cache
+    rows = client.get(f"/api/gateway/gateways/{gid}/routes")
+    assert rows.status_code == 200, rows.text
+    names = {r["name"] for r in rows.json()}
+    assert names == {"getCaptcha", "login"}
+    cap = next(r for r in rows.json() if r["name"] == "getCaptcha")
+    assert cap["rate_limit"] == "300/min" and cap["active_counters"] == 0
+
+
+def test_cached_routes_take_precedence_over_admin_api(client, monkeypatch):
+    from app.services import kong_admin
+    gid = _gw_id(client, "precedence")
+    client.put(f"/api/gateway/gateways/{gid}/admin-config", json={"admin_url": "https://k/admin", "admin_credentials": "a:b"})
+    client.put(f"/api/gateway/gateways/{gid}/routes/cache", json={"routes": [{"id": "cached", "name": "from-cache"}]})
+
+    def boom(*a, **k):  # the Admin API must NOT be consulted when a cache exists
+        raise AssertionError("list_routes should not be called when a cache is seeded")
+
+    monkeypatch.setattr(kong_admin, "list_routes", boom)
+    rows = client.get(f"/api/gateway/gateways/{gid}/routes").json()
+    assert [r["id"] for r in rows] == ["cached"]
+
+
+def test_routes_enriched_with_live_active_counters(client, monkeypatch):
+    from app.services import kong_admin
+    gid = _gw_id(client, "counters")
+    client.put(f"/api/gateway/gateways/{gid}/admin-config", json={
+        "ratelimit_redis_host": "192.168.1.46", "ratelimit_redis_port": 16379})
+    client.put(f"/api/gateway/gateways/{gid}/routes/cache", json={"routes": [
+        {"id": "hot", "name": "busy"}, {"id": "cold", "name": "idle"}]})
+    monkeypatch.setattr(kong_admin, "count_active_counters", lambda h, p, d, pw: {"hot": 5})
+    rows = {r["id"]: r for r in client.get(f"/api/gateway/gateways/{gid}/routes").json()}
+    assert rows["hot"]["active_counters"] == 5
+    assert rows["cold"]["active_counters"] == 0
+
+
+def test_routes_404_when_no_cache_and_no_admin(client):
+    gid = _gw_id(client, "bare")
+    assert client.get(f"/api/gateway/gateways/{gid}/routes").status_code == 400
+
+
+def test_empty_cache_payload_clears_the_snapshot(client):
+    gid = _gw_id(client, "clearcache")
+    client.put(f"/api/gateway/gateways/{gid}/routes/cache", json={"routes": [{"id": "x", "name": "x"}]})
+    cleared = client.put(f"/api/gateway/gateways/{gid}/routes/cache", json={"routes": []})
+    assert cleared.status_code == 200
+    # with no admin_url either, managing routes is no longer possible
+    assert cleared.json()["can_manage_routes"] is False
+    assert client.get(f"/api/gateway/gateways/{gid}/routes").status_code == 400

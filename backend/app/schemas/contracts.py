@@ -1324,6 +1324,13 @@ class KongRouteRead(BaseModel):
     rate_limit: str = ""      # e.g. "300/min, 5000/hr"
     limit_by: str = ""        # ip | consumer | credential | ...
     policy: str = ""
+    # live rate-limit counter keys in Redis for this route right now (0 = not currently throttled)
+    active_counters: int = 0
+
+
+class GatewayRoutesCacheRequest(BaseModel):
+    """Seed the gateway's out-of-band route snapshot so the routes screen works without Admin API creds."""
+    routes: list[KongRouteRead] = Field(default_factory=list)
 
 
 class GatewayRouteResetRequest(BaseModel):

@@ -280,6 +280,7 @@ EXPECTED_GATEWAY_COLUMNS: list[tuple[str, str]] = [
     ("ratelimit_redis_port", "6379"),
     ("ratelimit_redis_db", "0"),
     ("encrypted_ratelimit_redis_password", "''"),
+    ("routes_cache_json", "'[]'"),
 ]
 
 

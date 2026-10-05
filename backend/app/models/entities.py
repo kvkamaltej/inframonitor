@@ -417,6 +417,10 @@ class Gateway(Base):
     ratelimit_redis_port: Mapped[int] = mapped_column(Integer, default=6379)
     ratelimit_redis_db: Mapped[int] = mapped_column(Integer, default=0)
     encrypted_ratelimit_redis_password: Mapped[str] = mapped_column(Text, default="")
+    # A cached snapshot of the gateway's configured routes (JSON list, same shape as kong_admin
+    # returns). Lets the routes screen work WITHOUT the operator holding Admin API credentials: the
+    # cache is seeded out-of-band from Kong, and the live rate-limit counters are read from Redis.
+    routes_cache_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

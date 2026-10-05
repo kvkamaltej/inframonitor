@@ -47,6 +47,7 @@ from app.schemas.contracts import (
     GatewayOverviewRead,
     GatewayRead,
     GatewayRouteResetRequest,
+    GatewayRoutesCacheRequest,
     GatewayRouteResetResult,
     GatewaySourceRead,
     KongRouteRead,
@@ -4899,9 +4900,25 @@ def gateway_overview(
     return out
 
 
+def _gateway_cached_routes(g: Gateway) -> list[dict]:
+    """Parse the gateway's out-of-band seeded route snapshot (routes_cache_json), or []."""
+    raw = getattr(g, "routes_cache_json", "") or ""
+    if not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
 def _gateway_read(g: Gateway) -> GatewayRead:
     admin_url = getattr(g, "admin_url", "") or ""
     redis_host = getattr(g, "ratelimit_redis_host", "") or ""
+    # The routes screen works credential-free: routes come from a seeded cache (or the Admin API if one
+    # is configured), live counters + resets come from the rate-limit Redis. So "manage routes" is
+    # available when we can SOURCE the route list at all — from a cache OR an Admin API.
+    has_routes_source = bool(admin_url) or bool(_gateway_cached_routes(g))
     return GatewayRead(
         id=g.id, name=g.name, environment=g.environment, enabled=g.enabled,
         last_event_at=_gw_utc(g.last_event_at),
@@ -4912,8 +4929,7 @@ def _gateway_read(g: Gateway) -> GatewayRead:
         ratelimit_redis_port=getattr(g, "ratelimit_redis_port", 6379) or 6379,
         ratelimit_redis_db=getattr(g, "ratelimit_redis_db", 0) or 0,
         has_ratelimit_redis_password=bool(getattr(g, "encrypted_ratelimit_redis_password", "")),
-        # routes can be LISTED with just the Admin API; RESET also needs the rate-limit Redis.
-        can_manage_routes=bool(admin_url),
+        can_manage_routes=has_routes_source,
     )
 
 
@@ -4968,13 +4984,50 @@ def test_gateway_admin(gateway_id: int, _: dict = Depends(require_admin_not_gues
 
 @router.get("/gateway/gateways/{gateway_id}/routes", response_model=list[KongRouteRead])
 def gateway_routes(gateway_id: int, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> list[KongRouteRead]:
-    """The gateway's configured routes + their rate-limit plugins, from Kong's Admin API."""
+    """The gateway's configured routes + their rate-limit plugins, then each enriched with how many
+    live rate-limit counter keys it has in Redis right now.
+
+    Credential-free by design: routes come from the seeded cache (routes_cache_json) when present, so
+    the operator never needs the Kong Admin API credentials. If no cache is seeded but an Admin URL IS
+    configured, we fall back to a live Admin API listing. The active-counter enrichment is best-effort
+    and only runs when the rate-limit Redis is configured."""
     gateway = _gateway_or_404(db, gateway_id)
-    try:
-        routes = kong_admin.list_routes(gateway.admin_url, decrypt_secret(gateway.encrypted_admin_credentials), bool(gateway.admin_verify_tls))
-    except KongAdminError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return [KongRouteRead(**r) for r in routes]
+    cached = _gateway_cached_routes(gateway)
+    if cached:
+        routes = cached
+    elif (gateway.admin_url or "").strip():
+        try:
+            routes = kong_admin.list_routes(gateway.admin_url, decrypt_secret(gateway.encrypted_admin_credentials), bool(gateway.admin_verify_tls))
+        except KongAdminError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="No routes are available for this gateway yet. Seed the route cache or configure the Kong Admin API.")
+    # enrich with the live counter count per route (best-effort; empty if Redis not configured/reachable)
+    active = kong_admin.count_active_counters(
+        gateway.ratelimit_redis_host, gateway.ratelimit_redis_port, gateway.ratelimit_redis_db,
+        decrypt_secret(gateway.encrypted_ratelimit_redis_password),
+    )
+    out: list[KongRouteRead] = []
+    for r in routes:
+        item = {k: r.get(k) for k in KongRouteRead.model_fields if k in r}
+        item["active_counters"] = int(active.get(str(r.get("id") or ""), 0))
+        out.append(KongRouteRead(**item))
+    return out
+
+
+@router.put("/gateway/gateways/{gateway_id}/routes/cache", response_model=GatewayRead)
+def set_gateway_routes_cache(gateway_id: int, payload: GatewayRoutesCacheRequest, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> GatewayRead:
+    """Seed (or clear) the gateway's route snapshot out-of-band. This is how the routes screen works
+    without the operator holding Kong Admin API credentials: the snapshot is captured from Kong once
+    and stored here; live counters + resets still come from the rate-limit Redis. An empty list clears
+    the cache (the screen then falls back to the Admin API if one is configured)."""
+    gateway = _gateway_or_404(db, gateway_id)
+    normalized = [KongRouteRead(**r.model_dump()).model_dump() for r in (payload.routes or [])]
+    gateway.routes_cache_json = json.dumps(normalized)
+    db.commit()
+    db.refresh(gateway)
+    return _gateway_read(gateway)
 
 
 @router.post("/gateway/gateways/{gateway_id}/routes/reset", response_model=GatewayRouteResetResult)

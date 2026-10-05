@@ -145,6 +145,36 @@ def reset_route_counters(host: str, port: int, db: int, password: str, route_ids
     return deleted
 
 
+def count_active_counters(host: str, port: int, db: int, password: str) -> dict[str, int]:
+    """One scan of `ratelimit:*` in Kong's rate-limit Redis, grouped by route id (the 1st segment),
+    so the routes screen can show how many live counter keys each route currently has — i.e. which
+    routes are actively being rate-limited right now. Returns {route_id: count}; {} if Redis is not
+    configured or unreachable (best-effort, never raises)."""
+    if not (host or "").strip():
+        return {}
+    try:
+        import redis  # noqa: PLC0415
+
+        client = redis.Redis(
+            host=host.strip(), port=int(port or 6379), db=int(db or 0),
+            password=password or None, socket_connect_timeout=5, socket_timeout=5, decode_responses=True,
+        )
+        counts: dict[str, int] = {}
+        try:
+            for key in client.scan_iter(match="ratelimit:*", count=500):
+                parts = str(key).split(":")
+                if len(parts) >= 2 and parts[1]:
+                    counts[parts[1]] = counts.get(parts[1], 0) + 1
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+        return counts
+    except Exception:
+        return {}
+
+
 def test_admin(admin_url: str, credentials: str, verify_tls: bool) -> str:
     """Probe the Admin API (GET /) and return the Kong version. Raises KongAdminError on failure."""
     base = (admin_url or "").strip()

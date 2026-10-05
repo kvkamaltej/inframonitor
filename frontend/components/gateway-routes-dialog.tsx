@@ -1,10 +1,14 @@
 "use client";
 
 // Admin dialog opened from the /gateway ⋮ menu → "Configured routes". Lists a gateway's configured
-// routes (from Kong's Admin API) with their rate limits, and lets an admin RESET (clear) the live
-// rate-limit counter for selected routes — deleting `ratelimit:<route_id>:*` in Kong's Redis so
-// throttled clients can hit those routes again immediately. First the gateway's control channel
-// (Admin API URL + credentials, and the rate-limit Redis) must be configured here.
+// routes with their rate limits and how many live counter keys each has right now, and lets an admin
+// RESET (clear) the live rate-limit counter for selected routes — deleting `ratelimit:<route_id>:*`
+// in Kong's Redis so throttled clients can hit those routes again immediately.
+//
+// Credential-free by design: the route list comes from a managed snapshot the server already holds
+// (seeded out-of-band from Kong), so the operator never has to supply Kong Admin API credentials to
+// see or reset routes. The optional "Control channel" panel only sets the rate-limit Redis (for the
+// resets + live counts) and, if ever wanted, a live Admin API source instead of the snapshot.
 
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, PlugZap, RefreshCw, RotateCcw, Save, Settings, X } from "lucide-react";
@@ -194,10 +198,11 @@ export function GatewayRoutesDialog({ token, onClose }: { token: string; onClose
           {configuring || !gateway?.can_manage_routes ? (
             <div className="grid gap-3">
               <p className="text-sm text-muted">
-                Point this gateway at Kong&apos;s <span className="font-semibold text-fg">Admin API</span> (to list routes) and its
-                <span className="font-semibold text-fg"> rate-limit Redis</span> (to reset counters). Secrets are stored encrypted and never shown again.
+                The route list comes from a managed snapshot — no Kong Admin credentials are needed to view or reset routes.
+                Resets act through the gateway&apos;s <span className="font-semibold text-fg">rate-limit Redis</span>, so only that has to be set here.
+                The <span className="font-semibold text-fg">Kong Admin API</span> below is optional: configure it only if you want routes pulled live instead of from the snapshot. Secrets are stored encrypted and never shown again.
               </p>
-              <label className={labelClass}>Kong Admin API URL
+              <label className={labelClass}>Kong Admin API URL <span className="font-normal normal-case text-muted">(optional)</span>
                 <input value={adminUrl} onChange={(e) => setAdminUrl(e.target.value)} placeholder="https://192.168.1.46:8445" className={inputClass} />
               </label>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -224,7 +229,7 @@ export function GatewayRoutesDialog({ token, onClose }: { token: string; onClose
                 <input value={redisPassword} onChange={(e) => setRedisPassword(e.target.value)} type="password" autoComplete="new-password" placeholder={gateway?.has_ratelimit_redis_password ? "••••••••" : "optional"} className={inputClass} />
               </label>
               <div className="mt-1 flex flex-wrap items-center gap-2">
-                <button type="button" onClick={() => void saveConfig()} disabled={busy !== "" || !adminUrl.trim()} className="inline-flex h-10 items-center gap-2 rounded-xl bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">
+                <button type="button" onClick={() => void saveConfig()} disabled={busy !== "" || (!adminUrl.trim() && !redisHost.trim())} className="inline-flex h-10 items-center gap-2 rounded-xl bg-accent px-5 text-sm font-semibold text-white transition-colors hover:bg-accent/80 disabled:opacity-50">
                   {busy === "save" ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Save
                 </button>
                 <button type="button" onClick={() => void testAdmin()} disabled={busy !== "" || !gateway?.admin_url} className="inline-flex h-10 items-center gap-2 rounded-xl bg-surface px-4 text-sm font-semibold text-fg ring-1 ring-edge transition-colors hover:text-accent disabled:opacity-50">
@@ -236,9 +241,9 @@ export function GatewayRoutesDialog({ token, onClose }: { token: string; onClose
               </div>
             </div>
           ) : loading ? (
-            <div className="flex items-center gap-2 py-8 text-sm text-muted"><Loader2 size={16} className="animate-spin" /> Loading routes from Kong…</div>
+            <div className="flex items-center gap-2 py-8 text-sm text-muted"><Loader2 size={16} className="animate-spin" /> Loading routes…</div>
           ) : routes.length === 0 ? (
-            <p className="py-8 text-sm text-muted">No routes returned from the Admin API.</p>
+            <p className="py-8 text-sm text-muted">No routes available for this gateway yet.</p>
           ) : (
             <table className="w-full text-left text-sm">
               <thead className="bg-surface text-xs uppercase tracking-wider text-muted">
@@ -246,7 +251,7 @@ export function GatewayRoutesDialog({ token, onClose }: { token: string; onClose
                   <th className="px-3 py-2">
                     <input type="checkbox" checked={allSelected} onChange={(e) => setSelected(e.target.checked ? new Set(resettable.map((r) => r.id)) : new Set())} className="h-4 w-4 rounded border-edge text-accent focus:ring-accent" title="Select all rate-limited routes" />
                   </th>
-                  {["Route", "Rate limit", "By", "Methods"].map((h) => <th key={h} className="px-3 py-2 font-semibold">{h}</th>)}
+                  {["Route", "Rate limit", "By", "Active now", "Methods"].map((h) => <th key={h} className="px-3 py-2 font-semibold">{h}</th>)}
                 </tr>
               </thead>
               <tbody className="divide-y divide-edge">
@@ -261,6 +266,11 @@ export function GatewayRoutesDialog({ token, onClose }: { token: string; onClose
                     </td>
                     <td className="px-3 py-2 align-top font-mono text-xs">{r.rate_limit || <span className="text-muted">none</span>}</td>
                     <td className="px-3 py-2 align-top text-xs">{r.limit_by || "—"}</td>
+                    <td className="px-3 py-2 align-top text-xs">
+                      {r.active_counters > 0
+                        ? <span className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 font-semibold text-amber-700 dark:text-amber-300" title="live rate-limit counter keys in Redis for this route">{r.active_counters}</span>
+                        : <span className="text-muted">0</span>}
+                    </td>
                     <td className="px-3 py-2 align-top text-xs">{r.methods.join(", ") || "any"}</td>
                   </tr>
                 ))}
