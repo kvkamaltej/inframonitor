@@ -39,13 +39,17 @@ from app.services import db_backup
 from app.services import oidc
 from app.models.entities import AccessPolicy, AppSetting, AuditLog, DbConnection, DbQueryHistory, Folder, Gateway, GatewayEvent, GatewayRollup, KubeCluster, Server, ServerStatus, ShellFavorite, SshConfig, User, UserPolicyAssignment, UserServerAccess
 from app.schemas.contracts import (
+    GatewayAdminConfig,
     GatewayCreate,
     GatewayEndpointRead,
     GatewayEventRead,
     GatewayIngestResult,
     GatewayOverviewRead,
     GatewayRead,
+    GatewayRouteResetRequest,
+    GatewayRouteResetResult,
     GatewaySourceRead,
+    KongRouteRead,
     RedisCommandRequest,
     RedisCommandResult,
     RedisKeyDetail,
@@ -164,6 +168,8 @@ from app.services import db_metadata
 from app.services import db_ssh
 from app.services import redis_ops
 from app.services import kube
+from app.services import kong_admin
+from app.services.kong_admin import KongAdminError
 from app.services.kube import KubeError
 from app.services.integrations import check_integrations
 from app.services import monitoring
@@ -4893,16 +4899,102 @@ def gateway_overview(
     return out
 
 
+def _gateway_read(g: Gateway) -> GatewayRead:
+    admin_url = getattr(g, "admin_url", "") or ""
+    redis_host = getattr(g, "ratelimit_redis_host", "") or ""
+    return GatewayRead(
+        id=g.id, name=g.name, environment=g.environment, enabled=g.enabled,
+        last_event_at=_gw_utc(g.last_event_at),
+        admin_url=admin_url,
+        has_admin_credentials=bool(getattr(g, "encrypted_admin_credentials", "")),
+        admin_verify_tls=bool(getattr(g, "admin_verify_tls", False)),
+        ratelimit_redis_host=redis_host,
+        ratelimit_redis_port=getattr(g, "ratelimit_redis_port", 6379) or 6379,
+        ratelimit_redis_db=getattr(g, "ratelimit_redis_db", 0) or 0,
+        has_ratelimit_redis_password=bool(getattr(g, "encrypted_ratelimit_redis_password", "")),
+        # routes can be LISTED with just the Admin API; RESET also needs the rate-limit Redis.
+        can_manage_routes=bool(admin_url),
+    )
+
+
+def _gateway_or_404(db: Session, gateway_id: int) -> Gateway:
+    gateway = db.get(Gateway, gateway_id)
+    if not gateway:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Gateway not found")
+    return gateway
+
+
 @router.get("/gateway/gateways", response_model=list[GatewayRead])
 def list_gateways(
     _: dict = Depends(require_admin_not_guest),
     db: Session = Depends(get_db),
 ) -> list[GatewayRead]:
-    return [
-        GatewayRead(id=g.id, name=g.name, environment=g.environment,
-                    enabled=g.enabled, last_event_at=_gw_utc(g.last_event_at))
-        for g in db.query(Gateway).order_by(Gateway.name).all()
-    ]
+    return [_gateway_read(g) for g in db.query(Gateway).order_by(Gateway.name).all()]
+
+
+@router.put("/gateway/gateways/{gateway_id}/admin-config", response_model=GatewayRead)
+def set_gateway_admin_config(gateway_id: int, payload: GatewayAdminConfig, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> GatewayRead:
+    """Configure (or clear) a gateway's Kong Admin API + rate-limit Redis control channel. Secrets are
+    kept when sent blank; clearing admin_url wipes the whole channel."""
+    gateway = _gateway_or_404(db, gateway_id)
+    gateway.admin_url = (payload.admin_url or "").strip()
+    gateway.admin_verify_tls = bool(payload.admin_verify_tls)
+    gateway.ratelimit_redis_host = (payload.ratelimit_redis_host or "").strip()
+    gateway.ratelimit_redis_port = payload.ratelimit_redis_port or 6379
+    gateway.ratelimit_redis_db = payload.ratelimit_redis_db or 0
+    if payload.admin_credentials:
+        gateway.encrypted_admin_credentials = encrypt_secret(payload.admin_credentials)
+    if payload.ratelimit_redis_password:
+        gateway.encrypted_ratelimit_redis_password = encrypt_secret(payload.ratelimit_redis_password)
+    # clearing the admin URL / redis host drops the matching stored secret, so nothing is orphaned.
+    if not gateway.admin_url:
+        gateway.encrypted_admin_credentials = ""
+    if not gateway.ratelimit_redis_host:
+        gateway.encrypted_ratelimit_redis_password = ""
+    db.commit()
+    db.refresh(gateway)
+    return _gateway_read(gateway)
+
+
+@router.post("/gateway/gateways/{gateway_id}/admin-test", response_model=ConnectionResult)
+def test_gateway_admin(gateway_id: int, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> ConnectionResult:
+    gateway = _gateway_or_404(db, gateway_id)
+    try:
+        version = kong_admin.test_admin(gateway.admin_url, decrypt_secret(gateway.encrypted_admin_credentials), bool(gateway.admin_verify_tls))
+        return ConnectionResult(ok=True, message=f"Connected to Kong {version}")
+    except KongAdminError as exc:
+        return ConnectionResult(ok=False, message=str(exc))
+
+
+@router.get("/gateway/gateways/{gateway_id}/routes", response_model=list[KongRouteRead])
+def gateway_routes(gateway_id: int, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> list[KongRouteRead]:
+    """The gateway's configured routes + their rate-limit plugins, from Kong's Admin API."""
+    gateway = _gateway_or_404(db, gateway_id)
+    try:
+        routes = kong_admin.list_routes(gateway.admin_url, decrypt_secret(gateway.encrypted_admin_credentials), bool(gateway.admin_verify_tls))
+    except KongAdminError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return [KongRouteRead(**r) for r in routes]
+
+
+@router.post("/gateway/gateways/{gateway_id}/routes/reset", response_model=GatewayRouteResetResult)
+def reset_gateway_routes(gateway_id: int, payload: GatewayRouteResetRequest, _: dict = Depends(require_admin_not_guest), db: Session = Depends(get_db)) -> GatewayRouteResetResult:
+    """Reset (clear) the live rate-limit counters for the selected routes by deleting their
+    `ratelimit:<route_id>:*` keys in Kong's rate-limit Redis. Admin-only, acts on the live gateway."""
+    gateway = _gateway_or_404(db, gateway_id)
+    route_ids = [r for r in (payload.route_ids or []) if str(r).strip()]
+    if not route_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Select at least one route to reset")
+    try:
+        deleted = kong_admin.reset_route_counters(
+            gateway.ratelimit_redis_host, gateway.ratelimit_redis_port, gateway.ratelimit_redis_db,
+            decrypt_secret(gateway.encrypted_ratelimit_redis_password), route_ids,
+        )
+    except KongAdminError as exc:
+        return GatewayRouteResetResult(ok=False, message=str(exc))
+    total = sum(deleted.values())
+    return GatewayRouteResetResult(ok=True, deleted=deleted, total_deleted=total,
+                                   message=f"Cleared {total} rate-limit counter(s) across {len(route_ids)} route(s).")
 
 
 @router.post("/gateway/gateways")

@@ -340,3 +340,77 @@ def test_timestamps_come_back_as_utc(client, token):
     gateway = next(g for g in client.get("/api/gateway/gateways").json()
                    if g["last_event_at"] is not None)
     assert aware(gateway["last_event_at"]), gateway["last_event_at"]
+
+
+# --- Kong Admin control channel: configure, list routes, reset rate limits -----------------
+
+
+def _gw_id(client, token_name="route-mgmt"):
+    r = client.post("/api/gateway/gateways", json={"name": f"kong-{token_name}", "environment": "test"})
+    assert r.status_code == 200, r.text
+    return next(g["id"] for g in client.get("/api/gateway/gateways").json() if g["name"] == f"kong-{token_name}")
+
+
+def test_admin_config_set_and_read(client):
+    gid = _gw_id(client, "cfg")
+    r = client.put(f"/api/gateway/gateways/{gid}/admin-config", json={
+        "admin_url": "https://192.168.1.46:8445",
+        "admin_credentials": "admin:secret",
+        "admin_verify_tls": False,
+        "ratelimit_redis_host": "192.168.1.46",
+        "ratelimit_redis_port": 16379,
+        "ratelimit_redis_db": 0,
+        "ratelimit_redis_password": "",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["admin_url"] == "https://192.168.1.46:8445"
+    assert body["has_admin_credentials"] is True
+    assert body["ratelimit_redis_host"] == "192.168.1.46"
+    assert body["ratelimit_redis_port"] == 16379
+    assert body["can_manage_routes"] is True
+    # secrets never echoed
+    assert "admin_credentials" not in body and "encrypted_admin_credentials" not in body
+
+
+def test_routes_listed_from_kong_admin(client, monkeypatch):
+    from app.services import kong_admin
+    gid = _gw_id(client, "list")
+    client.put(f"/api/gateway/gateways/{gid}/admin-config", json={"admin_url": "https://k/admin", "admin_credentials": "a:b"})
+    canned = [{
+        "id": "r1", "name": "getCaptcha", "methods": ["GET"], "paths": ["/captcha/getCaptcha"],
+        "hosts": [], "service": "captcha", "has_rate_limit": True, "rate_limit": "300/min, 5000/hr",
+        "limit_by": "ip", "policy": "redis",
+    }]
+    monkeypatch.setattr(kong_admin, "list_routes", lambda url, creds, verify: canned)
+    r = client.get(f"/api/gateway/gateways/{gid}/routes")
+    assert r.status_code == 200, r.text
+    assert r.json()[0]["rate_limit"] == "300/min, 5000/hr"
+    assert r.json()[0]["id"] == "r1"
+
+
+def test_route_reset_clears_counters(client, monkeypatch):
+    from app.services import kong_admin
+    gid = _gw_id(client, "reset")
+    client.put(f"/api/gateway/gateways/{gid}/admin-config", json={
+        "admin_url": "https://k/admin", "admin_credentials": "a:b",
+        "ratelimit_redis_host": "192.168.1.46", "ratelimit_redis_port": 16379})
+    seen = {}
+
+    def fake_reset(host, port, db, password, route_ids):
+        seen["args"] = (host, port, db, route_ids)
+        return {rid: 7 for rid in route_ids}
+
+    monkeypatch.setattr(kong_admin, "reset_route_counters", fake_reset)
+    r = client.post(f"/api/gateway/gateways/{gid}/routes/reset", json={"route_ids": ["r1", "r2"]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True and body["total_deleted"] == 14
+    assert body["deleted"] == {"r1": 7, "r2": 7}
+    assert seen["args"] == ("192.168.1.46", 16379, 0, ["r1", "r2"])
+
+
+def test_route_reset_requires_selection(client):
+    gid = _gw_id(client, "empty")
+    r = client.post(f"/api/gateway/gateways/{gid}/routes/reset", json={"route_ids": []})
+    assert r.status_code == 400

@@ -12,7 +12,8 @@
 // already fetched would answer a different question from the one the column
 // header implies.
 
-import { AlertTriangle, ArrowLeft, Check, Copy, Loader2, Plus, Server, ShieldAlert, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Copy, Loader2, MoreVertical, Plus, RotateCcw, Server, ShieldAlert, X } from "lucide-react";
+import { GatewayRoutesDialog } from "@/components/gateway-routes-dialog";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { AutoRefreshSelect, useAutoRefresh } from "@/components/auto-refresh";
@@ -388,6 +389,8 @@ function ManageGatewaysDialog({ token, onClose }: { token: string; onClose: () =
 export function GatewayPage({ token, me }: { token: string; me: Me }) {
   const isAdmin = me.role === "admin";
   const [manageOpen, setManageOpen] = useState(false);
+  const [routesOpen, setRoutesOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [range, setRange] = useState<GatewayRange>("5m");
   // Relative preset, or an absolute From/To window (datetime-local strings). Absolute lets an
   // operator pick e.g. Sep 1 -> now for a forensic sweep beyond the presets.
@@ -573,14 +576,31 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
         )}
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {isAdmin ? (
-            <button
-              type="button"
-              onClick={() => setManageOpen(true)}
-              className="flex h-8 items-center gap-1.5 rounded-full border border-edge bg-surface px-3 text-xs font-medium text-muted transition-colors hover:text-fg"
-            >
-              <Server size={14} />
-              Manage gateways
-            </button>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setActionsOpen((o) => !o)}
+                aria-haspopup="menu"
+                aria-expanded={actionsOpen}
+                title="Gateway actions"
+                className="flex h-8 w-8 items-center justify-center rounded-full border border-edge bg-surface text-muted transition-colors hover:text-fg"
+              >
+                <MoreVertical size={16} />
+              </button>
+              {actionsOpen ? (
+                <>
+                  <button aria-label="Dismiss" onClick={() => setActionsOpen(false)} className="fixed inset-0 z-40 cursor-default" />
+                  <div role="menu" className="absolute right-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-2xl border border-edge bg-elevated py-1 text-left shadow-lg">
+                    <button role="menuitem" onClick={() => { setActionsOpen(false); setRoutesOpen(true); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-fg transition-colors hover:bg-surface">
+                      <RotateCcw size={15} className="text-accent" /> Configured routes &amp; rate limits
+                    </button>
+                    <button role="menuitem" onClick={() => { setActionsOpen(false); setManageOpen(true); }} className="flex w-full items-center gap-2 px-4 py-2.5 text-sm font-medium text-fg transition-colors hover:bg-surface">
+                      <Server size={15} className="text-accent" /> Manage gateways
+                    </button>
+                  </div>
+                </>
+              ) : null}
+            </div>
           ) : null}
           <div className="flex items-center rounded-full border border-edge bg-surface p-1 text-xs">
             <button
@@ -628,6 +648,7 @@ export function GatewayPage({ token, me }: { token: string; me: Me }) {
       </div>
 
       {manageOpen ? <ManageGatewaysDialog token={token} onClose={() => setManageOpen(false)} /> : null}
+      {routesOpen ? <GatewayRoutesDialog token={token} onClose={() => setRoutesOpen(false)} /> : null}
 
       {error ? (
         <div className="mb-4 flex items-center gap-2 rounded-2xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm font-medium text-danger">

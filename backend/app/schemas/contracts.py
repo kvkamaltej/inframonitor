@@ -1285,6 +1285,57 @@ class GatewayRead(BaseModel):
     environment: str
     enabled: bool
     last_event_at: datetime | None
+    # Optional Kong Admin API + rate-limit Redis control channel (admin-only). Secrets never echoed;
+    # has_* flags say whether one is stored. All-empty = telemetry-only.
+    admin_url: str = ""
+    has_admin_credentials: bool = False
+    admin_verify_tls: bool = False
+    ratelimit_redis_host: str = ""
+    ratelimit_redis_port: int = 6379
+    ratelimit_redis_db: int = 0
+    has_ratelimit_redis_password: bool = False
+    # whether this gateway has enough configured to list/reset routes
+    can_manage_routes: bool = False
+
+
+class GatewayAdminConfig(BaseModel):
+    # Set/clear the Kong Admin API + rate-limit Redis channel for a gateway. Secret fields are applied
+    # only when non-empty (blank keeps the stored value); send the explicit "" sentinels are not used
+    # here — to clear, the UI sends admin_url="" which wipes the channel.
+    admin_url: str = Field(default="", max_length=512)
+    # HTTP Basic "user:pass" for the Admin API proxy; blank keeps the stored one.
+    admin_credentials: str = Field(default="", max_length=512)
+    admin_verify_tls: bool = False
+    ratelimit_redis_host: str = Field(default="", max_length=255)
+    ratelimit_redis_port: int = Field(default=6379, ge=1, le=65535)
+    ratelimit_redis_db: int = Field(default=0, ge=0, le=15)
+    # blank keeps the stored redis password.
+    ratelimit_redis_password: str = Field(default="", max_length=1024)
+
+
+class KongRouteRead(BaseModel):
+    id: str
+    name: str = ""
+    methods: list[str] = Field(default_factory=list)
+    paths: list[str] = Field(default_factory=list)
+    hosts: list[str] = Field(default_factory=list)
+    service: str = ""
+    has_rate_limit: bool = False
+    rate_limit: str = ""      # e.g. "300/min, 5000/hr"
+    limit_by: str = ""        # ip | consumer | credential | ...
+    policy: str = ""
+
+
+class GatewayRouteResetRequest(BaseModel):
+    route_ids: list[str] = Field(default_factory=list)
+
+
+class GatewayRouteResetResult(BaseModel):
+    ok: bool
+    # route_id -> number of rate-limit counter keys deleted
+    deleted: dict[str, int] = Field(default_factory=dict)
+    total_deleted: int = 0
+    message: str = ""
 
 
 class GatewayOverviewRead(BaseModel):

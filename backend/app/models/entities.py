@@ -404,6 +404,19 @@ class Gateway(Base):
     token: Mapped[str] = mapped_column(String(128), unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Optional OUTBOUND control channel (admin feature): Kong's Admin API, for listing configured
+    # routes + their rate-limit plugins and for resetting a route's live rate-limit counter. All
+    # empty = telemetry-only (the default). admin_credentials holds HTTP Basic "user:pass" (the
+    # Admin API is usually behind an nginx basic-auth proxy); admin_verify_tls defaults off for that
+    # proxy's self-signed cert. The rate-limit COUNTERS live in Kong's Redis (policy: redis); reset =
+    # deleting `ratelimit:<route_id>:*` there, so we also store how to reach that Redis.
+    admin_url: Mapped[str] = mapped_column(String(512), default="")
+    encrypted_admin_credentials: Mapped[str] = mapped_column(Text, default="")
+    admin_verify_tls: Mapped[bool] = mapped_column(Boolean, default=False)
+    ratelimit_redis_host: Mapped[str] = mapped_column(String(255), default="")
+    ratelimit_redis_port: Mapped[int] = mapped_column(Integer, default=6379)
+    ratelimit_redis_db: Mapped[int] = mapped_column(Integer, default=0)
+    encrypted_ratelimit_redis_password: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

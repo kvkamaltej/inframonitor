@@ -2182,6 +2182,38 @@ export type GatewaySummary = {
   environment: string;
   enabled: boolean;
   last_event_at: string | null;
+  // optional Kong Admin API + rate-limit Redis control channel (admin-only); secrets never echoed.
+  admin_url: string;
+  has_admin_credentials: boolean;
+  admin_verify_tls: boolean;
+  ratelimit_redis_host: string;
+  ratelimit_redis_port: number;
+  ratelimit_redis_db: number;
+  has_ratelimit_redis_password: boolean;
+  can_manage_routes: boolean;
+};
+
+export type GatewayAdminConfigInput = {
+  admin_url: string;
+  admin_credentials?: string;        // "user:pass"; blank keeps stored
+  admin_verify_tls: boolean;
+  ratelimit_redis_host: string;
+  ratelimit_redis_port: number;
+  ratelimit_redis_db: number;
+  ratelimit_redis_password?: string; // blank keeps stored
+};
+
+export type KongRoute = {
+  id: string;
+  name: string;
+  methods: string[];
+  paths: string[];
+  hosts: string[];
+  service: string;
+  has_rate_limit: boolean;
+  rate_limit: string;   // "300/min, 5000/hr"
+  limit_by: string;
+  policy: string;
 };
 
 // A landing tile: a registered gateway plus its activity in the window.
@@ -2283,4 +2315,23 @@ export async function createGateway(
     method: "POST",
     body: JSON.stringify({ name, environment })
   });
+}
+
+// Configure (or clear) a gateway's Kong Admin API + rate-limit Redis control channel. Admin-only.
+export async function setGatewayAdminConfig(token: string, gatewayId: number, input: GatewayAdminConfigInput): Promise<GatewaySummary> {
+  return request<GatewaySummary>(`/gateway/gateways/${gatewayId}/admin-config`, token, { method: "PUT", body: JSON.stringify(input) });
+}
+
+export async function testGatewayAdmin(token: string, gatewayId: number): Promise<{ ok: boolean; message: string }> {
+  return request(`/gateway/gateways/${gatewayId}/admin-test`, token, { method: "POST" });
+}
+
+// The gateway's configured routes + their rate-limit plugins, from Kong's Admin API.
+export async function getGatewayRoutes(token: string, gatewayId: number): Promise<KongRoute[]> {
+  return request<KongRoute[]>(`/gateway/gateways/${gatewayId}/routes`, token);
+}
+
+// Reset (clear) the live rate-limit counters for the selected routes.
+export async function resetGatewayRoutes(token: string, gatewayId: number, routeIds: string[]): Promise<{ ok: boolean; deleted: Record<string, number>; total_deleted: number; message: string }> {
+  return request(`/gateway/gateways/${gatewayId}/routes/reset`, token, { method: "POST", body: JSON.stringify({ route_ids: routeIds }) });
 }

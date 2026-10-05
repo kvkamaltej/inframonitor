@@ -269,6 +269,41 @@ def _migrate_kube_cluster_columns() -> None:
             conn.execute(text(f"ALTER TABLE kube_clusters ADD COLUMN {name} {ddl_type} DEFAULT {literal}"))
 
 
+# (column name, SQL default) for gateways columns added after the first release: the optional Kong
+# Admin API + rate-limit Redis control channel. All default empty/0/false so an existing gateway
+# stays telemetry-only. Same compile-the-type-from-the-ORM approach as the loops above.
+EXPECTED_GATEWAY_COLUMNS: list[tuple[str, str]] = [
+    ("admin_url", "''"),
+    ("encrypted_admin_credentials", "''"),
+    ("admin_verify_tls", "0"),
+    ("ratelimit_redis_host", "''"),
+    ("ratelimit_redis_port", "6379"),
+    ("ratelimit_redis_db", "0"),
+    ("encrypted_ratelimit_redis_password", "''"),
+]
+
+
+def _migrate_gateway_columns() -> None:
+    from app.models.entities import Gateway
+
+    inspector = inspect(engine)
+    if "gateways" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("gateways")}
+    missing = [entry for entry in EXPECTED_GATEWAY_COLUMNS if entry[0] not in existing]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for name, default in missing:
+            column = Gateway.__table__.columns.get(name)
+            ddl_type = column.type.compile(dialect=engine.dialect) if column is not None else "VARCHAR(255)"
+            literal = default
+            if column is not None and column.type.python_type is bool:
+                truthy = default not in ("0", "false", "False", "")
+                literal = ("true" if truthy else "false") if engine.dialect.name == "postgresql" else ("1" if truthy else "0")
+            conn.execute(text(f"ALTER TABLE gateways ADD COLUMN {name} {ddl_type} DEFAULT {literal}"))
+
+
 # (column name, SQL default) for shell_favorites columns added after the first release: the
 # per-favorite visibility scope and the server it is scoped to. Same compile-the-type-from-the-ORM
 # approach as the loops above.
@@ -652,6 +687,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _migrate_folder_columns()
     _relax_folder_name_unique()
     _migrate_kube_cluster_columns()
+    _migrate_gateway_columns()
     _migrate_shell_favorite_columns()
     _ensure_shell_favorites_unique()
     _backfill_public_ids()
